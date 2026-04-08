@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from src.amr.configs import AERODYNAMIC_CRITERIA
+from src.amr.configs import AERODYNAMIC_CRITERIA_2
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
 from src.data.collate_fn import CollateFn
 from src.data.dataset import CFDDataset
@@ -98,7 +98,7 @@ def main(args=None):
     tokenizer = QuadtreeTokenizer(
         min_depth=args.min_depth,
         max_depth=args.max_depth,
-        refinement_criteria=AERODYNAMIC_CRITERIA,
+        refinement_criteria=AERODYNAMIC_CRITERIA_2,
     )
     collate_fn = CollateFn(tokenizer)
 
@@ -131,7 +131,7 @@ def main(args=None):
     inp0 = first_sample["input"]
     tok_arr, tok_list = tokenizer.tokenize(inp0)
     print(f"Tokens for first sample: {len(tok_list)}")
-    visualize_quadtree_mesh(inp0, tok_list, save_path="mesh_visualisation.png")
+    visualize_quadtree_mesh(inp0, tok_list, save_path="outputs/plots")
     print("Saved mesh_visualisation.png")
 
     # ----------------------------------------------------------------
@@ -144,7 +144,7 @@ def main(args=None):
         device=device,
         d_model=args.d_model,
         warmup_steps=args.warmup_steps,
-        checkpoint_dir="checkpoints",
+        checkpoint_dir="outputs/checkpoints",
     )
 
     # ----------------------------------------------------------------
@@ -154,7 +154,7 @@ def main(args=None):
     result = model.forward_single(inp0_t)
     pred0  = result["prediction"].cpu().numpy()
     gt0    = first_sample["target"]
-    plot_flow_comparison(gt0, pred0, save_path="prediction_comparison.png")
+    plot_flow_comparison(gt0, pred0, save_path="outputs/plots")
     print("Saved prediction_comparison.png")
 
 

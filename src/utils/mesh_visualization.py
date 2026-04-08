@@ -12,9 +12,11 @@ visualize_metric_heatmap : Show a heatmap of a chosen physics metric on the orig
 visualize_patch_features : Reconstruct and display the field from averaged patch features.
 """
 
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 from matplotlib.colors import Normalize
+from matplotlib.figure import Figure
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
@@ -37,7 +39,7 @@ def visualize_mesh(
     figsize: Tuple[int, int] = (10, 6),
     show: bool = True,
     save_path: Optional[str] = None,
-) -> plt.Figure:
+) -> Figure:
     """
     Display a physical field with the adaptive quadtree mesh overlaid.
 
@@ -144,7 +146,7 @@ def visualize_mesh_by_depth(
     max_cols: int = 4,
     show: bool = True,
     save_path: Optional[str] = None,
-) -> plt.Figure:
+) -> Figure:
     """
     Show one subplot per depth level with patches at that depth highlighted.
 
@@ -222,7 +224,7 @@ def visualize_quadtree_mesh(
     figsize: Tuple[float, float] = (9, 7),
     save_path: Optional[str] = None,
     show: bool = False,
-) -> plt.Figure:
+) -> Figure:
     """
     Overlay the adaptive quadtree cell boundaries on top of a heatmap of
     one input channel.
@@ -289,7 +291,7 @@ def visualize_quadtree_mesh(
     # Colourbar for depth
     sm = plt.cm.ScalarMappable(
         cmap=depth_cmap,
-        norm=plt.Normalize(vmin=0, vmax=max_depth)
+        norm=Normalize(vmin=0, vmax=max_depth)
     )
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
@@ -310,7 +312,8 @@ def visualize_quadtree_mesh(
 
     plt.tight_layout()
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        timestamp = datetime.now().strftime("%d_%m_%Y-%H_%M")
+        fig.savefig(f"{save_path}/mesh_visualisation-{timestamp}.png", dpi=150, bbox_inches='tight')
     if show:
         plt.show()
     return fig
@@ -326,7 +329,7 @@ def visualize_metric_heatmap(
     show: bool = True,
     save_path: Optional[str] = None,
     figsize: Tuple[int, int] = (10, 5),
-) -> plt.Figure:
+) -> Figure:
     """
     Reconstruct a 2-D heatmap of a physics metric value per patch.
 
@@ -395,7 +398,7 @@ def visualize_patch_features(
     show: bool = True,
     save_path: Optional[str] = None,
     figsize: Tuple[int, int] = (12, 5),
-) -> plt.Figure:
+) -> Figure:
     """
     Reconstruct the field from averaged patch features and display alongside
     the original field.

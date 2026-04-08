@@ -12,8 +12,10 @@ animate_refinement    : Depth-by-depth animated GIF of the quadtree build (requi
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import numpy as np
 
 from src.amr.quadtree_tokenizer import QuadNode
@@ -29,7 +31,7 @@ def plot_flow_comparison(
     title: str = "Ground truth  vs  Prediction",
     save_path: Optional[str] = None,
     show: bool = False,
-) -> plt.Figure:
+) -> Figure:
     """
     Side-by-side comparison of ground truth and predicted flow fields.
 
@@ -88,7 +90,8 @@ def plot_flow_comparison(
 
     plt.tight_layout()
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        timestamp = datetime.now().strftime("%d_%m_%Y-%H_%M")
+        fig.savefig(f"{save_path}/prediction_comparison-{timestamp}.png", dpi=150, bbox_inches='tight')
     if show:
         plt.show()
     return fig
@@ -104,7 +107,7 @@ def plot_token_statistics(
     title: str = "Token statistics",
     save_path: Optional[str] = None,
     show: bool = False,
-) -> plt.Figure:
+) -> Figure:
     """
     Plot histograms of token counts per sample and (optionally) cell size distribution.
 

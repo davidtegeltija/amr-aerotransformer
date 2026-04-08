@@ -92,7 +92,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     if save_path:
         true_save_path = os.path.join(save_path, "")
         os.makedirs(os.path.dirname(true_save_path), exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H_%M")
+        timestamp = datetime.now().strftime("%d-%m-%Y_%H_%M")
         save_path_mesh = f"{save_path}/01_adaptive_mesh-{timestamp}.png"
         save_path_depth = f"{save_path}/02_mesh_by_depth-{timestamp}.png"
         save_path_velocity_heatmap = f"{save_path}/03_velocity_gradient-{timestamp}.png"

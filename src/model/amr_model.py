@@ -178,9 +178,7 @@ class AdaptiveMeshAeroModel(nn.Module):
         if reconstruct:
             assert grid_shape is not None and token_lists is not None
             H, W = grid_shape
-            grids = batch_tokens_to_grid(
-                preds, token_lists, seq_lens, H, W, self.output_dim, mode=self.recon_mode
-            )
+            grids = batch_tokens_to_grid(preds, token_lists, seq_lens, H, W, self.output_dim, mode=self.recon_mode)
             out["reconstructions"] = grids.to(packed_tokens.device)
 
         return out
