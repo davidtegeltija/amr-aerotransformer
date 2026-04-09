@@ -27,21 +27,21 @@ This installs the minimal dependencies. If you want to speed up training you can
 
 To run the actual training/eval algorithm you can execute the main.py function or call the script directly in the bash. It takes the following parameters
 
-| Parameter   | Description |
-|-------------|------------|
-| `data_dir`  | Directory of your training data |
-| `data_file` | Single `.npz` or `.npy` file with shape `[N, H, W, C]` |
-| `val_split` | Fraction of samples held out for validation (default = 0.1) |
-| `d_model`   |  |
-| `n_layers`  |  |
-| `n_heads`   |  |
-| `min_depth` | Quadtree minimum subdivision depth (default = 2) |
-| `max_depth` | Quadtree maximum subdivision depth (default = 6) |
-| `epochs`    | (default = 100)
-| `batch_size`| (default=8)
+| Parameter     | Description |
+|---------------|-------------|
+| `input_file`  | Single `.npz` or `.npy` file with shape `[N, H, W, C]` |
+| `target_file` | Single `.npz` or `.npy` file with shape `[N, H, W, C]` |
+| `val_split`   | Fraction of samples held out for validation (default = 0.1) |
+| `d_model`     |  |
+| `n_layers`    |  |
+| `n_heads`     |  |
+| `min_depth`   | Quadtree minimum subdivision depth (default = 2) |
+| `max_depth`   | Quadtree maximum subdivision depth (default = 6) |
+| `epochs`      | (default = 100)
+| `batch_size`  | (default=8)
 | `warmup_steps`| (default=4000)
 | `num_workers` | (default=0)
-| `seed`      | (default=42)
+| `seed`        | (default=42)
 
 Example run with synthethic data to verify the pipeline
 
