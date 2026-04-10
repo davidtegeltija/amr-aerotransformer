@@ -27,8 +27,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.amr.configs import AERODYNAMIC_CRITERIA
-from src.amr.physics_metrics import RefinementCriteria, compute_all_metrics
+from src.amr.configs import GEOMETRY_ONLY_COMBINED_CONFIG
+from src.amr.refinement_criteria import RefinementCriteria
 from src.amr.quadtree import QuadNode, collect_leaves
 
 
@@ -75,8 +75,8 @@ def build_adaptive_mesh(
         Root of the quadtree for inspection / visualisation.
     """
     if refinement_criteria is None:
-        refinement_criteria = AERODYNAMIC_CRITERIA
-        
+        refinement_criteria = GEOMETRY_ONLY_COMBINED_CONFIG
+
     # Input validation and layout normalisation
     if data.ndim == 2:
         data = data[:, :, np.newaxis]
@@ -120,7 +120,7 @@ def _build_node(
     -----
     1. Extract the data region for this cell.
     2. Compute mean features for storage.
-    3. Compute physics metrics.
+    3. Compute geometry and physics metrics.
     4. Decide whether to subdivide.
     5. If subdividing: create children and recurse.
     """
@@ -134,14 +134,14 @@ def _build_node(
     # 2. Compute per-channel mean features (Storage AVG step, Fig. 2 of AMR-Transformer)
     node.features = region.mean(axis=(0, 1))  # (C,)
 
-    # 3. Compute physics metrics
-    metrics = compute_all_metrics(region)
+    # 3. Compute only the metrics whose thresholds are enabled
+    metrics = refinement_criteria.compute_enabled_metrics(region)
     node.metrics = metrics
 
     # 4. Check stop conditions
     cell_too_small = (
         node.height // 2 < min_cell_size  or
-        node.width  // 2 < min_cell_size 
+        node.width  // 2 < min_cell_size
     )
     at_max_depth = node.depth >= max_depth
 
@@ -149,7 +149,7 @@ def _build_node(
         node.is_leaf = True
         return
 
-    # 5. Physics-based subdivision decision via RefinementCriteria
+    # 5. Subdivision decision via RefinementCriteria
     if not should_subdivide(region, refinement_criteria, metrics=metrics):
         node.is_leaf = True
         return
@@ -186,27 +186,13 @@ def should_subdivide(
     bool  True -> subdivide this cell.
     """
     if metrics is None:
-        metrics = compute_all_metrics(region)
- 
-    def _thresh(name: str, base: Optional[float]) -> Optional[float]:
-        if base is None:
-            return None
-        return base
- 
-    checks = [
-        ("velocity_gradient", refinement_criteria.grad_threshold),
-        ("vorticity",         refinement_criteria.vorticity_threshold),
-        ("momentum",          refinement_criteria.momentum_threshold),
-        ("kh_shear",          refinement_criteria.kh_shear_threshold),
-        ("variance",          refinement_criteria.variance_threshold),
-        ("entropy",           refinement_criteria.entropy_threshold),
-    ]
- 
-    for metric_name, base_thresh in checks:
-        t = _thresh(metric_name, base_thresh)
-        if t is not None and metrics[metric_name] > t:
+        metrics = refinement_criteria.compute_enabled_metrics(region)
+        
+    for metric_name, threshold in refinement_criteria.threshold_checks():
+        if metrics.get(metric_name, 0.0) > threshold:
             return True
     return False
+
 
 def _extract_region(data: np.ndarray, bbox: Tuple[int, int, int, int]) -> np.ndarray:
     """
@@ -296,4 +282,3 @@ def mesh_statistics(mesh: List[dict]) -> Dict:
         "mean_patch_area":    float(np.mean(areas)),
         "depth_range":        (min(depths), max(depths)),
     }
-

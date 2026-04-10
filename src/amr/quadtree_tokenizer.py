@@ -38,9 +38,9 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
  
-from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.configs import AERODYNAMIC_CRITERIA
-from src.amr.physics_metrics import RefinementCriteria
+from src.amr.refinement_criteria import RefinementCriteria
+from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.quadtree import QuadNode, collect_leaves
 
 

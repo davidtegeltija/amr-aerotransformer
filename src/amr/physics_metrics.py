@@ -12,12 +12,13 @@ The functions return scalar float values indicating "how complex" the
 region is.  Higher values -> more variation -> candidate for subdivision.
 
 Metric catalogue (matching AMR-Transformer paper equations):
-    1.  velocity_gradient  -- ||grad(u)||       (Eq. 2)
-    2.  vorticity          -- |dv/dx - du/dy|   (Eq. 3)
-    3.  momentum           -- |integral(u)|     (Eq. 4)
-    4.  kh_shear           -- |du/dy - dv/dx|   (Eq. 5)
-    5.  variance           -- mean channel variance
-    6.  entropy            -- Shannon entropy
+----------------
+1.  velocity_gradient - ||grad(u)||       (Eq. 2)
+2.  vorticity         - |dv/dx - du/dy|   (Eq. 3)
+3.  momentum          - |integral(u)|     (Eq. 4)
+4.  kh_shear          - |du/dy - dv/dx|   (Eq. 5)
+5.  variance          - mean channel variance
+6.  entropy           - Shannon entropy
 
 Design decisions
 ----------------
@@ -42,8 +43,7 @@ Two ready-made configs are provided as module-level constants:
 
 from __future__ import annotations
  
-from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
  
 import numpy as np
 
@@ -59,14 +59,6 @@ def compute_velocity_gradient(region: np.ndarray) -> float:
 
     For C >= 2, channels 0 and 1 are treated as u and v.
     For C == 1, channel 0 is used for both u and v (reduces to |grad u|).
-
-    Parameters
-    ----------
-    region : (H, W, C)
-
-    Returns
-    ----------
-    float  Mean gradient magnitude in [0, Inf).
     """
     if region.ndim != 3 or region.size == 0:
         return 0.0
@@ -90,14 +82,6 @@ def compute_vorticity(region: np.ndarray) -> float:
         omega = (1/|m|) * integral( |dv/dx - du/dy| dm)
 
     Falls back to gradient magnitude when C == 1.
-
-    Parameters
-    ----------
-    region : (H, W, C)
-
-    Returns
-    ----------
-    float  Mean |vorticity| in [0, Inf).
     """
     if region.ndim != 3 or region.size == 0:
         return 0.0
@@ -121,14 +105,6 @@ def compute_momentum_magnitude(region: np.ndarray) -> float:
     """
     Normalised momentum magnitude per unit area.
         M = (1/|m|) * sqrt( (integral u dm)^2 + (integral v dm)^2 )
-
-    Parameters
-    ----------
-    region : (H, W, C)
-
-    Returns
-    ----------
-    float
     """
     if region.ndim != 3 or region.size == 0:
         return 0.0
@@ -144,14 +120,6 @@ def compute_kelvin_helmholtz_shear(region: np.ndarray) -> float:
     """
     Maximum shear strength associated with KH instability.
         S = max( |du/dy - dv/dx| )
-
-    Parameters
-    ----------
-    region : (H, W, C)
-
-    Returns
-    -------
-    float
     """
     if region.ndim != 3 or region.size == 0:
         return 0.0
@@ -174,14 +142,6 @@ def compute_channel_variance(region: np.ndarray) -> float:
     """
     Mean per-channel variance (averaged across all C channels).
     High variance in any channel indicates heterogeneous physics.
-
-    Parameters
-    ----------
-    region : (H, W, C)
-
-    Returns
-    -------
-    float
     """
     if region.ndim != 3 or region.size == 0:
         return 0.0
@@ -197,15 +157,6 @@ def compute_channel_entropy(region: np.ndarray, bins: int = 64) -> float:
     Mean Shannon entropy of the pixel value distribution (averaged 
     across all C channels). Inspired by the APT paper:
         H = -sum( p_i * log2(p_i) )
-
-    Parameters
-    ----------
-    region : (H, W, C)
-    bins   : number of histogram bins
-
-    Returns
-    -------
-    float  entropy in [0, log2(bins)]
     """
     if region.ndim != 3 or region.size == 0:
         return 0.0
@@ -226,6 +177,7 @@ def compute_channel_entropy(region: np.ndarray, bins: int = 64) -> float:
         ent = -float(np.sum(probs[mask] * np.log2(probs[mask])))
         entropies.append(ent)
 
+    # entropy in [0, log2(bins)]
     return float(np.mean(entropies))
 
 
@@ -257,100 +209,6 @@ def compute_all_metrics(region: np.ndarray) -> Dict[str, float]:
         "variance":          compute_channel_variance(region),
         "entropy":           compute_channel_entropy(region),
     }
-
-
-# ---------------------------------------------------------------------------
-# RefinementCriteria
-# ---------------------------------------------------------------------------
- 
-@dataclass
-class RefinementCriteria:
-    """
-    Thresholds that control which cells get subdivided.
- 
-    Each field corresponds to one physics metric.  Set a field to None to
-    disable that metric entirely (it will not be computed or checked).
- 
-    OR-logic applies: a cell is subdivided if *any* enabled metric exceeds
-    its threshold (Eq. 6 of AMR-Transformer).
- 
-    Fields
-    ------
-    grad_threshold      : velocity gradient magnitude (Eq. 2).
-                          Primary signal for boundary layers, shocks, wakes.
-    vorticity_threshold : vorticity magnitude (Eq. 3).
-                          Detects rotating flow, vortex cores.
-    momentum_threshold  : momentum per unit area (Eq. 4).
-                          Useful for high-speed regions.
-    kh_shear_threshold  : max Kelvin-Helmholtz shear (Eq. 5).
-                          Detects shear-layer instabilities.
-    variance_threshold  : mean per-channel variance.
-                          Generic signal for any kind of local variation.
-    entropy_threshold   : Shannon entropy of value distribution.
-                          Detects information-rich patches regardless of
-                          which physical quantity drives the complexity.
-    use_global_scaling  : if True, each threshold is multiplied by the
-                          domain-wide mean of its metric before comparison
-                          (Eq. 7).  Makes thresholds relative rather than
-                          absolute, useful when field magnitudes are unknown.
-    global_scale_factor : additional multiplier applied on top of global
-                          scaling.  Only used when use_global_scaling=True.
- 
-    Examples
-    --------
-    # Use only velocity gradient and vorticity:
-    cfg = RefinementCriteria(
-        grad_threshold=0.05,
-        vorticity_threshold=0.04,
-        momentum_threshold=None,
-        kh_shear_threshold=None,
-        variance_threshold=None,
-        entropy_threshold=None,
-    )
- 
-    # Coarser mesh (raise all thresholds by 2x):
-    cfg = AERODYNAMIC_CRITERIA.scale(2.0)
-    """
- 
-    grad_threshold:      Optional[float] = 0.08
-    vorticity_threshold: Optional[float] = 0.06
-    momentum_threshold:  Optional[float] = 0.80
-    kh_shear_threshold:  Optional[float] = 0.60
-    variance_threshold:  Optional[float] = 0.02
-    entropy_threshold:   Optional[float] = 2.50
- 
-    def scale(self, factor: float) -> "RefinementCriteria":
-        """
-        Return a new config with all enabled thresholds multiplied by factor.
- 
-        factor < 1.0 -> lower thresholds -> finer mesh (more tokens)
-        factor > 1.0 -> higher thresholds -> coarser mesh (fewer tokens)
-        """
-        def _s(v):
-            return v * factor if v is not None else None
-        return RefinementCriteria(
-            grad_threshold=      _s(self.grad_threshold),
-            vorticity_threshold= _s(self.vorticity_threshold),
-            momentum_threshold=  _s(self.momentum_threshold),
-            kh_shear_threshold=  _s(self.kh_shear_threshold),
-            variance_threshold=  _s(self.variance_threshold),
-            entropy_threshold=   _s(self.entropy_threshold),
-        )
- 
-    def to_kwargs(self) -> Dict:
-        """
-        Return a dict of keyword arguments accepted by build_adaptive_mesh()
-        and should_subdivide().  None-valued thresholds are included so
-        those metrics are explicitly skipped.
-        """
-        return {
-            "grad_threshold":      self.grad_threshold,
-            "vorticity_threshold": self.vorticity_threshold,
-            "momentum_threshold":  self.momentum_threshold,
-            "kh_shear_threshold":  self.kh_shear_threshold,
-            "variance_threshold":  self.variance_threshold,
-            "entropy_threshold":   self.entropy_threshold,
-        }
 
 
 # ---------------------------------------------------------------------------

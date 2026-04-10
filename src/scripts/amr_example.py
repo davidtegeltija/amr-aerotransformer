@@ -193,13 +193,13 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
 
 if __name__ == "__main__":
 
-    from src.amr.configs import AERODYNAMIC_CRITERIA, AERODYNAMIC_CRITERIA_2
+    from src.amr.configs import AERODYNAMIC_CRITERIA, AERODYNAMIC_CRITERIA_2, GEOMETRY_ONLY_COMBINED_CONFIG
     
     # The data we want to the test the algorithm on
-    data = np.load("data/crmmdata.npy")
-    # data = np.load("data/crmmgeom.npy")
+    # data = np.load("data/crmmdata.npy")
+    data = np.load("data/crmmgeom.npy")
 
     # The name of your outputs folder
     save_path = "outputs/plots"
 
-    main(refinement_criteria=AERODYNAMIC_CRITERIA_2, data=data, save_path=save_path)
+    main(refinement_criteria=GEOMETRY_ONLY_COMBINED_CONFIG, data=data, save_path=save_path)

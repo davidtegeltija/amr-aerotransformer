@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 
 from src.amr.configs import AERODYNAMIC_CRITERIA
-from src.amr.physics_metrics import RefinementCriteria
+from src.amr.refinement_criteria import RefinementCriteria
 from src.amr.quadtree_tokenizer import QuadNode, QuadtreeTokenizer
 from src.model.transformer import AeroTransformer
 from src.model.reconstruction import tokens_to_grid, batch_tokens_to_grid
