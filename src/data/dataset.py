@@ -126,36 +126,6 @@ class AeroDataset(Dataset):
             "input":  self._inputs[index],
             "target": self._targets[index],
         }
-    
-
-# ---------------------------------------------------------------------------
-# Data format helper
-# ---------------------------------------------------------------------------
-
-def save_sample_npz(
-    input_array: np.ndarray,
-    target_array: np.ndarray,
-    path: str = "/data",
-) -> None:
-    """
-    Save one CFD sample as a .npz file compatible with AeroDataset.
-
-    Parameters
-    ----------
-    input_array  : [H, W, C]            numpy float32 array
-    target_array : [H, W, output_dim]   numpy float32 array
-    path         : output file path     ("data/train/sample_0000.npz")
-
-    Example
-    -------
-        # Convert from your own format:
-        inputs = np.stack([x_grid, y_grid, aoa_grid, mach_grid], axis=-1)  # [H, W, 4]
-        target = np.stack([u, v, p], axis=-1)                               # [H, W, 3]
-        save_sample_npz(inputs, target, "data/train/sample_0000.npz")
-    """
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, input=input_array, target=target_array)
-    print(f"Saved {path}  (input={input_array.shape}, target={target_array.shape})")
 
 
 
