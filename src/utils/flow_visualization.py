@@ -31,7 +31,7 @@ def plot_flow_comparison(
     save_path: Optional[str] = None,
 ) -> None:
 
-    if ground_truth.shape == prediction.shape:
+    if ground_truth.shape != prediction.shape:
         raise ValueError(f"Shape mismatch: ground_truth={ground_truth.shape} prediction={prediction.shape}")
     
     output_dim = ground_truth.shape[-1]

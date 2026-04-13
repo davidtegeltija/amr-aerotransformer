@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
 
-from src.amr.quadtree_tokenizer import QuadNode
+from src.amr.quadtree import QuadNode
 
 
 def visualize_mesh(
@@ -188,6 +188,10 @@ def visualize_metric_heatmap(
         r0, c0, r1, c1 = patch.bbox[0], patch.bbox[1], patch.bbox[2], patch.bbox[3]
         val = patch.metrics.get(metric_name, np.nan)
         metric_img[r0:r1, c0:c1] = val
+    
+    if np.isnan(metric_img).all():
+        print(f"The plot '{title}' is empty. The mesh was created without this metric: {metric_name}\n")
+        return
 
     fig, axes = plt.subplots(1, 2)
 

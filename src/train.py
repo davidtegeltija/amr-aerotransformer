@@ -56,7 +56,7 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     Attention is All You Need paper.
     """
 
-    def __init__(self, optimizer, d_model: int, warmup_steps: int = 4000):
+    def __init__(self, optimizer, d_model: int, warmup_steps: int = 1000):
         self.d_model = d_model
         self.warmup_steps = warmup_steps
         super().__init__(optimizer)
@@ -150,13 +150,3 @@ def train(
     print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
 
-# ---------------------------------------------------------------------------
-# Validation loop
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
