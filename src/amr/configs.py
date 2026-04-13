@@ -15,6 +15,10 @@ AERODYNAMIC_CRITERIA = RefinementCriteria(
 
 
 AERODYNAMIC_CRITERIA_2 = RefinementCriteria(
+    curvature_threshold=None,
+    le_te_threshold=None,
+    thickness_grad_threshold=None,
+    wall_distance_threshold=None,
     grad_threshold      = 0.15,   # primary: catches shocks, BL, wakes
     vorticity_threshold = 0.10,   # secondary: vortex cores
     momentum_threshold  = 1.20,   # conservative: avoid over-refining fast flow
@@ -72,10 +76,10 @@ AERODYNAMIC_COMBINED_CONFIG = RefinementCriteria(
 
 GEOMETRY_ONLY_COMBINED_CONFIG = RefinementCriteria(
     # geometry defaults
-    curvature_threshold=0.10,
-    le_te_threshold=0.15,
-    thickness_grad_threshold=0.08,
-    wall_distance_threshold=5.00,
+    curvature_threshold=0.001,
+    le_te_threshold=0.005,
+    thickness_grad_threshold=0.001,
+    wall_distance_threshold=1.00,
     # disable physics
     grad_threshold=None,
     vorticity_threshold=None,

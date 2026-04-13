@@ -13,7 +13,7 @@ from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.train import train
 from src.utils.flow_visualization import plot_flow_comparison
-from src.utils.mesh_visualization import visualize_quadtree_mesh
+from src.utils.mesh_visualization import visualize_mesh
 
 def main(args=None):
     parser = argparse.ArgumentParser(
@@ -123,7 +123,7 @@ def main(args=None):
     inp0 = first_sample["input"]
     tok_arr, tok_list = tokenizer.tokenize(inp0)
     print(f"Tokens for first sample: {len(tok_list)}")
-    visualize_quadtree_mesh(inp0, tok_list, save_path="outputs/plots")
+    visualize_mesh(inp0, tok_list, save_path="outputs/plots")
     print("Saved mesh_visualisation.png")
 
     # ----------------------------------------------------------------

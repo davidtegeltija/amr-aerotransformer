@@ -26,7 +26,6 @@ import os
 from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
-# matplotlib.use("Agg")   # Non-interactive backend for scripted runs
 
 from src.data.synthetic_dataset import make_synthetic_field
 from src.amr.adaptive_mesh import build_adaptive_mesh, process_batch, mesh_statistics
@@ -38,11 +37,7 @@ from src.utils.mesh_visualization import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Main demo
-# ---------------------------------------------------------------------------
-
-def main(refinement_criteria=None, data=None, sample_number=None, batch=False, save_path=None):
+def main(refinement_criteria=None, data=None, sample_number=None, batch=False, show_plots=False, save_path=None):
 
     # 1. Generate synthetic batch data
     if data is None:
@@ -87,7 +82,9 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
                 f"depth {st['depth_range'][0]}–{st['depth_range'][1]}")
 
 
+    # ---------------------------------------------------------------------------
     # 4. Visualizations
+    # ---------------------------------------------------------------------------
     print("\n[4] Generating visualizations")
     if save_path:
         true_save_path = os.path.join(save_path, "")
@@ -103,8 +100,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     visualize_mesh(
         sample, mesh,
         title="Adaptive Mesh  (threshold=0.15, max_depth=6)",
-        color_by_depth=True,
-        show=False,
+        show=show_plots,
         save_path=save_path_mesh if save_path is not None else None, # type: ignore
     )
     plt.close("all")
@@ -113,7 +109,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     visualize_mesh_by_depth(
         sample, mesh,
         title="Adaptive Mesh by Depth",
-        show=False,
+        show=show_plots,
         save_path=save_path_depth if save_path is not None else None, # type: ignore
     )
     plt.close("all")
@@ -123,7 +119,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
         sample, mesh,
         metric_name="velocity_gradient",
         title="Velocity Gradient Magnitude per Patch",
-        show=False,
+        show=show_plots,
         save_path=save_path_velocity_heatmap if save_path is not None else None, # type: ignore
     )
     plt.close("all")
@@ -134,7 +130,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
         metric_name="vorticity",
         title="Vorticity Magnitude per Patch",
         cmap="inferno",
-        show=False,
+        show=show_plots,
         save_path=save_path_vorticity_heatmap if save_path is not None else None, # type: ignore
     )
     plt.close("all")
@@ -144,7 +140,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
         sample, mesh,
         channel_idx=0,
         title="AMR Patch Reconstruction  (velocity_x)",
-        show=False,
+        show=show_plots,
         save_path=save_path_reconstruction if save_path is not None else None, # type: ignore
     )
     plt.close("all")
@@ -199,7 +195,8 @@ if __name__ == "__main__":
     # data = np.load("data/crmmdata.npy")
     data = np.load("data/crmmgeom.npy")
 
+    show_plots = False
     # The name of your outputs folder
     save_path = "outputs/plots"
 
-    main(refinement_criteria=GEOMETRY_ONLY_COMBINED_CONFIG, data=data, save_path=save_path)
+    main(refinement_criteria=GEOMETRY_ONLY_COMBINED_CONFIG, data=data, show_plots=show_plots)
