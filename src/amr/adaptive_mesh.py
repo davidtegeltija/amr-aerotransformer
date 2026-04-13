@@ -9,11 +9,11 @@ Combines:
 
 Main public API
 ---------------
-build_adaptive_mesh(data, max_depth, refinement_criteria, ...) -> List[dict]
+build_adaptive_mesh(data, max_depth, refinement_criteria, ...) -> List[QuadNode]
     Takes a single physical field [C, H, W] or [H, W, C] and returns a
-    list of patch dicts representing the leaf cells of the adaptive mesh.
+    flat list of leaf QuadNodes of the adaptive mesh.
 
-process_batch(data, max_depth, refinement_criteria, ...) -> List[List[dict]]
+process_batch(data, max_depth, refinement_criteria, ...) -> List[List[QuadNode]]
     Convenience wrapper that processes each sample in a [B, C, H, W] batch
     independently and returns one mesh list per sample.
 
@@ -41,8 +41,7 @@ def build_adaptive_mesh(
     max_depth: int = 6,
     min_cell_size: int = 4,
     refinement_criteria: Optional[RefinementCriteria] = None,
-    return_tree: bool = False,
-) -> List[dict]:
+) -> List[QuadNode]:
     """
     Build an adaptive mesh over a single physical field.
 
@@ -58,21 +57,11 @@ def build_adaptive_mesh(
         Thresholds controlling subdivision.  Defaults to AERODYNAMIC_CONFIG.
         Use config.scale(factor) to uniformly loosen or tighten the mesh.
         Set individual thresholds to None to disable specific metrics.
-    return_tree : bool
-        If True, also return the QuadNode root for inspection.
 
     Returns
     -------
-    List[dict]
-        One patch dict per leaf node.  Keys:
-            bbox          : (r0, c0, r1, c1)
-            depth         : int
-            mean_features : list[float]  length C
-            center        : (row_center, col_center)
-            size          : (height, width)
-            metrics       : dict[str, float]
-    QuadNode (only if return_tree=True)
-        Root of the quadtree for inspection / visualisation.
+    List[QuadNode]
+        Flat list of leaf nodes representing the adaptive mesh.
     """
     if refinement_criteria is None:
         refinement_criteria = GEOMETRY_ONLY_COMBINED_CONFIG
@@ -95,11 +84,7 @@ def build_adaptive_mesh(
     root = QuadNode(bbox=(0, 0, H, W), depth=0)
     _build_node(data=data, node=root, max_depth=max_depth, min_cell_size=min_cell_size, refinement_criteria=refinement_criteria)
 
-    patches = [leaf.to_patch_dict() for leaf in collect_leaves(root)]
-
-    if return_tree:
-        return patches, root
-    return patches
+    return collect_leaves(root)
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +205,7 @@ def process_batch(
     max_depth: int = 6,
     min_cell_size: int = 4,
     refinement_criteria: Optional[RefinementCriteria] = None,
-) -> List[List[dict]]:
+) -> List[List[QuadNode]]:
     """
     Process a batch of physical fields independently.
 
@@ -233,7 +218,7 @@ def process_batch(
 
     Returns
     -------
-    List[List[dict]]  One mesh per batch element.
+    List[List[QuadNode]]  One mesh per batch element.
     """
     if data.ndim != 4:
         raise ValueError(f"Expected 4-D input [B, C, H, W], got shape {data.shape}")
@@ -248,13 +233,13 @@ def process_batch(
 # Mesh statistics
 # ---------------------------------------------------------------------------
 
-def mesh_statistics(mesh: List[dict]) -> Dict:
+def mesh_statistics(mesh: List[QuadNode]) -> Dict:
     """
     Summary statistics for a generated mesh.
 
     Parameters
     ----------
-    mesh : List[dict]  Output of build_adaptive_mesh.
+    mesh : List[QuadNode]  Output of build_adaptive_mesh.
 
     Returns
     -------
@@ -265,9 +250,9 @@ def mesh_statistics(mesh: List[dict]) -> Dict:
     if not mesh:
         return {}
 
-    depths  = [p["depth"]    for p in mesh]
-    heights = [p["size"][0]  for p in mesh]
-    widths  = [p["size"][1]  for p in mesh]
+    depths  = [p.depth   for p in mesh]
+    heights = [p.height  for p in mesh]
+    widths  = [p.width   for p in mesh]
     areas   = [h * w for h, w in zip(heights, widths)]
 
     depth_dist: Dict[int, int] = {}

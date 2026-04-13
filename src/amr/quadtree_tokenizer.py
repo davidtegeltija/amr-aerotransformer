@@ -41,7 +41,7 @@ import torch
 from src.amr.configs import AERODYNAMIC_CRITERIA
 from src.amr.refinement_criteria import RefinementCriteria
 from src.amr.adaptive_mesh import build_adaptive_mesh
-from src.amr.quadtree import QuadNode, collect_leaves
+from src.amr.quadtree import QuadNode
 
 
 # ---------------------------------------------------------------------------
@@ -99,15 +99,12 @@ class QuadtreeTokenizer:
         assert grid.ndim == 3, f"Expected [H, W, C], got shape {grid.shape}"
         H, W, C = grid.shape
 
-        _, root = build_adaptive_mesh(
+        token_list: List[QuadNode] = build_adaptive_mesh(
             grid,
             max_depth=self.max_depth,
             min_cell_size=self.min_cell_size,
-            refinement_criteria = self.refinement_criteria,
-            return_tree=True,
+            refinement_criteria=self.refinement_criteria,
         )
- 
-        token_list: List[QuadNode] = collect_leaves(root)
 
         # Discard patches from shallower levels
         if self.min_depth > 0:

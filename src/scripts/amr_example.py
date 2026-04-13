@@ -74,7 +74,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
 
     # 3. Process full batch
     if batch:
-        print(f"\n[3] Processing full batch of {data.shape[0]} samples ...")
+        print(f"\n    Processing full batch of {data.shape[0]} samples ...")
         all_meshes = process_batch(data, max_depth=5, refinement_criteria=refinement_criteria)
         for i, m in enumerate(all_meshes):
             st = mesh_statistics(m)
@@ -85,7 +85,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     # ---------------------------------------------------------------------------
     # 4. Visualizations
     # ---------------------------------------------------------------------------
-    print("\n[4] Generating visualizations")
+    print("\n[3] Generating visualizations")
     if save_path:
         true_save_path = os.path.join(save_path, "")
         os.makedirs(os.path.dirname(true_save_path), exist_ok=True)
@@ -114,7 +114,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     )
     plt.close("all")
 
-    # 4c. Velocity gradient heatmap
+    # 4c. Metric heatmap
     visualize_metric_heatmap(
         sample, mesh,
         metric_name="velocity_gradient",
@@ -124,27 +124,17 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     )
     plt.close("all")
 
-    # 4d. Vorticity heatmap
-    visualize_metric_heatmap(
-        sample, mesh,
-        metric_name="vorticity",
-        title="Vorticity Magnitude per Patch",
-        cmap="inferno",
-        show=show_plots,
-        save_path=save_path_vorticity_heatmap if save_path is not None else None, # type: ignore
-    )
-    plt.close("all")
-
     # 4e. Patch feature reconstruction
     visualize_patch_features(
         sample, mesh,
-        channel_idx=0,
+        channel=0,
         title="AMR Patch Reconstruction  (velocity_x)",
         show=show_plots,
         save_path=save_path_reconstruction if save_path is not None else None, # type: ignore
     )
     plt.close("all")
-    print(f"[Done]  All outputs saved to {save_path}")
+    if save_path:
+        print(f"[Done]  All outputs saved to {save_path}")
 
 
     # 5. Demonstrate configurable thresholds
@@ -191,12 +181,11 @@ if __name__ == "__main__":
 
     from src.amr.configs import AERODYNAMIC_CRITERIA, AERODYNAMIC_CRITERIA_2, GEOMETRY_ONLY_COMBINED_CONFIG
     
-    # The data we want to the test the algorithm on
     # data = np.load("data/crmmdata.npy")
     data = np.load("data/crmmgeom.npy")
 
-    show_plots = False
-    # The name of your outputs folder
-    save_path = "outputs/plots"
+    show_plots = True
+    # save_path = "outputs/plots"
+    save_path = None
 
-    main(refinement_criteria=GEOMETRY_ONLY_COMBINED_CONFIG, data=data, show_plots=show_plots)
+    main(refinement_criteria=GEOMETRY_ONLY_COMBINED_CONFIG, data=data, show_plots=show_plots, save_path=save_path, batch=True)
