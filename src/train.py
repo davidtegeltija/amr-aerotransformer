@@ -31,6 +31,7 @@ Usage
 from __future__ import annotations
 
 
+from datetime import datetime
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -39,6 +40,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from src.eval import evaluate, nmse_loss
 from src.model.amr_model import AdaptiveMeshAeroModel
@@ -82,15 +84,11 @@ def train(
     device: torch.device,
     d_model: int = 256,
     warmup_steps: int = 4000,
-    checkpoint_dir: Optional[str] = None,
-    log_every: int = 10,
+    checkpoint_path: Optional[str] = None,
 ):
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
-
-    if checkpoint_dir:
-        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float('inf')
 
@@ -99,54 +97,62 @@ def train(
         epoch_loss = 0.0
         t0 = time.time()
 
-        for step, batch in enumerate(train_loader):
-            packed_tokens  = batch["packed_tokens"].to(device)
-            packed_targets = batch["packed_targets"].to(device)
-            seq_lens       = batch["seq_lens"]
+        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}") as tq_loader:
+            for step, batch in enumerate(tq_loader):
+                packed_tokens  = batch["packed_tokens"].to(device)
+                packed_targets = batch["packed_targets"].to(device)
+                seq_lens       = batch["seq_lens"]
 
-            out = model(packed_tokens, seq_lens)
-            loss = nmse_loss(out["token_preds"], packed_targets)
+                out = model(packed_tokens, seq_lens)
+                loss = nmse_loss(out["token_preds"], packed_targets)
 
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
 
-            epoch_loss += loss.item()
+                epoch_loss += loss.item()
 
-            if (step + 1) % log_every == 0:
+                # Update progress bar postfix every step; log to stdout every log_every steps
                 lr = scheduler.get_last_lr()[0]
-                print(f"  [Epoch {epoch:3d} | Step {step+1:4d}] "
-                      f"loss={loss.item():.6f}  lr={lr:.2e}")
+                tq_loader.set_postfix(loss=f"{loss.item():.6f}", lr=f"{lr:.2e}")
+
+                # if (step + 1) % log_every == 0:
+                #     tqdm.write(f"  [Epoch {epoch:3d} | Step {step+1:4d}] loss={loss.item():.6f}  lr={lr:.2e}")
 
         avg_loss = epoch_loss / len(train_loader)
         elapsed = time.time() - t0
 
-        # ---- Validation ----
+        # Validation 
         val_loss = None
         if val_loader is not None:
             val_loss = evaluate(model, val_loader, device)
-            print(f"Epoch {epoch:3d}/{epochs}  "
-                  f"train_loss={avg_loss:.6f}  val_loss={val_loss:.6f}  "
-                  f"time={elapsed:.1f}s")
+            print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  val_loss={val_loss:.6f}  time={elapsed:.1f}s")
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                if checkpoint_dir:
-                    path = Path(checkpoint_dir) / "best_model.pt"
-                    torch.save(model.state_dict(), path)
-                    print(f"  ✓ Saved best model to {path}")
+                if checkpoint_path:
+                    timestamp = datetime.now().strftime("%d-%m-%Y")
+                    checkpoint_name = f"best_model_{timestamp}.pt"
+                    save_checkpoint(checkpoint_path, checkpoint_name, model)
+                    print(f"  ✓ Saved best model to {checkpoint_name}")
         else:
-            print(f"Epoch {epoch:3d}/{epochs}  "
-                  f"train_loss={avg_loss:.6f}  time={elapsed:.1f}s")
+            print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  time={elapsed:.1f}s")
 
         # Periodic checkpoint
-        if checkpoint_dir and epoch % 50 == 0:
-            path = Path(checkpoint_dir) / f"checkpoint_epoch{epoch:04d}.pt"
-            torch.save({"epoch": epoch, "state_dict": model.state_dict(),
-                        "optimizer": optimizer.state_dict()}, path)
+        if checkpoint_path and epoch % 50 == 0:
+            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
+            save_checkpoint(checkpoint_path, checkpoint_name, model, optimizer, scheduler)
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
 
+def save_checkpoint(checkpoint_path, checkpoint_name, model=None, optimizer=None, scheduler=None):
+    save_path = Path(checkpoint_path) / checkpoint_name
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+    torch.save({
+        "model": model.state_dict() if model else None,
+        "optimizer": optimizer.state_dict() if optimizer else None,
+        "scheduler": scheduler.state_dict() if scheduler else None}, save_path)
