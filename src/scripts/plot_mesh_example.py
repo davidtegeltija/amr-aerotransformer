@@ -18,19 +18,16 @@ if __name__ == "__main__":
     sample = data[0]
     sample = sample.transpose(2, 1, 0)
 
-    patches, root = build_adaptive_mesh(
+    token_list = build_adaptive_mesh(
         sample,
         max_depth=8,
         min_cell_size=2,
         refinement_criteria=AERODYNAMIC_CRITERIA_2,
-        return_tree=True
     )
  
-    token_list = collect_leaves(root)
-
     save_path = "outputs/plots3"
     # save_path = None
 
-    # visualize_mesh(sample, token_list, save_path=save_path)
-    visualize_mesh_by_depth(sample, token_list, save_path=save_path)
+    visualize_mesh(sample, token_list, save_path=save_path)
+    # visualize_mesh_by_depth(sample, token_list, save_path=save_path)
     # visualize_patch_features(sample, token_list, channel=0, save_path=save_path)

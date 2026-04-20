@@ -11,11 +11,9 @@ visualize_metric_heatmap : Show a heatmap of a chosen physics metric on the orig
 visualize_patch_features : Reconstruct and display the field from averaged patch features.
 """
 
-from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from matplotlib.collections import PatchCollection
-from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -23,6 +21,8 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
 
 from src.amr.quadtree import QuadNode
+from src.utils.visualization_utils import _channel_image, _sum_image, _color_map
+
 
 
 def visualize_mesh(
@@ -44,13 +44,10 @@ def visualize_mesh(
     channel_data = _channel_image(sample, channel)
     ax.imshow(channel_data, cmap="viridis", origin="upper")
 
-    # Discrete depth colormap — one distinct color band per depth level
     depths = [p.depth for p in mesh]
     min_d = min(depths) if depths else 0
     max_d = max(depths) if depths else 1
-    n_levels = max_d - min_d + 1
-    depth_cmap = plt.get_cmap("plasma", n_levels)
-    depth_norm = Normalize(vmin=min_d, vmax=max(max_d, min_d + 1))
+    cmap, norm = _color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
 
     # Rectangle overlays
     rects = []
@@ -62,14 +59,11 @@ def visualize_mesh(
         # imshow places pixel (0,0) centered at coordinate 0.5
         rects.append(patches.Rectangle((c0 - 0.5, r0 - 0.5), width, height))
 
-    # PatchCollection is a real mappable — the colorbar attaches directly to the
-    # border rectangles rather than to a dummy object.
-    pc = PatchCollection(rects, cmap=depth_cmap, norm=depth_norm, linewidth=0.75, alpha=1)
+    pc = PatchCollection(rects, cmap=cmap, norm=norm, linewidth=0.75, alpha=1)
     pc.set_array(np.array(depths))
     pc.set_facecolor("none")
     ax.add_collection(pc)
 
-    # Discrete colorbar
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="10%", pad=0.15)
     cbar = fig.colorbar(pc, cax=cax)
@@ -286,39 +280,4 @@ def visualize_patch_features(
         plt.show()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
-def _channel_image(data: np.ndarray, channel_idx: int = 0) -> np.ndarray:
-    """
-    Extract a 2-D image from a physical field for display.
-
-    data : (C, H, W) or (H, W, C) or (H, W)
-    """
-    if data.ndim == 2:
-        return data.astype(float)
-
-    if data.ndim == 3:
-        if data.shape[0] < data.shape[1] and data.shape[0] < data.shape[2]:
-            # (C, H, W)
-            return data[channel_idx].astype(float)
-        else:
-            # (H, W, C)
-            return data[:, :, channel_idx].astype(float)
-
-    raise ValueError(f"Unsupported data shape {data.shape}")
-
-
-def _sum_image(data: np.ndarray) -> np.ndarray:
-    """Sum all channels into a single 2-D image for background display."""
-    if data.ndim == 2:
-        return data.astype(float)
-
-    if data.ndim == 3:
-        if data.shape[0] < data.shape[1] and data.shape[0] < data.shape[2]:
-            return data.sum(axis=0).astype(float)
-        else:
-            return data.sum(axis=2).astype(float)
-
-    raise ValueError(f"Unsupported data shape {data.shape}")
