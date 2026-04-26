@@ -9,6 +9,7 @@ visualize_mesh           : Overlay the adaptive quadtree mesh on a 2D grid chann
 visualize_mesh_by_depth  : Show one subplot per depth level with patches at that depth highlighted.
 visualize_metric_heatmap : Show a heatmap of a chosen physics metric on the original grid.
 visualize_patch_features : Reconstruct and display the field from averaged patch features.
+visualize_score_map      : Render a per-pixel refinement score as a heatmap (optionally over geometry).
 """
 
 from typing import List, Optional
@@ -47,7 +48,7 @@ def visualize_mesh(
     depths = [p.depth for p in mesh]
     min_d = min(depths) if depths else 0
     max_d = max(depths) if depths else 1
-    cmap, norm = _color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
+    cmap, norm, _ = _color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
 
     # Rectangle overlays
     rects = []
@@ -280,4 +281,70 @@ def visualize_patch_features(
         plt.show()
 
 
+def visualize_score_map(
+    score_map: np.ndarray,
+    geometry: Optional[np.ndarray] = None,
+    *,
+    cmap: str = "viridis",
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    title: str = "Per-Pixel Refinement Score Map",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
 
+    if score_map.ndim != 2:
+        raise ValueError(f"score_map must be 2-D (H, W); got shape {score_map.shape}")
+
+    H, W = score_map.shape
+    fig, ax = plt.subplots(figsize=(6, 6 * H / max(W, 1)))
+
+    heatmap_alpha = 1.0
+    if geometry is not None:
+        if geometry.ndim != 3 or geometry.shape[-1] < 3:
+            raise ValueError(
+                f"geometry must be [H, W, 3] with xyz channels; got shape {geometry.shape}"
+            )
+        bg = geometry[..., 2].astype(float)
+        ax.imshow(bg, cmap="gray", origin="upper", alpha=0.3, aspect="auto")
+        heatmap_alpha = 0.7
+
+    im = ax.imshow(score_map, cmap=cmap, vmin=vmin, vmax=vmax, origin="upper", alpha=heatmap_alpha, aspect="auto")
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.15)
+    fig.colorbar(im, cax=cax, label="Score")
+
+    ax.set_title(title)
+    ax.set_xlabel("Column")
+    ax.set_ylabel("Row")
+
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"[visualization] Saved → {save_path}")
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+if __name__ == "__main__":
+    import os
+
+    H, W = 256, 128
+    rows = np.arange(H).reshape(H, 1)
+    cols = np.arange(W).reshape(1, W)
+    r0, c0 = H / 2, W / 2
+    sigma_r, sigma_c = H / 6, W / 6
+    score_map = np.exp(
+        -(((rows - r0) ** 2) / (2 * sigma_r ** 2) + ((cols - c0) ** 2) / (2 * sigma_c ** 2))
+    )
+    score_map = score_map.astype(np.float32)
+
+    save_path = os.path.join("outputs", "phase2_score_map_test.png")
+    ax = visualize_score_map(score_map, title="synthetic")
+    ax.figure.savefig(save_path, dpi=150, bbox_inches="tight")
+    print(f"[visualization] Saved -> {save_path}")

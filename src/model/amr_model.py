@@ -1,31 +1,32 @@
 """
 ========================================================================
-Full pipeline: 
-grid -> tokenizer -> transformer -> reconstruction -> predicted field
+Full pipeline:
+grid -> RefinementNet scorer -> score-guided quadtree -> transformer
 ========================================================================
 
-    grid_input [H, W, C]
-      ↓ QuadNode
-    adaptive tokens [N, C+4]
-      ↓ AdaptiveMeshTransformer
-    token predictions [N, output_dim]
-      ↓ tokens_to_grid
-    predicted flow field [H, W, output_dim]
+    grid_input [B, H, W, C]
+      ↓ RefinementNet (CNN scorer)
+    score_map [B, 1, H, W]
+      ↓ build_learned_adaptive_mesh (Gumbel-ST quadtree)
+    leaves + soft_N
+      ↓ inline token packing
+    packed_tokens [total_N, C+4]
+      ↓ AeroTransformer
+    token predictions [total_N, output_dim]
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 
-from src.amr.configs import AERODYNAMIC_CRITERIA
+from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.refinement_criteria import RefinementCriteria
-from src.amr.quadtree_tokenizer import QuadNode, QuadtreeTokenizer
+from src.amr.learned_adaptive_mesh import build_learned_adaptive_mesh
+from src.model.refinement_net import RefinementNet
 from src.model.transformer import AeroTransformer
-from src.model.reconstruction import tokens_to_grid, batch_tokens_to_grid
 
 
 # ---------------------------------------------------------------------------
@@ -36,24 +37,25 @@ class AdaptiveMeshAeroModel(nn.Module):
     """
     End-to-end steady aerodynamic flow-field predictor.
 
-    The tokenizer runs on CPU (numpy arrays) since quadtree traversal is
-    a sequential recursive algorithm. The transformer runs on GPU/CUDA.
+    A RefinementNet CNN emits a per-pixel importance map on GPU; a per-sample
+    score-guided quadtree (CPU, Gumbel-Softmax straight-through) turns that
+    map into leaf QuadNodes, which are packed inline into the same [N, C+4]
+    token layout the transformer expects.
 
     Parameters
     ----------
-    input_channels  : C - number of physical input channels
-    output_dim      : number of predicted quantities (e.g. 3 for u, v, p)
-    d_model         : transformer hidden dimension
-    n_layers        : number of transformer encoder layers
-    n_heads         : number of attention heads
-    d_ff            : feedforward dimension
-    dropout         : dropout probability
-    min_depth       : quadtree minimum depth
-    max_depth       : quadtree maximum depth
-    min_cell_size   : minimum cell size in pixels
-    criterion       : optional custom RefinementCriterion
-                      (default: aerodynamic composite criterion)
-    recon_mode      : "fill" or "interp" - reconstruction mode
+    input_channels      : C - number of physical input channels
+    output_dim          : number of predicted quantities (e.g. 3 for u, v, p)
+    d_model             : transformer hidden dimension
+    n_layers            : number of transformer encoder layers
+    n_heads             : number of attention heads
+    d_ff                : feedforward dimension
+    dropout             : dropout probability
+    min_depth           : quadtree minimum depth
+    max_depth           : quadtree maximum depth
+    min_cell_size       : minimum cell size in pixels
+    refinement_mode     : "learned" or "deterministic"
+    refinement_criteria : optional custom RefinementCriterion (refinement_mode == 'deterministic')
     """
 
     def __init__(
@@ -68,21 +70,35 @@ class AdaptiveMeshAeroModel(nn.Module):
         min_depth: int = 2,
         max_depth: int = 6,
         min_cell_size: int = 4,
-        criterion: Optional[RefinementCriteria] = None,
-        recon_mode: str = "fill",
+        refinement_mode: Literal["learned", "deterministic"] = "learned",
+        refinement_criteria: Optional[RefinementCriteria] = None,
     ):
         super().__init__()
+        if refinement_mode not in ("learned", "deterministic"):
+            raise ValueError(
+                f"refinement_mode must be 'learned' or 'deterministic', got {refinement_mode!r}"
+            )
+        
+        if refinement_mode == "deterministic" and refinement_criteria is None:
+            raise ValueError(
+                "refinement_mode='deterministic' requires a non-None refinement_criteria."
+            )
+
         self.input_channels = input_channels
         self.output_dim = output_dim
-        self.recon_mode = recon_mode
+        self.min_depth = min_depth
+        self.max_depth = max_depth
+        self.min_cell_size = min_cell_size
+        self.refinement_mode = refinement_mode
+        self.refinement_criteria = refinement_criteria
 
-        # --- Tokenizer (not a trainable nn.Module) ---
-        self.tokenizer = QuadtreeTokenizer(
-            min_depth=min_depth,
-            max_depth=max_depth,
-            min_cell_size=min_cell_size,
-            refinement_criteria=criterion or AERODYNAMIC_CRITERIA,
-        )
+        # --- CNN scorer (drives score-guided subdivision) ---
+        # Only instantiated in learned mode; deterministic mode has no scorer.
+        if refinement_mode == "learned":
+            self.scorer = RefinementNet(input_channels=input_channels)
+        else:
+            self.scorer = None
+        self.tau = 1.0  # Gumbel-Softmax temperature; unused in deterministic mode.
 
         # --- Transformer solver ---
         token_dim = input_channels + 4  # C + (x_c, y_c, s, d_norm)
@@ -97,112 +113,120 @@ class AdaptiveMeshAeroModel(nn.Module):
         )
 
     # ------------------------------------------------------------------
-    # Single-sample forward (inference / testing)
+    # Batched forward (training/eval)
     # ------------------------------------------------------------------
 
-    def forward_single(
-        self,
-        grid: torch.Tensor,
-        return_tokens: bool = False,
-    ) -> Dict:
+    def forward(self, *args, **kwargs):
         """
-        Parameters
-        ----------
-        grid         : [H, W, C] tensor (on any device)
-        return_tokens: if True, also return intermediate token tensors
-
-        Returns
-        -------
-        Dict with keys:
-            "prediction"   : [H, W, output_dim] reconstructed flow field
-            "token_preds"  : [N, output_dim]  (if return_tokens)
-            "token_list"   : List[QuadtreeToken] (if return_tokens)
-            "seq_len"      : N
+        Dispatch by refinement_mode:
+          deterministic: forward(packed_tokens, seq_lens)  — tokens pre-built by DeterministicCollateFn
+          learned:       forward(grids)                    — grids [B, H, W, C], tokenization happens inside
         """
-        H, W, C = grid.shape
-        device = grid.device
+        if self.refinement_mode == "deterministic":
+            return self._forward_deterministic(*args, **kwargs)
+        else:
+            return self._forward_learned(*args, **kwargs)
 
-        # 1. Tokenize (on CPU)
-        grid_np = grid.cpu().numpy()
-        token_arr_np, token_list = self.tokenizer.tokenize(grid_np)
-        token_tensor = torch.from_numpy(token_arr_np).to(device)  # [N, C+4]
-        N = token_tensor.shape[0]
-
-        # 2. Transformer prediction
-        preds = self.transformer(token_tensor, seq_lens=[N])  # [N, output_dim]
-
-        # 3. Reconstruct
-        recon = tokens_to_grid(preds, token_list, H, W, self.output_dim, mode=self.recon_mode)
-        recon = recon.to(device)
-
-        out = {"prediction": recon, "seq_len": N}
-        if return_tokens:
-            out["token_preds"] = preds
-            out["token_list"]  = token_list
-        return out
-
-    # ------------------------------------------------------------------
-    # Batched forward (training) - sequence packing
-    # ------------------------------------------------------------------
-
-    def forward(
-        self,
-        packed_tokens: torch.Tensor,
-        seq_lens: List[int],
-        grid_shape: Optional[Tuple[int, int]] = None,
-        reconstruct: bool = False,
-        token_lists: Optional[List[List[QuadNode]]] = None,
-    ) -> Dict:
+    def _forward_deterministic(self, packed_tokens, seq_lens):
         """
-        Batched forward with pre-tokenized, packed inputs.
-
-        Parameters
-        ----------
-        packed_tokens : [total_N, C+4]  - concatenated tokens of all samples
-        seq_lens      : List[int]        - per-sample token counts
-        grid_shape    : (H, W)           - required if reconstruct=True
-        reconstruct   : if True, reconstruct full grids
-        token_lists   : List of token lists per sample (required if reconstruct=True)
-
-        Returns
-        -------
-        Dict with keys:
-            "token_preds"    : [total_N, output_dim]
-            "reconstructions": [B, H, W, output_dim]  (if reconstruct=True)
-        """
-        # Transformer prediction on packed sequence
-        preds = self.transformer(packed_tokens, seq_lens)  # [total_N, output_dim]
-
-        out = {"token_preds": preds}
-
-        if reconstruct:
-            assert grid_shape is not None and token_lists is not None
-            H, W = grid_shape
-            grids = batch_tokens_to_grid(preds, token_lists, seq_lens, H, W, self.output_dim, mode=self.recon_mode)
-            out["reconstructions"] = grids.to(packed_tokens.device)
-
-        return out
-
-    # ------------------------------------------------------------------
-    # Convenience: full single-sample pipeline from numpy
-    # ------------------------------------------------------------------
-
-    @torch.no_grad()
-    def predict(self, grid_np: np.ndarray) -> np.ndarray:
-        """
-        Full inference from numpy input to numpy output.
+        Tokens were already built in the collate function.
+        Forward pass is just the transformer.
 
         Args:
-            grid_np: [H, W, C] numpy array
+            packed_tokens : [total_N, C+4]  - concatenated tokens of all samples
+            seq_lens      : List[int]        - per-sample token counts
 
         Returns:
-            [H, W, output_dim] numpy array
+            Dict with keys:
+                token_preds: [total_N, output_dim]
+                score_map:   None  (no scorer in this mode)
+                soft_N:      None  (no budget loss in this mode)
+                seq_lens:    List[int] (len B)
+                token_lists: None  (targets are pre-averaged by DeterministicCollateFn)
         """
-        self.eval()
-        device = next(self.parameters()).device
-        grid_t = torch.from_numpy(grid_np.astype(np.float32)).to(device)
-        result = self.forward_single(grid_t)
-        return result["prediction"].cpu().numpy()
+        preds = self.transformer(packed_tokens, seq_lens)
+
+        return {
+            "token_preds": preds,
+            "score_map":   None,
+            "soft_N":      None,
+            "seq_lens":    seq_lens,
+            "token_lists": None,
+        }
+
+    def _forward_learned(self, grids):
+        """
+        Scorer → tree → transformer, all in forward for gradient flow.
+
+        Args:
+            grids: [B, H, W, C] float32 input geometry, channel-last.
+
+        Returns:
+            Dict with keys:
+                token_preds: [total_N, output_dim] from the transformer
+                score_map:   [B, 1, H, W] raw CNN output (kept attached for L_smooth)
+                soft_N:      0-dim differentiable tensor = mean-over-batch soft_N
+                seq_lens:    List[int] (len B), tokens per sample
+                token_lists: List[List[QuadNode]] (len B)
+        """
+        B, H, W, C = grids.shape
+        device = grids.device
+
+        # 1. Score map (GPU)
+        geom = grids.permute(0, 3, 1, 2).contiguous()
+        score_map = self.scorer(geom)                    # [B, 1, H, W]
+
+        # 2. Build trees (CPU, per-sample — unavoidable)
+        score_np  = score_map.squeeze(1).detach().cpu().numpy()
+        score_cpu = score_map.squeeze(1).cpu()
+        grids_np  = grids.detach().cpu().numpy()
+
+        all_tokens: List[torch.Tensor] = []
+        seq_lens: List[int]            = []
+        token_lists: List[List]        = []
+        soft_Ns: List[torch.Tensor]    = []
+
+        for b in range(B):
+            leaves, soft_N_b = build_learned_adaptive_mesh(
+                data=grids_np[b],
+                score_map=score_np[b],
+                score_tensor=score_cpu[b],
+                max_depth=self.max_depth,
+                min_depth=self.min_depth,
+                min_cell_size=self.min_cell_size,
+                training=self.training,
+                tau=self.tau,
+            )
+            tokens = self._pack_tokens(leaves, H, W, C)
+            all_tokens.append(tokens)
+            seq_lens.append(len(leaves))
+            token_lists.append(leaves)
+            soft_Ns.append(soft_N_b)
+
+        packed = torch.cat(all_tokens, dim=0).to(device)
+        preds = self.transformer(packed, seq_lens)
+        soft_N_mean = torch.stack(soft_Ns).mean().to(device)
+
+        return {
+            "token_preds": preds,
+            "score_map":   score_map,
+            "soft_N":      soft_N_mean,
+            "seq_lens":    seq_lens,
+            "token_lists": token_lists,
+        }
+
+    def _pack_tokens(self, leaves, H, W, C):
+        """Extract the token-packing loop into a reusable method."""
+        N = len(leaves)
+        tokens = torch.zeros(N, C + 4, dtype=torch.float32)
+        for i, leaf in enumerate(leaves):
+            r0, c0, r1, c1 = leaf.bbox
+            tokens[i, :C]     = torch.from_numpy(leaf.features)
+            tokens[i, C]      = (c0 + c1) / 2.0 / W
+            tokens[i, C + 1]  = (r0 + r1) / 2.0 / H
+            tokens[i, C + 2]  = max((c1 - c0) / W, (r1 - r0) / H)
+            tokens[i, C + 3]  = leaf.depth / self.max_depth
+        return tokens
 
     # ------------------------------------------------------------------
     # Parameter count

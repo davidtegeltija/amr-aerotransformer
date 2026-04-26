@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import numpy as np
 import torch
@@ -6,7 +6,7 @@ import torch
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
 
 
-class CollateFn:
+class DeterministicCollateFn:
     """
     Picklable collate callable for DataLoader with num_workers > 0.
  
@@ -63,3 +63,12 @@ class CollateFn:
             "grid_targets":   torch.stack(grid_targets, dim=0),
             "grid_shape":     (H, W),
         }
+
+class LearnedCollateFn:
+    """Stacks per-sample input/target grids into a batch. No tokenization."""
+
+    def __call__(self, samples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        grids = torch.stack([torch.from_numpy(np.asarray(s["input"], dtype=np.float32)) for s in samples])   # [B, H, W, C]
+        targets = torch.stack([torch.from_numpy(np.asarray(s["target"], dtype=np.float32)) for s in samples])   # [B, H, W, output_dim]
+
+        return {"grids": grids, "targets": targets}

@@ -1,19 +1,18 @@
 import argparse
+import os
 import sys
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from src.amr.configs import AERODYNAMIC_CRITERIA_2
+from src.amr.configs import CRITERIA_REGISTRY
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
-from src.data.collate_fn import CollateFn
+from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn
 from src.data.dataset import AeroDataset
 from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.train import train
-from src.utils.flow_visualization import plot_flow_comparison
-from src.utils.mesh_visualization import visualize_mesh
+from src.train import train_deterministic_mesh, train_learned_mesh_p1, train_learned_mesh_p2
 
 def main(args=None):
     parser = argparse.ArgumentParser(
@@ -47,6 +46,13 @@ def main(args=None):
                         help="Quadtree minimum subdivision depth (default: 2)")
     parser.add_argument("--max_depth", type=int, default=6,
                         help="Quadtree maximum subdivision depth (default: 6)")
+    parser.add_argument("--refinement_mode", choices=["learned", "deterministic"], default="deterministic",
+                        help="Mesh-refinement policy. 'learned' uses the RefinementNet "
+                            "scorer + build_learned_adaptive_mesh. 'deterministic' (default) uses physics/"
+                            "geometry thresholds via build_adaptive_mesh and --refinement_criteria.")
+    parser.add_argument("--refinement_criteria", type=str, default="AERODYNAMIC_CRITERIA_2",
+                        help="Name of preset in src/amr/configs.py (see CRITERIA_REGISTRY). "
+                            "Used only when --refinement_mode deterministic.")
 
     # ---- Training ----
     parser.add_argument("--epochs",       type=int,   default=100)
@@ -55,7 +61,30 @@ def main(args=None):
     parser.add_argument("--num_workers",  type=int,   default=0)
     parser.add_argument("--seed",         type=int,   default=42)
 
+    # ---- Phase 1 / Phase 2 learned-scorer training ----
+    parser.add_argument("--phase", type=int, choices=[1, 2], default=None,
+                        help="Training phase 1: scorer only (transformer frozen), "
+                            "Training phase 2: scorer + transformer")
+    parser.add_argument("--checkpoint", type=str, default=None, 
+                        help="Path to a checkpoint to load BEFORE training. For --phase 1 this "
+                        "should be a pretrained-transformer checkpoint. For --phase 2 this "
+                        "should be a trained-scorer checkpoint from phase 2.")
+    parser.add_argument("--phase1_epochs", type=int, default=50)
+    parser.add_argument("--phase2_epochs", type=int, default=30)
+    parser.add_argument("--lambda_budget", type=float, default=0.01)
+    parser.add_argument("--lambda_smooth", type=float, default=0.001)
+    parser.add_argument("--tau_start_phase2", type=float, default=5.0)
+    parser.add_argument("--tau_end_phase2",   type=float, default=0.5)
+    parser.add_argument("--tau_start_phase3", type=float, default=0.5)
+    parser.add_argument("--tau_end_phase3",   type=float, default=0.1)
+    parser.add_argument("--scorer_lr",      type=float, default=1e-3)
+    parser.add_argument("--transformer_lr", type=float, default=1e-4)
+    parser.add_argument("--n_max", type=int, default=8192,
+                        help="Max possible token count used to normalize L_budget. Default 8192 for the 256x128 grid.")
+
     args = parser.parse_args(args)
+
+    os.makedirs("outputs", exist_ok=True)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -84,15 +113,17 @@ def main(args=None):
         n_val   = max(1, int(args.val_split * len(dataset)))
         train_dataset, val_dataset = random_split(dataset, [len(dataset) - n_val, n_val], generator=torch.Generator().manual_seed(args.seed),)
     # ----------------------------------------------------------------
-    # Tokenizer & collate
+    # Collate (tokenization now happens inside the model)
     # ----------------------------------------------------------------
-    tokenizer = QuadtreeTokenizer(
-        min_depth=args.min_depth,
-        max_depth=args.max_depth,
-        refinement_criteria=AERODYNAMIC_CRITERIA_2,
-    )
-    
-    collate_fn = CollateFn(tokenizer)
+    if  args.refinement_mode == "deterministic":
+        tokenizer = QuadtreeTokenizer(
+            min_depth=args.min_depth,
+            max_depth=args.max_depth,
+            refinement_criteria=CRITERIA_REGISTRY[args.refinement_criteria],
+        )
+        collate_fn = DeterministicCollateFn(tokenizer)
+    else:
+        collate_fn = LearnedCollateFn()
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.num_workers, collate_fn=collate_fn,
@@ -105,6 +136,18 @@ def main(args=None):
     # Model
     # ----------------------------------------------------------------
     print("\n====== Model ======")
+    if args.refinement_mode == "deterministic":
+        try:
+            criteria = CRITERIA_REGISTRY[args.refinement_criteria]
+        except KeyError:
+            valid = ", ".join(sorted(CRITERIA_REGISTRY))
+            raise SystemExit(
+                f"Unknown --refinement_criteria {args.refinement_criteria!r}. "
+                f"Valid presets: {valid}"
+            )
+    else:
+        criteria = None
+
     model = AdaptiveMeshAeroModel(
         input_channels=input_channels,
         output_dim=output_dim,
@@ -114,40 +157,80 @@ def main(args=None):
         d_ff=args.d_ff,
         min_depth=args.min_depth,
         max_depth=args.max_depth,
+        refinement_mode=args.refinement_mode,
+        refinement_criteria=criteria,
     )
     print(f"Model parameters: {model.count_parameters():,}")
 
     # ----------------------------------------------------------------
-    # Visualise mesh on first sample before training
+    # Optional checkpoint load
     # ----------------------------------------------------------------
-    inp0 = first_sample["input"]
-    tok_arr, tok_list = tokenizer.tokenize(inp0)
-    print(f"Tokens for first sample: {len(tok_list)}")
-    visualize_mesh(inp0, tok_list, save_path="outputs/plots")
-    print("Saved mesh_visualisation.png")
+    if args.checkpoint is not None:
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+
+        # Allow partial loads: phase 2 starts from a transformer-only checkpoint
+        # (no scorer weights yet), so strict=False is the right default here.
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print(f"Loaded checkpoint {args.checkpoint}")
+        print(f"  missing keys:    {len(missing)} (expected: scorer.* on first phase-2 run)")
+        print(f"  unexpected keys: {len(unexpected)} (should be 0 or near 0)")
+    elif args.phase == 2:
+        print("WARNING: --phase 2 invoked without --checkpoint. "
+              "Starting from a RANDOMLY-INITIALIZED transformer - useful for "
+              "smoke tests only, not a real phase-2 run.")
+    elif args.phase == 3:
+        raise SystemExit(
+            "--phase 3 requires --checkpoint pointing to a phase-2 scorer "
+            "checkpoint (e.g. outputs/phase2_scorer.pt)."
+        )
 
     # ----------------------------------------------------------------
     # Train
     # ----------------------------------------------------------------
     print("\n====== Training ======")
-    train(
-        model, train_loader, val_loader,
-        epochs=args.epochs,
-        device=device,
-        d_model=args.d_model,
-        warmup_steps=args.warmup_steps,
-        checkpoint_dir="outputs/checkpoints",
-    )
+    if args.refinement_mode == "deterministic" and args.phase in {2, 3}:
+        raise SystemExit(
+            "Deterministic mesh is incompatible with --phase 2/3 "
+            "(no scorer to train). Use the legacy train() path by omitting --phase."
+        )
 
-    # ----------------------------------------------------------------
-    # Visualise predictions on first sample after training
-    # ----------------------------------------------------------------
-    inp0_t = torch.from_numpy(inp0).to(device)
-    result = model.forward_single(inp0_t)
-    pred0  = result["prediction"].cpu().numpy()
-    gt0    = first_sample["target"]
-    plot_flow_comparison(gt0, pred0, save_path="outputs/plots")
-    print("Saved prediction_comparison.png")
+    model = model.to(device)
+
+    if args.phase == 1:
+        train_learned_mesh_p1(
+            model, train_loader, val_loader, device,
+            phase2_epochs=args.phase2_epochs,
+            lambda_budget=args.lambda_budget,
+            lambda_smooth=args.lambda_smooth,
+            tau_start=args.tau_start_phase2,
+            tau_end=args.tau_end_phase2,
+            scorer_lr=args.scorer_lr,
+            n_max=args.n_max,
+            save_path="outputs/phase2_scorer.pt",
+        )
+    elif args.phase == 2:
+        train_learned_mesh_p2(
+            model, train_loader, val_loader, device,
+            phase3_epochs=args.phase3_epochs,
+            lambda_budget=args.lambda_budget,
+            lambda_smooth=args.lambda_smooth,
+            tau_start=args.tau_start_phase3,
+            tau_end=args.tau_end_phase3,
+            scorer_lr=args.scorer_lr,
+            transformer_lr=args.transformer_lr,
+            n_max=args.n_max,
+            save_path="outputs/phase3_joint.pt",
+        )
+    else:
+        train_deterministic_mesh(
+            model, train_loader, val_loader,
+            epochs=args.epochs,
+            device=device,
+            d_model=args.d_model,
+            warmup_steps=args.warmup_steps,
+            checkpoint_path="outputs/checkpoints",
+        )
 
 
 if __name__ == "__main__":

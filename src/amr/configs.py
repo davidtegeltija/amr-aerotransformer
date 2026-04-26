@@ -1,6 +1,8 @@
 # higher threshold = fewer patches
 # lower threshold  = more patches
 
+from typing import Dict
+
 from src.amr.refinement_criteria import RefinementCriteria
 
 
@@ -88,3 +90,15 @@ GEOMETRY_ONLY_COMBINED_CONFIG = RefinementCriteria(
     variance_threshold=None,
     entropy_threshold=None,
 )
+
+
+CRITERIA_REGISTRY: Dict[str, RefinementCriteria] = {
+    "AERODYNAMIC_CRITERIA":          AERODYNAMIC_CRITERIA,
+    "AERODYNAMIC_CRITERIA_2":        AERODYNAMIC_CRITERIA_2,
+    "DEFAULT_CRITERIA":              DEFAULT_CRITERIA,
+    "FIRST_DEFAULT_CRITERIA":        FIRST_DEFAULT_CRITERIA,
+    "GEOMETRY_DEFAULT_CONFIG":       GEOMETRY_DEFAULT_CONFIG,
+    "GEOMETRY_FINE_CONFIG":          GEOMETRY_FINE_CONFIG,
+    "AERODYNAMIC_COMBINED_CONFIG":   AERODYNAMIC_COMBINED_CONFIG,
+    "GEOMETRY_ONLY_COMBINED_CONFIG": GEOMETRY_ONLY_COMBINED_CONFIG,
+}
