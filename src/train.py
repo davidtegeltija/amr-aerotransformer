@@ -45,11 +45,11 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from src.eval import evaluate, nmse_loss
+from src.model.loss import nmse_loss, smooth_loss, budget_loss
+from src.eval import evaluate
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.train_utils import (
+from src.utils.train_utils import (
     average_targets_per_token,
-    compute_smooth_loss,
     save_checkpoint,
     tau_schedule,
 )
@@ -192,8 +192,8 @@ def train_learned_mesh_p1(
 
     Loss per step:
         L = nmse_loss(preds, packed_targets)
-            + lambda_budget * (soft_N / n_max) ** 2
-            + lambda_smooth * compute_smooth_loss(score_map)
+            + lambda_budget * budget_loss(soft_N, n_max)
+            + lambda_smooth * smooth_loss(score_map)
 
     Writes the best (lowest val_loss) model state_dict to `save_path`.
     """
@@ -237,8 +237,8 @@ def train_learned_mesh_p1(
             packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
 
             L_pred   = nmse_loss(out["token_preds"], packed_targets)
-            L_budget = (out["soft_N"] / n_max) ** 2
-            L_smooth = compute_smooth_loss(out["score_map"])
+            L_budget = budget_loss(out["soft_N"], n_max)
+            L_smooth = smooth_loss(out["score_map"])
 
             loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
 
@@ -329,8 +329,8 @@ def train_learned_mesh_p2(
     - Tau anneals tau_start -> tau_end across phase3_epochs.
 
     Loss is identical to phase2:
-        L = nmse_loss + lambda_budget * (soft_N / n_max)^2
-                      + lambda_smooth * compute_smooth_loss(score_map)
+        L = nmse_loss + lambda_budget * budget_loss(soft_N, n_max)
+                      + lambda_smooth * smooth_loss(score_map)
 
     Writes the best (lowest val_loss) model state_dict to `save_path`.
     """
@@ -373,8 +373,8 @@ def train_learned_mesh_p2(
             packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
 
             L_pred   = nmse_loss(out["token_preds"], packed_targets)
-            L_budget = (out["soft_N"] / n_max) ** 2
-            L_smooth = compute_smooth_loss(out["score_map"])
+            L_budget = budget_loss(out["soft_N"], n_max)
+            L_smooth = smooth_loss(out["score_map"])
 
             loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
 

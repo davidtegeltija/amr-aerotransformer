@@ -6,7 +6,7 @@ Pure helpers used by the two-phase training loops in src/train.py.
 Functions
 ---------
 tau_schedule                : exponential decay of the Gumbel-Softmax temperature.
-compute_smooth_loss         : total-variation regularizer on the CNN score map.
+smooth_loss         : total-variation regularizer on the CNN score map.
 average_targets_per_token   : per-leaf mean of a full-resolution target grid, ordered to match the transformer's packed-token sequence.
 """
 
@@ -32,7 +32,6 @@ def save_checkpoint(checkpoint_path, checkpoint_name, model=None, optimizer=None
 # ---------------------------------------------------------------------------
 # Gumbel-Softmax temperature schedule
 # ---------------------------------------------------------------------------
-
 def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
     """
     Exponential decay of the Gumbel-Softmax temperature.
@@ -48,37 +47,8 @@ def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Spatial smoothness loss (total variation)
-# ---------------------------------------------------------------------------
-
-def compute_smooth_loss(score_map: torch.Tensor) -> torch.Tensor:
-    """
-    Total-variation smoothness loss on a score map.
-
-    Args:
-        score_map: ``[B, 1, H, W]`` or ``[B, H, W]`` — works with either by
-            squeezing the channel axis when present.
-
-    Returns:
-        Scalar tensor: ``mean(|∂/∂W|) + mean(|∂/∂H|)``. Unnormalized by image
-        size; with a fixed 256x128 grid the scale is absorbed into
-        ``lambda_smooth``.
-    """
-    if score_map.dim() == 4:
-        assert score_map.size(1) == 1, \
-            f"expected channel dim 1, got {score_map.size(1)}"
-        score_map = score_map.squeeze(1)
-    assert score_map.dim() == 3, f"expected [B,H,W], got {tuple(score_map.shape)}"
-
-    dh = (score_map[:, 1:, :] - score_map[:, :-1, :]).abs().mean()
-    dw = (score_map[:, :, 1:] - score_map[:, :, :-1]).abs().mean()
-    return dh + dw
-
-
-# ---------------------------------------------------------------------------
 # Per-token target averaging
 # ---------------------------------------------------------------------------
-
 def average_targets_per_token(
     targets: torch.Tensor,
     token_lists: List[List[QuadNode]],
@@ -122,6 +92,7 @@ def average_targets_per_token(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from src.model.loss import smooth_loss
     # tau_schedule
     assert abs(tau_schedule(0, 5.0, 0.5, 10) - 5.0) < 1e-6
     assert abs(tau_schedule(9, 5.0, 0.5, 10) - 0.5) < 1e-6
@@ -129,14 +100,14 @@ if __name__ == "__main__":
     assert 0.5 < mid < 5.0
     print(f"tau_schedule OK (mid={mid:.4f})")
 
-    # compute_smooth_loss
+    # smooth_loss
     uniform = torch.full((2, 1, 16, 16), 0.5)
-    assert compute_smooth_loss(uniform).item() < 1e-6
+    assert smooth_loss(uniform).item() < 1e-6
     checker = torch.zeros(2, 16, 16)
     checker[:, ::2, ::2] = 1.0
     checker[:, 1::2, 1::2] = 1.0
-    assert compute_smooth_loss(checker).item() > 0.4
-    print("compute_smooth_loss OK")
+    assert smooth_loss(checker).item() > 0.4
+    print("smooth_loss OK")
 
     # average_targets_per_token
     from src.amr.quadtree import QuadNode
