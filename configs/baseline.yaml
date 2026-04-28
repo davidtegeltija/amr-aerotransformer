@@ -1,0 +1,36 @@
+# ---- Paths ----
+
+
+# ---- Data ----
+input_file: "data/crmmgeom.npy"     # Path to .npz/.npy [N, H, W, C] representing the geometry of the problem
+target_file: "data/crmmdata.npy"    # Path to .npz/.npy [M, H, W, C] representing the steady flow state
+val_split: 0.1                      # Fraction of samples held out for validation
+
+# ---- Model ----
+d_model: 256
+n_layers: 6
+n_heads: 4
+d_ff: 1024
+min_depth: 2                                  # Quadtree minimum subdivision depth
+max_depth: 6                                  # Quadtree maximum subdivision depth
+refinement_mode: deterministic                # "learned" or "deterministic"
+refinement_criteria: AERODYNAMIC_CRITERIA_2   # Name of RefinementCriteria (see CRITERIA_REGISTRY). Used only when --refinement_mode deterministic."
+
+# ---- Training ----
+epochs: 100
+batch_size: 8
+warmup_steps: 1000
+num_workers: 0
+
+# ---- Learned-Scorer (RefinementNet) Training ----
+training_phase: null    # 1 or 2, null for standard training
+checkpoint_file: null   # Path to checkpoint to load before training. For --phase 1 this should be a pretrained-transformer checkpoint. For --phase 2 this should be a trained-scorer checkpoint from phase 2
+lambda_budget: 0.01
+lambda_smooth: 0.001
+tau_start_phase1: 5.0
+tau_end_phase1: 0.5
+tau_start_phase2: 0.5
+tau_end_phase2: 0.1
+scorer_lr: 1.0e-3
+transformer_lr: 1.0e-4
+n_max: 8192             # Max possible token count used to normalize L_budget. Default 8192 for the 256x128 grid.
