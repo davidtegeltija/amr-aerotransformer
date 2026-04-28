@@ -3,7 +3,7 @@
 import numpy as np
 
 from src.amr.quadtree import collect_leaves
-from src.amr.configs import AERODYNAMIC_CRITERIA, AERODYNAMIC_CRITERIA_2, GEOMETRY_ONLY_COMBINED_CONFIG, AERODYNAMIC_COMBINED_CONFIG
+from src.amr.refinement_criteria import AERODYNAMIC_CRITERIA, AERODYNAMIC_CRITERIA_2, GEOMETRY_ONLY_COMBINED_CONFIG, AERODYNAMIC_COMBINED_CONFIG
 from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.utils.mesh_visualization import (
     visualize_mesh,

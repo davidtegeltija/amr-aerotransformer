@@ -27,8 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.amr.configs import GEOMETRY_ONLY_COMBINED_CONFIG
-from src.amr.refinement_criteria import RefinementCriteria
+from src.amr.refinement_criteria import GEOMETRY_ONLY_COMBINED_CONFIG, RefinementCriteria
 from src.amr.quadtree import QuadNode, collect_leaves
 
 
@@ -135,7 +134,7 @@ def _build_node(
         return
 
     # 5. Subdivision decision via RefinementCriteria
-    if not should_subdivide(region, refinement_criteria, metrics=metrics):
+    if not _should_subdivide(region, refinement_criteria, metrics=metrics):
         node.is_leaf = True
         return
 
@@ -145,10 +144,10 @@ def _build_node(
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Subdivision decision
 # ---------------------------------------------------------------------------
 
-def should_subdivide(
+def _should_subdivide(
     region: np.ndarray,
     refinement_criteria: RefinementCriteria,
     metrics: Optional[Dict[str, float]] = None,

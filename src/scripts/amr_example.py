@@ -89,7 +89,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     if save_path:
         true_save_path = os.path.join(save_path, "")
         os.makedirs(os.path.dirname(true_save_path), exist_ok=True)
-        timestamp = datetime.now().strftime("%d-%m-%Y_%H_%M")
+        timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
         save_path_mesh = f"{save_path}/01_adaptive_mesh-{timestamp}.png"
         save_path_depth = f"{save_path}/02_mesh_by_depth-{timestamp}.png"
         save_path_velocity_heatmap = f"{save_path}/03_velocity_gradient-{timestamp}.png"
@@ -179,13 +179,13 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
 
 if __name__ == "__main__":
 
-    from src.amr.configs import AERODYNAMIC_CRITERIA, AERODYNAMIC_CRITERIA_2, GEOMETRY_ONLY_COMBINED_CONFIG
+    from src.amr.refinement_criteria import AERODYNAMIC_CRITERIA, AERODYNAMIC_CRITERIA_2, GEOMETRY_ONLY_COMBINED_CONFIG
     
     # data = np.load("data/crmmdata.npy")
     data = np.load("data/crmmgeom.npy")
 
     show_plots = True
-    # save_path = "outputs/plots"
-    save_path = None
+    save_path = "outputs/plots"
+    # save_path = None
 
     main(refinement_criteria=GEOMETRY_ONLY_COMBINED_CONFIG, data=data, show_plots=show_plots, save_path=save_path, batch=True)

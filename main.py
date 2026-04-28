@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from src.amr.configs import CRITERIA_REGISTRY
+from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn
 from src.data.dataset import AeroDataset
