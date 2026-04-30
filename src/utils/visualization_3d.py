@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-from src.utils.visualization_utils import _color_map
+from src.utils.visualization_utils import color_map
 
 
 def visualize_3d_prediction(
@@ -22,7 +22,7 @@ def visualize_3d_prediction(
 
     elev = 68; azim =120 
 
-    _, _, colors = _color_map(prediction[..., 0], "gist_rainbow", alpha=1, dmin=-1, dmax=1)    # cp
+    _, _, colors = color_map(prediction[..., 0], "gist_rainbow", alpha=1, dmin=-1, dmax=1)    # cp
     x = geom[:, :, 0]
     y = geom[:, :, 1]
     z = geom[:, :, 2]

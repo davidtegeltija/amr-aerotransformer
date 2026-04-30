@@ -11,26 +11,14 @@ def create_data_subset(
     save_path: Optional[str] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Create a subset of the SuoerWing dataset by selecting n_samples geometries.
+    Create a subset of the SuperWing dataset by selecting n_samples geometries.
 
-    Parameters
-    ----------
-    input_array  : [N_geom, 3, H, W]        geometry array (geom0.npy)
-    target_array : [N_samples, 3, H, W]     simulation results (data.npy)
-    index_array  : [N_samples, ...]         mapping array where column 0 gives the
-                                            geometry index for each target row (index.npy)
-    n_samples    : int                      number of geometries to select from N_geom
-    save_path    : output file path         if given, save the data to this path
-
-    Example
-    -------
-    input_array = np.load("data/geom0.npy")    # (4239, 3, 128, 256)
-    target_array = np.load("data/data.npy")     # (28856, 3, 128, 256)
-    index_array = np.load("data/index.npy")
-
-    input_sub, target_sub = create_data_subset(input_array, target_array, 100, index_array)
-    np.save("data/geom0_subset.npy", input_sub)
-    np.save("data/data_subset.npy", target_sub)
+    Args:
+        input_array  : [N_geom, 3, H, W] geometry array (geom0.npy)
+        target_array : [N_samples, 3, H, W] simulation results (data.npy)
+        index_array  : [N_samples, ...] mapping array where column 0 gives the geometry index for each target row (index.npy)
+        n_samples    : number of geometries to select from N_geom
+        save_path    : if given, save the data to this path
     """
     if target_array.shape[0] != index_array.shape[0]:
         raise ValueError(f"Target and index array must have the same first dimension shape, got {target_array.shape[0]} vs {index_array.shape[0]}.")

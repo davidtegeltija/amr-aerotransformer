@@ -22,7 +22,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
 
 from src.amr.quadtree import QuadNode
-from src.utils.visualization_utils import _channel_image, _sum_image, _color_map
+from src.utils.visualization_utils import channel_image, sum_image, color_map
 
 
 
@@ -42,13 +42,13 @@ def visualize_mesh(
 
     fig, ax = plt.subplots(figsize=(6, 10))
 
-    channel_data = _channel_image(sample, channel)
+    channel_data = channel_image(sample, channel)
     ax.imshow(channel_data, cmap="viridis", origin="upper")
 
     depths = [p.depth for p in mesh]
     min_d = min(depths) if depths else 0
     max_d = max(depths) if depths else 1
-    cmap, norm, _ = _color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
+    cmap, norm, _ = color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
 
     # Rectangle overlays
     rects = []
@@ -109,7 +109,7 @@ def visualize_mesh_by_depth(
     rows = (n_depths + cols - 1) // cols
 
     fig, axes = plt.subplots(rows, cols, figsize=(cols * max_cols, rows * max_cols), squeeze=False)
-    channel_data = _channel_image(sample, channel)
+    channel_data = channel_image(sample, channel)
 
     depth_to_patches = {d: [] for d in depths}
     for patch in mesh:
@@ -200,7 +200,7 @@ def visualize_metric_heatmap(
 
     # Right: overlay on background
     ax2 = axes[1]
-    bg = _sum_image(sample)
+    bg = sum_image(sample)
     ax2.imshow(bg, cmap="gray", origin="upper", alpha=0.5)
     im2 = ax2.imshow(metric_img, cmap="hot", origin="upper", alpha=0.6)
     plt.colorbar(im2, ax=ax2, fraction=0.04, pad=0.04)
@@ -236,7 +236,7 @@ def visualize_patch_features(
         H, W = sample.shape
 
     # Original
-    original = _channel_image(sample, channel)
+    original = channel_image(sample, channel)
 
     # Reconstructed channel values
     reconstructed = np.full((H, W), np.nan)

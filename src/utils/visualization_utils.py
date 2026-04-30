@@ -5,12 +5,8 @@ from matplotlib.colors import Normalize
 import numpy as np
 
 
-def _channel_image(data: np.ndarray, channel_idx: int = 0) -> np.ndarray:
-    """
-    Extract a 2-D image from a physical field for display.
-
-    data : (C, H, W) or (H, W, C) or (H, W)
-    """
+def channel_image(data: np.ndarray, channel_idx: int = 0) -> np.ndarray:
+    """ Extract a 2-D image of a single channel from a physical field for display """
     if data.ndim == 2:
         return data.astype(float)
 
@@ -25,7 +21,7 @@ def _channel_image(data: np.ndarray, channel_idx: int = 0) -> np.ndarray:
     raise ValueError(f"Unsupported data shape {data.shape}")
 
 
-def _sum_image(data: np.ndarray) -> np.ndarray:
+def sum_image(data: np.ndarray) -> np.ndarray:
     """Sum all channels into a single 2-D image for background display."""
     if data.ndim == 2:
         return data.astype(float)
@@ -39,7 +35,7 @@ def _sum_image(data: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported data shape {data.shape}")
 
 
-def _color_map(
+def color_map(
     values: np.ndarray,
     cmap_name: str,
     *,
@@ -48,6 +44,19 @@ def _color_map(
     dmax: Optional[float] = None,
     n_levels: Optional[int] = None,
 ):
+    """Build a normalized matplotlib colormap and per-value RGBA colors.
+
+    Args:
+        values:    array whose values are mapped to colors
+        cmap_name: matplotlib colormap name (e.g. "viridis", "plasma")
+        alpha:     opacity applied to all returned RGBA colors
+        dmin:      lower bound for normalization (defaults to values.min())
+        dmax:      upper bound for normalization (defaults to values.max())
+        n_levels:  number of discrete colormap levels (None for continuous)
+
+    Returns:
+        (cmap, norm, colors) where colors has shape values.shape + (4,).
+    """
     norm = Normalize(
         vmin=dmin if dmin is not None else values.min(),
         vmax=dmax if dmax is not None else values.max(),

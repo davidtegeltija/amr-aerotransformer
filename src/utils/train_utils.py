@@ -1,15 +1,3 @@
-"""
-========================================================================
-Pure helpers used by the two-phase training loops in src/train.py.
-========================================================================
-
-Functions
----------
-tau_schedule                : exponential decay of the Gumbel-Softmax temperature.
-smooth_loss         : total-variation regularizer on the CNN score map.
-average_targets_per_token   : per-leaf mean of a full-resolution target grid, ordered to match the transformer's packed-token sequence.
-"""
-
 from pathlib import Path
 from typing import List
 
@@ -17,28 +5,28 @@ import torch
 
 from src.amr.quadtree import QuadNode
 
-# ---------------------------------------------------------------------------
-# Save the model at its current state
-# ---------------------------------------------------------------------------
-def save_checkpoint(checkpoint_path, checkpoint_name, model=None, optimizer=None, scheduler=None):
+
+def save_checkpoint(checkpoint_path, checkpoint_name, model, optimizer=None, scheduler=None, epoch=None, val_loss=None):
+    """ Save model, optimizer, and scheduler at their current state to checkpoint_path/checkpoint_name """
     save_path = Path(checkpoint_path) / checkpoint_name
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     torch.save({
         "model": model.state_dict() if model else None,
         "optimizer": optimizer.state_dict() if optimizer else None,
-        "scheduler": scheduler.state_dict() if scheduler else None}, save_path)
-    
-# ---------------------------------------------------------------------------
-# Gumbel-Softmax temperature schedule
-# ---------------------------------------------------------------------------
+        "scheduler": scheduler.state_dict() if scheduler else None,
+        "epoch": epoch,
+        "val_loss": val_loss
+        }, save_path)
+
+
 def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
     """
     Exponential decay of the Gumbel-Softmax temperature.
 
         tau(epoch) = tau_start * (tau_end / tau_start) ** (epoch / max(1, T - 1))
 
-    Clamped at ``tau_end`` for ``epoch >= T - 1``. Defined for ``epoch >= 0``.
+    Clamped at tau_end for epoch >= T - 1. Defined for epoch >= 0
     """
     if T <= 1:
         return tau_end
@@ -46,30 +34,22 @@ def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
     return tau_start * (tau_end / tau_start) ** progress
 
 
-# ---------------------------------------------------------------------------
-# Per-token target averaging
-# ---------------------------------------------------------------------------
-def average_targets_per_token(
-    targets: torch.Tensor,
-    token_lists: List[List[QuadNode]],
-) -> torch.Tensor:
+def average_targets_per_token(targets: torch.Tensor, token_lists: List[List[QuadNode]]) -> torch.Tensor:
     """
     Compute per-leaf target means from a full-resolution target grid.
 
-    For each leaf ``QuadNode`` with bbox ``(r0, c0, r1, c1)``, average
-    ``targets[b, r0:r1, c0:c1, :]`` over the spatial axes to produce one
+    For each QuadNode leaf with bbox (r0, c0, r1, c1), average
+    targets[b, r0:r1, c0:c1, :] over the spatial axes to produce one
     row of the output. Leaves are consumed in the same order as
-    ``token_lists[b]``, so the output row order matches the transformer's
+    token_lists[b], so the output row order matches the transformer's
     packed-token sequence.
 
     Args:
-        targets: ``[B, H, W, output_dim]`` tensor on any device.
-        token_lists: length-B list; each element is the per-sample list of
-            leaf ``QuadNode``s produced by the score-guided mesh builder.
+        targets     :[B, H, W, output_dim] tensor on any device
+        token_lists : length-B list; each element is the per-sample list of QuadNodes produced by the score-guided mesh builder
 
     Returns:
-        ``packed_targets``: ``[total_N, output_dim]`` on the same device as
-        ``targets``.
+        packed_targets : [total_N, output_dim] on the same device as targets
     """
     assert targets.dim() == 4, \
         f"expected [B,H,W,D], got {tuple(targets.shape)}"
@@ -86,10 +66,6 @@ def average_targets_per_token(
 
     return torch.stack(rows, dim=0)
 
-
-# ---------------------------------------------------------------------------
-# Smoke tests
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     from src.model.loss import smooth_loss
