@@ -1,13 +1,11 @@
 """
-========================================================================
 Flow field and token-level visualization utilities.
-========================================================================
 
 Functions
 ---------
 plot_flow_comparison  : Side-by-side comparison of ground truth vs predicted flow fields
 plot_token_statistics : Histogram of token counts per sample and (optionally) cell size distribution.
-animate_refinement    : Depth-by-depth animated GIF of the quadtree build (requires Pillow)
+plot_3d_prediction    : 3D surface rendering of predicted fields over wing geometry
 """
 
 from __future__ import annotations
@@ -15,10 +13,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List, Optional
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 
-from src.amr.quadtree_tokenizer import QuadNode
-from src.utils.mesh_visualization import visualize_mesh
+from src.utils.visualization_utils import save_plot, color_map
 
 
 def plot_flow_comparison(
@@ -30,7 +28,7 @@ def plot_flow_comparison(
     show: bool = False,
     save_path: Optional[str] = None,
 ) -> None:
-
+    """Side-by-side comparison of ground truth vs predicted flow fields."""
     if ground_truth.shape != prediction.shape:
         raise ValueError(f"Shape mismatch: ground_truth={ground_truth.shape} prediction={prediction.shape}")
     
@@ -71,16 +69,11 @@ def plot_flow_comparison(
     plt.tight_layout()
 
     if save_path:
-        timestamp = datetime.now().strftime("%d_%m_%Y-%H_%M")
-        fig.savefig(f"{save_path}/prediction_comparison-{timestamp}.png", dpi=150, bbox_inches="tight")
+        save_plot(save_path, fig)
 
     if show:
         plt.show()
 
-
-# ---------------------------------------------------------------------------
-# Token count statistics
-# ---------------------------------------------------------------------------
 
 def plot_token_statistics(
     token_counts: List[int],
@@ -89,7 +82,7 @@ def plot_token_statistics(
     show: bool = False,
     save_path: Optional[str] = None,
 ) -> None:
-
+    """Histogram of token counts per sample and, optionally, cell size distribution."""
     n_plots = 2 if cell_sizes else 1
     fig, axes = plt.subplots(1, n_plots, figsize=(6 * n_plots, 4))
     if n_plots == 1:
@@ -109,55 +102,46 @@ def plot_token_statistics(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        save_plot(save_path, fig)
 
     if show:
         plt.show()
 
 
-# ---------------------------------------------------------------------------
-# Depth-by-depth refinement animation
-# ---------------------------------------------------------------------------
-
-def animate_refinement(
-    grid: np.ndarray,
-    token_list: List[QuadNode],
-    channel: int = 0,
-    fps: int = 2,
-    save_path: str = "refinement.gif",
+def plot_3d_prediction(
+    geom: np.ndarray,
+    prediction: np.ndarray,
+    *,
+    title: str = "Adaptive Mesh",
+    show: bool = True,
+    save_path: Optional[str] = None,
 ) -> None:
+    """3D surface rendering of predicted fields over wing geometry."""
+    fig = plt.figure()
+    ax: Axes3D = fig.add_subplot(projection="3d")
 
-    try:
-        from PIL import Image
-    except ImportError:
-        print("Pillow not installed. Skipping animation. Run: pip install Pillow")
-        return
+    elev = 68; azim =120 
 
-    import io
+    _, _, colors = color_map(prediction[..., 0], "gist_rainbow", alpha=1, dmin=-1, dmax=1)    # cp
+    x = geom[:, :, 0]
+    y = geom[:, :, 1]
+    z = geom[:, :, 2]
+    ax.plot_surface(x, y, z, facecolors=colors, edgecolor="none", rstride=1, cstride=3, shade=True)
+    ax.view_init(elev=elev, azim=azim)
 
-    H, W, _ = grid.shape
-    max_depth = max(t.depth for t in token_list)
-    frames = []
+    # Remove background planes (panes)
+    ax.set_axis_off()
+    # ax.grid(False)
+    # ax.xaxis.pane.set_visible(False)
+    # ax.yaxis.pane.set_visible(False)
+    # ax.zaxis.pane.set_visible(False)
 
-    for d in range(max_depth + 1):
-        visible = [t for t in token_list if t.depth <= d]
-        fig = visualize_mesh(
-            grid, visible,
-            channel=channel,
-            title=f"Quadtree refinement  -  depth ≤ {d}",
-            show=False,
-        )
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        frames.append(Image.open(buf).copy())
+    plt.title(title)
+    plt.tight_layout()
 
-    frames[0].save(
-        save_path,
-        save_all=True,
-        append_images=frames[1:],
-        loop=0,
-        duration=int(1000 / fps),
-    )
-    print(f"Saved animation to {save_path}")
+    if save_path:
+        save_plot(save_path, fig)
+
+    if show:
+        plt.show()
+

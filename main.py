@@ -56,8 +56,6 @@ def main(args=None):
                 value = type(existing)(value)  # preserve int/float/str type
             args[key] = value
 
-    os.makedirs("outputs", exist_ok=True)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 

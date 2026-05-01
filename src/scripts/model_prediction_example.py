@@ -8,8 +8,7 @@ import torch
 
 from src.data.dataset import AeroDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.utils.flow_visualization import plot_flow_comparison
-from src.utils.visualization_3d import visualize_3d_prediction
+from src.utils.prediction_visualization import plot_flow_comparison, plot_3d_prediction
 
 
 if __name__ == "__main__":
@@ -49,4 +48,4 @@ if __name__ == "__main__":
     # ground_truth = ground_truth.transpose(2, 1, 0).astype(np.float32)
 
     # plot_flow_comparison(ground_truth, prediction, show=True)
-    visualize_3d_prediction(first_sample["input"], prediction)
+    plot_3d_prediction(first_sample["input"], prediction)

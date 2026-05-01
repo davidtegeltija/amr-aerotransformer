@@ -1,8 +1,32 @@
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize
+from matplotlib.figure import Figure
 import numpy as np
+
+
+def save_plot(save_path: str | Path, figure: Figure, subfolder: Optional[str] = None, dpi: int = 150) -> None:
+    """ Save a matplotlib figure to disk under a date-organised subfolder """
+    save_path = Path(save_path)
+
+    # Check for figure type. Default is PNG
+    if save_path.suffix == "":
+        save_path = save_path.with_suffix(".png")
+
+    # Add a timestamp
+    timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
+    save_path = save_path.with_name(f"{save_path.stem}_{timestamp}{save_path.suffix}")
+
+    # Add a subfolder for better organization. Default is the current date
+    folder = subfolder if subfolder else datetime.now().strftime("%d-%m-%Y")
+    save_path = save_path.parent / folder / save_path.name
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    print(f"SUCCESS: Plot saved to {save_path}")
 
 
 def channel_image(data: np.ndarray, channel_idx: int = 0) -> np.ndarray:

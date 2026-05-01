@@ -1,15 +1,14 @@
 """
-========================================================================
-Mesh and quadtree visualization utilities.
-========================================================================
+Mesh and quadtree visualization utilities
 
 Functions
 ---------
-visualize_mesh           : Overlay the adaptive quadtree mesh on a 2D grid channel.
-visualize_mesh_by_depth  : Show one subplot per depth level with patches at that depth highlighted.
-visualize_metric_heatmap : Show a heatmap of a chosen physics metric on the original grid.
-visualize_patch_features : Reconstruct and display the field from averaged patch features.
-visualize_score_map      : Render a per-pixel refinement score as a heatmap (optionally over geometry).
+plot_mesh           : Overlay the adaptive quadtree mesh on a 2D grid channel
+plot_mesh_by_depth  : Show one subplot per depth level with patches at that depth highlighted
+plot_metric_heatmap : Show a heatmap of a chosen physics metric on the original grid
+plot_patch_features : Reconstruct and display the field from averaged patch features
+plot_score_map      : Render a per-pixel refinement score as a heatmap (optionally over geometry)
+animate_mesh_refinement  : Depth-by-depth animated GIF of the quadtree build (requires Pillow)
 """
 
 from typing import List, Optional
@@ -22,11 +21,10 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import numpy as np
 
 from src.amr.quadtree import QuadNode
-from src.utils.visualization_utils import channel_image, sum_image, color_map
+from src.utils.visualization_utils import save_plot, channel_image, sum_image, color_map
 
 
-
-def visualize_mesh(
+def plot_mesh(
     sample: np.ndarray,
     mesh: List[QuadNode],
     *,
@@ -35,7 +33,7 @@ def visualize_mesh(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> Figure:
-
+    """Overlay the adaptive quadtree mesh on a 2D grid channel."""
     H, W, C = sample.shape
     if channel > C:
         raise ValueError(f"Channel {channel} out of range for {C}-channel input")
@@ -83,15 +81,14 @@ def visualize_mesh(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"[visualization] Saved → {save_path}")
+        save_plot(save_path, fig)
 
     if show:
         plt.show()
 
     return fig
 
-def visualize_mesh_by_depth(
+def plot_mesh_by_depth(
     sample: np.ndarray,
     mesh: List[QuadNode],
     *,
@@ -101,7 +98,7 @@ def visualize_mesh_by_depth(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> None:
-
+    """Show one subplot per depth level with patches at that depth highlighted."""
     depths = sorted(set(p.depth for p in mesh))
     n_depths = len(depths)
 
@@ -147,14 +144,13 @@ def visualize_mesh_by_depth(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"[visualization] Saved → {save_path}")
+        save_plot(save_path, fig)
 
     if show:
         plt.show()
 
 
-def visualize_metric_heatmap(
+def plot_metric_heatmap(
     sample: np.ndarray,
     mesh: List[QuadNode],
     *,
@@ -163,10 +159,10 @@ def visualize_metric_heatmap(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> None:
-    """
-    metric_name : str   Defined by the RefinementCriteria used for the mesh construction.
-                        Look at the definition of compute_enabled_metrics() to see possible 
-                        metric names
+    """Show a heatmap of a chosen physics metric on the original grid.
+
+    'metric_name' must match one of the metrics produced by the RefinementCriteria
+    used for mesh construction (see `compute_enabled_metrics()` for valid names).
     """
     # Determine domain shape
     if sample.ndim == 3:
@@ -185,7 +181,7 @@ def visualize_metric_heatmap(
         metric_img[r0:r1, c0:c1] = val
     
     if np.isnan(metric_img).all():
-        print(f"The plot '{title}' is empty. The mesh was created without this metric: {metric_name}\n")
+        print(f"WARNING: The plot '{title}' is empty. The mesh was created without this metric: {metric_name}")
         return
 
     fig, axes = plt.subplots(1, 2)
@@ -209,14 +205,13 @@ def visualize_metric_heatmap(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"[visualization] Saved → {save_path}")
+        save_plot(save_path, fig)
 
     if show:
         plt.show()
 
 
-def visualize_patch_features(
+def plot_patch_features(
     sample: np.ndarray,
     mesh: List[QuadNode],
     *,
@@ -225,7 +220,7 @@ def visualize_patch_features(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> None:
-    
+    """Reconstruct and display the field from averaged patch features."""
     # Determine domain shape
     if sample.ndim == 3:
         if sample.shape[0] < sample.shape[1]:
@@ -274,14 +269,13 @@ def visualize_patch_features(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"[visualization] Saved → {save_path}")
+        save_plot(save_path, fig)
 
     if show:
         plt.show()
 
 
-def visualize_score_map(
+def plot_score_map(
     score_map: np.ndarray,
     geometry: Optional[np.ndarray] = None,
     *,
@@ -292,7 +286,7 @@ def visualize_score_map(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> Figure:
-
+    """Render a per-pixel refinement score as a heatmap, optionally over geometry."""
     if score_map.ndim != 2:
         raise ValueError(f"score_map must be 2-D (H, W); got shape {score_map.shape}")
 
@@ -322,13 +316,60 @@ def visualize_score_map(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"[visualization] Saved → {save_path}")
+        save_plot(save_path, fig)
 
     if show:
         plt.show()
 
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Depth-by-depth refinement animation
+# ---------------------------------------------------------------------------
+
+def animate_mesh_refinement(
+    grid: np.ndarray,
+    token_list: List[QuadNode],
+    channel: int = 0,
+    fps: int = 2,
+    save_path: str = "refinement.gif",
+) -> None:
+    """Depth-by-depth animated GIF of the quadtree build (requires Pillow)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        print("Pillow not installed. Skipping animation. Run: pip install Pillow")
+        return
+
+    import io
+
+    H, W, _ = grid.shape
+    max_depth = max(t.depth for t in token_list)
+    frames = []
+
+    for d in range(max_depth + 1):
+        visible = [t for t in token_list if t.depth <= d]
+        fig = plot_mesh(
+            grid, visible,
+            channel=channel,
+            title=f"Quadtree refinement  -  depth ≤ {d}",
+            show=False,
+        )
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        frames.append(Image.open(buf).copy())
+
+    frames[0].save(
+        save_path,
+        save_all=True,
+        append_images=frames[1:],
+        loop=0,
+        duration=int(1000 / fps),
+    )
+    print(f"Saved animation to {save_path}")
 
 
 if __name__ == "__main__":
@@ -345,6 +386,6 @@ if __name__ == "__main__":
     score_map = score_map.astype(np.float32)
 
     save_path = os.path.join("outputs", "phase2_score_map_test.png")
-    ax = visualize_score_map(score_map, title="synthetic")
+    ax = plot_score_map(score_map, title="synthetic")
     ax.figure.savefig(save_path, dpi=150, bbox_inches="tight")
     print(f"[visualization] Saved -> {save_path}")

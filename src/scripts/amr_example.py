@@ -21,19 +21,17 @@ Then builds an adaptive mesh using different configurations and visualises
 the results.
 """
 
-import os
 
-from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 
 from src.data.synthetic_dataset import make_synthetic_field
 from src.amr.adaptive_mesh import build_adaptive_mesh, process_batch, mesh_statistics
 from src.utils.mesh_visualization import (
-    visualize_mesh,
-    visualize_mesh_by_depth,
-    visualize_metric_heatmap,
-    visualize_patch_features,
+    plot_mesh,
+    plot_mesh_by_depth,
+    plot_metric_heatmap,
+    plot_patch_features,
 )
 
 
@@ -87,17 +85,14 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     # ---------------------------------------------------------------------------
     print("\n[3] Generating visualizations")
     if save_path:
-        true_save_path = os.path.join(save_path, "")
-        os.makedirs(os.path.dirname(true_save_path), exist_ok=True)
-        timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
-        save_path_mesh = f"{save_path}/01_adaptive_mesh-{timestamp}.png"
-        save_path_depth = f"{save_path}/02_mesh_by_depth-{timestamp}.png"
-        save_path_velocity_heatmap = f"{save_path}/03_velocity_gradient-{timestamp}.png"
-        save_path_vorticity_heatmap = f"{save_path}/04_vorticity-{timestamp}.png"
-        save_path_reconstruction = f"{save_path}/05_reconstruction-{timestamp}.png"
+        save_path_mesh = f"{save_path}/01_adaptive_mesh.png"
+        save_path_depth = f"{save_path}/02_mesh_by_depth.png"
+        save_path_velocity_heatmap = f"{save_path}/03_velocity_gradient.png"
+        save_path_vorticity_heatmap = f"{save_path}/04_vorticity.png"
+        save_path_reconstruction = f"{save_path}/05_reconstruction.png"
 
     # 4a. Main mesh overlay
-    visualize_mesh(
+    plot_mesh(
         sample, mesh,
         title="Adaptive Mesh  (threshold=0.15, max_depth=6)",
         show=show_plots,
@@ -106,7 +101,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     plt.close("all")
 
     # 4b. Per-depth subplot
-    visualize_mesh_by_depth(
+    plot_mesh_by_depth(
         sample, mesh,
         title="Adaptive Mesh by Depth",
         show=show_plots,
@@ -115,7 +110,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     plt.close("all")
 
     # 4c. Metric heatmap
-    visualize_metric_heatmap(
+    plot_metric_heatmap(
         sample, mesh,
         metric_name="velocity_gradient",
         title="Velocity Gradient Magnitude per Patch",
@@ -125,7 +120,7 @@ def main(refinement_criteria=None, data=None, sample_number=None, batch=False, s
     plt.close("all")
 
     # 4e. Patch feature reconstruction
-    visualize_patch_features(
+    plot_patch_features(
         sample, mesh,
         channel=0,
         title="AMR Patch Reconstruction  (velocity_x)",
@@ -184,7 +179,7 @@ if __name__ == "__main__":
     # data = np.load("data/crmmdata.npy")
     data = np.load("data/crmmgeom.npy")
 
-    show_plots = True
+    show_plots = False
     save_path = "outputs/plots"
     # save_path = None
 
