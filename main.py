@@ -1,5 +1,5 @@
 import argparse
-import os
+from pathlib import Path
 import sys
 from typing import Dict
 import yaml
@@ -15,6 +15,7 @@ from src.data.dataset import AeroDataset
 from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.train import train_deterministic_mesh, train_learned_mesh_p1, train_learned_mesh_p2
+from src.utils.train_utils import plot_loss_curves
 
 
 def load_config(path: str) -> Dict:
@@ -72,7 +73,7 @@ def main(args=None):
         train_dataset, val_dataset = random_split(dataset, [len(dataset) - n_val, n_val])
     else:
         print("No input and target data provided -> using synthetic dataset.")
-        seed = np.random.randint(0, 2**32)
+        seed = np.random.randint(0, 1e6)
         dataset = SyntheticDataset(n_samples=64, seed=seed)
         input_channels = dataset.input_channels
         output_dim     = dataset.output_dim
@@ -161,9 +162,9 @@ def main(args=None):
                               pin_memory=device.type == "cuda")
 
     if args.get("training_phase") == 1:
-        train_learned_mesh_p1(
+        train_loss_history, val_loss_history = train_learned_mesh_p1(
             model, train_loader, val_loader, device,
-            phase2_epochs=args.get("epochs"),
+            epochs=args.get("epochs"),
             lambda_budget=args.get("lambda_budget"),
             lambda_smooth=args.get("lambda_smooth"),
             tau_start=args.get("tau_start_phase1"),
@@ -173,9 +174,9 @@ def main(args=None):
             save_path="outputs/checkpoints/phase1_scorer.pt",
         )
     elif args.get("training_phase") == 2:
-        train_learned_mesh_p2(
+        train_loss_history, val_loss_history = train_learned_mesh_p2(
             model, train_loader, val_loader, device,
-            phase3_epochs=args.get("epochs"),
+            epochs=args.get("epochs"),
             lambda_budget=args.get("lambda_budget"),
             lambda_smooth=args.get("lambda_smooth"),
             tau_start=args.get("tau_start_phase2"),
@@ -186,13 +187,16 @@ def main(args=None):
             save_path="outputs/checkpoints/phase2_joint.pt",
         )
     else:
-        train_deterministic_mesh(
+        train_loss_history, val_loss_history = train_deterministic_mesh(
             model, train_loader, val_loader, device,
             epochs=args.get("epochs"),
             d_model=args.get("d_model"),
             warmup_steps=args.get("warmup_steps"),
             checkpoint_path="outputs/checkpoints",
         )
+
+    config_name = Path(cli.config).stem
+    plot_loss_curves(train_loss_history, val_loss_history, args.get("epochs"), save_path=f"outputs/loss/{config_name}_config_loss.png")
 
 
 if __name__ == "__main__":

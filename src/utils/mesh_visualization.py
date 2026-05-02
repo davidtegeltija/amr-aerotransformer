@@ -81,7 +81,7 @@ def plot_mesh(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()
@@ -144,7 +144,7 @@ def plot_mesh_by_depth(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()
@@ -205,7 +205,7 @@ def plot_metric_heatmap(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()
@@ -269,7 +269,7 @@ def plot_patch_features(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()
@@ -316,7 +316,7 @@ def plot_score_map(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()

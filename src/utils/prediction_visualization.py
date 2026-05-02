@@ -69,7 +69,7 @@ def plot_flow_comparison(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()
@@ -102,7 +102,7 @@ def plot_token_statistics(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()
@@ -140,7 +140,7 @@ def plot_3d_prediction(
     plt.tight_layout()
 
     if save_path:
-        save_plot(save_path, fig)
+        save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()

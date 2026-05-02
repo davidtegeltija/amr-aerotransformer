@@ -1,15 +1,17 @@
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
+from matplotlib import pyplot as plt
 import torch
 
 from src.amr.quadtree import QuadNode
+from src.utils.visualization_utils import save_plot
 
 
 def save_checkpoint(checkpoint_path, checkpoint_name, model, optimizer=None, scheduler=None, epoch=None, val_loss=None):
     """ Save model, optimizer, and scheduler at their current state to checkpoint_path/checkpoint_name """
     save_path = Path(checkpoint_path) / checkpoint_name
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
     torch.save({
         "model": model.state_dict() if model else None,
@@ -66,6 +68,32 @@ def average_targets_per_token(targets: torch.Tensor, token_lists: List[List[Quad
 
     return torch.stack(rows, dim=0)
 
+
+def plot_loss_curves(
+    train_loss_history: List[float],
+    val_loss_history: List[float],
+    epochs: int,
+    show: bool = True,
+    save_path: Optional[str | Path] = None
+):
+    """ Plot the training and validation loss curves for training diagnostics """
+    train_steps = torch.arange(1, epochs + 1, 1)
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(train_steps, train_loss_history, label="train_loss")
+    plt.plot(train_steps, val_loss_history, label="val_loss")
+    plt.legend()
+    plt.title(f"Training Loss Curves for {epochs} Epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid(True)
+
+    if save_path:
+        save_plot(save_path, fig)
+
+    if show:
+        plt.show()
+        
 
 if __name__ == "__main__":
     from src.model.loss import smooth_loss

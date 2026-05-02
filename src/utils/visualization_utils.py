@@ -8,7 +8,7 @@ from matplotlib.figure import Figure
 import numpy as np
 
 
-def save_plot(save_path: str | Path, figure: Figure, subfolder: Optional[str] = None, dpi: int = 150) -> None:
+def save_plot(save_path: str | Path, figure: Figure, dpi: int = 150, use_date_subfolder: bool = False) -> None:
     """ Save a matplotlib figure to disk under a date-organised subfolder """
     save_path = Path(save_path)
 
@@ -20,9 +20,10 @@ def save_plot(save_path: str | Path, figure: Figure, subfolder: Optional[str] = 
     timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
     save_path = save_path.with_name(f"{save_path.stem}_{timestamp}{save_path.suffix}")
 
-    # Add a subfolder for better organization. Default is the current date
-    folder = subfolder if subfolder else datetime.now().strftime("%d-%m-%Y")
-    save_path = save_path.parent / folder / save_path.name
+    # Add a current date subfolder for better organization
+    if use_date_subfolder:
+        subfolder = datetime.now().strftime("%d-%m-%Y")
+        save_path = save_path.parent / subfolder / save_path.name
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(save_path, dpi=dpi, bbox_inches="tight")

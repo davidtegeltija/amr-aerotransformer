@@ -34,7 +34,7 @@ from __future__ import annotations
 from datetime import datetime
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -89,18 +89,23 @@ def train_deterministic_mesh(
     model: AdaptiveMeshAeroModel,
     train_loader: DataLoader,
     val_loader: Optional[DataLoader],
-    epochs: int,
     device: torch.device,
+    *,
+    epochs: int,
     d_model: int = 256,
     warmup_steps: int = 4000,
     checkpoint_path: Optional[str] = None,
-):
+) -> Tuple[List[float], List[Optional[float]]]:
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
     best_val_loss = float('inf')
 
+    # Track loss history to see how the network behaves during training
+    train_loss_history = []
+    val_loss_history = []
+    
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
@@ -136,13 +141,14 @@ def train_deterministic_mesh(
                 tq_loader.set_postfix(loss=f"{loss.item():.6f}", lr=f"{lr:.2e}", mean_N=f"{batch_mean_tokens:.1f}")
 
         avg_loss = epoch_loss / len(train_loader)
+        train_loss_history.append(avg_loss)
         epoch_mean = epoch_token_total / max(1, epoch_sample_count)
         elapsed = time.time() - t0
 
         # Validation 
-        val_loss = None
         if val_loader is not None:
             val_loss = evaluate(model, val_loader, device)
+            val_loss_history.append(val_loss)
             print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  val_loss={val_loss:.6f}  mean_N={epoch_mean:.1f}  time={elapsed:.1f}s")
 
             if val_loss < best_val_loss:
@@ -162,7 +168,7 @@ def train_deterministic_mesh(
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
-
+    return train_loss_history, val_loss_history
 
 
 
@@ -176,7 +182,7 @@ def train_learned_mesh_p1(
     val_loader,
     device,
     *,
-    phase2_epochs: int,
+    epochs: int,
     lambda_budget: float = 0.01,
     lambda_smooth: float = 0.001,
     tau_start: float = 5.0,
@@ -186,7 +192,7 @@ def train_learned_mesh_p1(
     n_max: int = 1024,
     grad_clip: float = 1.0,
     save_path: str = "outputs/phase2_scorer.pt",
-):
+) -> Tuple[List[float], List[Optional[float]]]:
     """
     Train the RefinementNet scorer with the transformer frozen.
 
@@ -210,15 +216,18 @@ def train_learned_mesh_p1(
         [{"params": model.scorer.parameters(), "lr": scorer_lr,
           "weight_decay": weight_decay}],
     )
-    scheduler = CosineAnnealingLR(optimizer, T_max=phase2_epochs, eta_min=1e-6)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")
 
-    for epoch in range(phase2_epochs):
+    train_loss_history = []
+    val_loss_history = []
+
+    for epoch in range(epochs):
         # Gumbel temperature for this epoch
-        model.tau = tau_schedule(epoch, tau_start, tau_end, phase2_epochs)
+        model.tau = tau_schedule(epoch, tau_start, tau_end, epochs)
 
         # --- Train ---
         model.scorer.train()           # scorer-only: keep transformer in eval
@@ -229,40 +238,44 @@ def train_learned_mesh_p1(
         epoch_n = 0
         n_steps = 0
 
-        for batch in train_loader:
-            grids        = batch["grids"].to(device)
-            grid_targets = batch["targets"].to(device)
+        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}") as tq_loader:
+            for step, batch in enumerate(tq_loader):
+                grids        = batch["grids"].to(device)
+                grid_targets = batch["targets"].to(device)
 
-            out = model(grids)
-            packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
+                out = model(grids)
+                packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
 
-            L_pred   = nmse_loss(out["token_preds"], packed_targets)
-            L_budget = budget_loss(out["soft_N"], n_max)
-            L_smooth = smooth_loss(out["score_map"])
+                L_pred   = nmse_loss(out["token_preds"], packed_targets)
+                L_budget = budget_loss(out["soft_N"], n_max)
+                L_smooth = smooth_loss(out["score_map"])
 
-            loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
+                loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
 
-            optimizer.zero_grad()
-            loss.backward()
-            clip_grad_norm_(model.scorer.parameters(), max_norm=grad_clip)
-            optimizer.step()
+                optimizer.zero_grad()
+                loss.backward()
+                clip_grad_norm_(model.scorer.parameters(), max_norm=grad_clip)
+                optimizer.step()
 
-            # Stats
-            epoch_loss   += loss.item()
-            epoch_pred   += L_pred.item()
-            epoch_budget += L_budget.item()
-            epoch_smooth += L_smooth.item()
-            epoch_n      += sum(out["seq_lens"])
-            n_steps      += 1
+                # Stats
+                epoch_loss   += loss.item()
+                epoch_pred   += L_pred.item()
+                epoch_budget += L_budget.item()
+                epoch_smooth += L_smooth.item()
+                epoch_n      += sum(out["seq_lens"])
+                n_steps      += 1
 
-        scheduler.step()
+            scheduler.step()
+
+        train_loss_history.append(epoch_pred / len(train_loader))
 
         # --- Validate ---
         val_loss = _validate_phase2(model, val_loader, device) if val_loader else None
+        val_loss_history.append(val_loss)
 
         # --- Log ---
         print(
-            f"[phase2] epoch {epoch:03d}/{phase2_epochs}  "
+            f"[phase2] epoch {epoch:03d}/{epochs}  "
             f"tau={model.tau:.3f}  "
             f"loss={epoch_loss / n_steps:.4f} "
             f"(pred={epoch_pred / n_steps:.4f} "
@@ -274,8 +287,11 @@ def train_learned_mesh_p1(
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({"model": model.state_dict(), "epoch": epoch,
+            torch.save({"model": model.state_dict(), 
+                        "epoch": epoch,
                         "val_loss": val_loss}, save_path)
+            
+    return train_loss_history, val_loss_history
 
 
 
@@ -309,7 +325,7 @@ def train_learned_mesh_p2(
     val_loader,
     device,
     *,
-    phase3_epochs: int,
+    epochs: int,
     lambda_budget: float = 0.01,
     lambda_smooth: float = 0.001,
     tau_start: float = 0.5,
@@ -320,13 +336,13 @@ def train_learned_mesh_p2(
     n_max: int = 1024,
     grad_clip: float = 1.0,
     save_path: str = "outputs/phase3_joint.pt",
-):
+) -> Tuple[List[float], List[Optional[float]]]:
     """
     Joint fine-tuning of scorer and transformer.
 
     - Transformer is unfrozen.
     - Two param groups: scorer_lr (1e-3) and transformer_lr (1e-4).
-    - Tau anneals tau_start -> tau_end across phase3_epochs.
+    - Tau anneals tau_start -> tau_end across epochs.
 
     Loss is identical to phase2:
         L = nmse_loss + lambda_budget * budget_loss(soft_N, n_max)
@@ -348,14 +364,17 @@ def train_learned_mesh_p2(
         {"params": model.transformer.parameters(),
          "lr": transformer_lr,  "weight_decay": weight_decay},
     ])
-    scheduler = CosineAnnealingLR(optimizer, T_max=phase3_epochs, eta_min=1e-6)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")
 
-    for epoch in range(phase3_epochs):
-        model.tau = tau_schedule(epoch, tau_start, tau_end, phase3_epochs)
+    train_loss_history = []
+    val_loss_history = []
+
+    for epoch in range(epochs):
+        model.tau = tau_schedule(epoch, tau_start, tau_end, epochs)
 
         model.train()   # scorer + transformer both in train mode
         epoch_loss = 0.0
@@ -365,42 +384,48 @@ def train_learned_mesh_p2(
         epoch_n = 0
         n_steps = 0
 
-        for batch in train_loader:
-            grids        = batch["grids"].to(device)
-            grid_targets = batch["targets"].to(device)
+        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}") as tq_loader:
+            for step, batch in enumerate(tq_loader):
+                grids        = batch["grids"].to(device)
+                grid_targets = batch["targets"].to(device)
 
-            out = model(grids)
-            packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
+                out = model(grids)
+                packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
 
-            L_pred   = nmse_loss(out["token_preds"], packed_targets)
-            L_budget = budget_loss(out["soft_N"], n_max)
-            L_smooth = smooth_loss(out["score_map"])
+                L_pred   = nmse_loss(out["token_preds"], packed_targets)
+                L_budget = budget_loss(out["soft_N"], n_max)
+                L_smooth = smooth_loss(out["score_map"])
 
-            loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
+                loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
 
-            optimizer.zero_grad()
-            loss.backward()
-            # Clip both groups — transformer gradients too, as the finer tau
-            # can induce sharper updates than in phase2.
-            clip_grad_norm_(
-                list(model.scorer.parameters()) + list(model.transformer.parameters()),
-                max_norm=grad_clip,
-            )
-            optimizer.step()
+                optimizer.zero_grad()
+                loss.backward()
+                # Clip both groups — transformer gradients too, as the finer tau
+                # can induce sharper updates than in phase2.
+                clip_grad_norm_(
+                    list(model.scorer.parameters()) + list(model.transformer.parameters()),
+                    max_norm=grad_clip,
+                )
+                optimizer.step()
 
-            epoch_loss   += loss.item()
-            epoch_pred   += L_pred.item()
-            epoch_budget += L_budget.item()
-            epoch_smooth += L_smooth.item()
-            epoch_n      += sum(out["seq_lens"])
-            n_steps      += 1
+                epoch_loss   += loss.item()
+                epoch_pred   += L_pred.item()
+                epoch_budget += L_budget.item()
+                epoch_smooth += L_smooth.item()
+                epoch_n      += sum(out["seq_lens"])
+                n_steps      += 1
 
-        scheduler.step()
+            scheduler.step()
 
+        train_loss_history.append(epoch_pred / len(train_loader))
+
+        # --- Validate ---
         val_loss = _validate_phase3(model, val_loader, device) if val_loader else None
+        val_loss_history.append(val_loss)
 
+        # --- Log ---
         print(
-            f"[phase3] epoch {epoch:03d}/{phase3_epochs}  "
+            f"[phase3] epoch {epoch:03d}/{epochs}  "
             f"tau={model.tau:.3f}  "
             f"loss={epoch_loss / n_steps:.4f} "
             f"(pred={epoch_pred / n_steps:.4f} "
@@ -412,8 +437,11 @@ def train_learned_mesh_p2(
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({"model": model.state_dict(), "epoch": epoch,
+            torch.save({"model": model.state_dict(), 
+                        "epoch": epoch,
                         "val_loss": val_loss}, save_path)
+    
+    return train_loss_history, val_loss_history
 
 
 
