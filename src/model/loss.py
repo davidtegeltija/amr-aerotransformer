@@ -19,7 +19,8 @@ def nmse_loss(
 
 def smooth_loss(score_map: torch.Tensor) -> torch.Tensor:
     """
-    Total-variation smoothness loss on a score map.
+    Total-variation regularizer on the CNN score map.
+
     Penalizes large differences between neighboring cells (horizontal and vertical) in the
     importance scores outputed by the RefinementNet.
     (real aerodynamic importance regions like shocks and leading edges are spatially contiguous).

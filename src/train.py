@@ -32,6 +32,7 @@ from __future__ import annotations
 
 
 from datetime import datetime
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -101,6 +102,7 @@ def train_deterministic_mesh(
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
     best_val_loss = float('inf')
+    interactive = sys.stderr.isatty()    
 
     # Track loss history to see how the network behaves during training
     train_loss_history = []
@@ -113,7 +115,7 @@ def train_deterministic_mesh(
         epoch_sample_count = 0
         t0 = time.time()
 
-        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}") as tq_loader:
+        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for step, batch in enumerate(tq_loader):
                 packed_tokens  = batch["packed_tokens"].to(device)
                 packed_targets = batch["packed_targets"].to(device)
@@ -221,6 +223,7 @@ def train_learned_mesh_p1(
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")
+    interactive = sys.stderr.isatty() 
 
     train_loss_history = []
     val_loss_history = []
@@ -238,7 +241,7 @@ def train_learned_mesh_p1(
         epoch_n = 0
         n_steps = 0
 
-        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}") as tq_loader:
+        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for step, batch in enumerate(tq_loader):
                 grids        = batch["grids"].to(device)
                 grid_targets = batch["targets"].to(device)
@@ -369,6 +372,7 @@ def train_learned_mesh_p2(
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")
+    interactive = sys.stderr.isatty() 
 
     train_loss_history = []
     val_loss_history = []
@@ -384,7 +388,7 @@ def train_learned_mesh_p2(
         epoch_n = 0
         n_steps = 0
 
-        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}") as tq_loader:
+        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for step, batch in enumerate(tq_loader):
                 grids        = batch["grids"].to(device)
                 grid_targets = batch["targets"].to(device)

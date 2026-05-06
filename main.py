@@ -65,7 +65,7 @@ def main(args=None):
     # ----------------------------------------------------------------
     print("\n======== Building Dataset ========")
     if args.get("input_file") is not None: 
-        print(f"Using data from {args.get("input_file")}")
+        print(f"Using data from {args.get('input_file')}")
         dataset = AeroDataset(input_path=args.get("input_file"), target_path=args.get("target_file"))
         input_channels = dataset.input_channels
         output_dim     = dataset.output_dim
@@ -90,7 +90,7 @@ def main(args=None):
     if args.get("refinement_mode") == "deterministic":
         if args.get("refinement_criteria") not in CRITERIA_REGISTRY:
             valid = ", ".join(sorted(CRITERIA_REGISTRY))
-            raise KeyError(f"Unknown --refinement_criteria {args.get("refinement_criteria")!r}.\nAvailable options are: {valid}")
+            raise KeyError(f"Unknown --refinement_criteria {args.get('refinement_criteria')!r}.\nAvailable options are: {valid}")
 
         criteria = CRITERIA_REGISTRY[args.get("refinement_criteria")]
         
@@ -129,7 +129,7 @@ def main(args=None):
         # Allow partial loads: phase 2 starts from a transformer-only checkpoint
         # (no scorer weights yet), so strict=False is the right default here.
         missing, unexpected = model.load_state_dict(state, strict=False)
-        print(f"Loaded checkpoint {args.get("checkpoint_file")}")
+        print(f"Loaded checkpoint {args.get('checkpoint_file')}")
         print(f"  missing keys:    {len(missing)} (expected: scorer.* on first phase-2 run)")
         print(f"  unexpected keys: {len(unexpected)} (should be 0 or near 0)")
     elif args.get("training_phase") == 1:
