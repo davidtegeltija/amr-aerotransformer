@@ -115,10 +115,10 @@ class AeroDataset(Dataset):
         # Add operating conditions (angle of attack, Mach number) as inputs channels
         # The columns of the index file are defined in https://huggingface.co/datasets/yunplus/SuperWing
         self._index = np.load(path_index)
-        angle_of_attack = self._index[2]
-        mach_number = self._index[3]
-        aoa_channel = np.full((N, H, W, 1), fill_value=angle_of_attack, dtype=np.float32)
-        mach_channel = np.full((N, H, W, 1), fill_value=mach_number, dtype=np.float32)
+        angle_of_attack = self._index[:, 2]
+        mach_number = self._index[:, 3]
+        aoa_channel  = angle_of_attack.reshape(N, 1, 1, 1) * np.ones((N, H, W, 1), dtype=np.float32)
+        mach_channel = mach_number.reshape(N, 1, 1, 1) * np.ones((N, H, W, 1), dtype=np.float32)
         self._inputs = np.concatenate([self._inputs, aoa_channel, mach_channel], axis=-1)    # (N, H, W, C+2)
 
         # Expose dataset metadata
