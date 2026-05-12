@@ -98,7 +98,7 @@ def train_deterministic_mesh(
     checkpoint_path: Optional[str] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
     best_val_loss = float('inf')
@@ -134,7 +134,7 @@ def train_deterministic_mesh(
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-                scheduler.step()
+                # scheduler.step()
 
                 epoch_loss += loss.item()
 

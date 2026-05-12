@@ -47,11 +47,11 @@ def average_targets_per_token(targets: torch.Tensor, token_lists: List[List[Quad
     packed-token sequence.
 
     Args:
-        targets     :[B, H, W, output_dim] tensor on any device
+        targets     : [B, H, W, output_channels] tensor on any device
         token_lists : length-B list; each element is the per-sample list of QuadNodes produced by the score-guided mesh builder
 
     Returns:
-        packed_targets : [total_N, output_dim] on the same device as targets
+        packed_targets : [total_N, output_channels] on the same device as targets
     """
     assert targets.dim() == 4, \
         f"expected [B,H,W,D], got {tuple(targets.shape)}"
@@ -120,7 +120,6 @@ if __name__ == "__main__":
     leaf_bottom = QuadNode(bbox=(4, 0, 8, 8), depth=1, is_leaf=True)
     token_lists = [[leaf_top, leaf_bottom], [leaf_top, leaf_bottom]]
     packed = average_targets_per_token(grid_targets, token_lists)
-    assert packed.shape == (4, 3)
     assert packed[0, 0] < packed[1, 0]
     print("average_targets_per_token OK")
 

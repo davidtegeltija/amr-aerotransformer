@@ -66,9 +66,9 @@ def main(args=None):
     print("\n======== Building Dataset ========")
     if args.get("input_file") is not None: 
         print(f"Using data from {args.get('input_file')}")
-        dataset = AeroDataset(input_path=args.get("input_file"), target_path=args.get("target_file"))
+        dataset = AeroDataset(input_path=args.get("input_file"), target_path=args.get("target_file"), index_path=args.get("index_file"))
         input_channels = dataset.input_channels
-        output_dim     = dataset.output_dim
+        output_channels = dataset.output_channels
         n_val = max(1, int(args.get("val_split") * len(dataset)))
         train_dataset, val_dataset = random_split(dataset, [len(dataset) - n_val, n_val])
     else:
@@ -76,8 +76,8 @@ def main(args=None):
         seed = np.random.randint(0, 1e6)
         dataset = SyntheticDataset(n_samples=64, seed=seed)
         input_channels = dataset.input_channels
-        output_dim     = dataset.output_dim
-        n_val   = max(1, int(args.get("val_split") * len(dataset)))
+        output_channels = dataset.output_channels
+        n_val = max(1, int(args.get("val_split") * len(dataset)))
         train_dataset, val_dataset = random_split(dataset, [len(dataset) - n_val, n_val], generator=torch.Generator().manual_seed(seed),)
 
     # ----------------------------------------------------------------
@@ -106,11 +106,12 @@ def main(args=None):
 
     model = AdaptiveMeshAeroModel(
         input_channels=input_channels,
-        output_dim=output_dim,
+        output_channels=output_channels,
         d_model=args.get("d_model"),
         n_layers=args.get("n_layers"),
         n_heads=args.get("n_heads"),
         d_ff=args.get("d_ff"),
+        dropout=args.get("dropout"),
         min_depth=args.get("min_depth"),
         max_depth=args.get("max_depth"),
         refinement_mode=args.get("refinement_mode"),
@@ -160,33 +161,8 @@ def main(args=None):
     val_loader   = DataLoader(val_dataset,   batch_size=args.get("batch_size"), shuffle=False,
                               num_workers=args.get("num_workers"), collate_fn=collate_fn,
                               pin_memory=device.type == "cuda")
-
-    if args.get("training_phase") == 1:
-        train_loss_history, val_loss_history = train_learned_mesh_p1(
-            model, train_loader, val_loader, device,
-            epochs=args.get("epochs"),
-            lambda_budget=args.get("lambda_budget"),
-            lambda_smooth=args.get("lambda_smooth"),
-            tau_start=args.get("tau_start_phase1"),
-            tau_end=args.get("tau_end_phase1"),
-            scorer_lr=args.get("scorer_lr"),
-            n_max=args.get("n_max"),
-            save_path="outputs/checkpoints/phase1_scorer.pt",
-        )
-    elif args.get("training_phase") == 2:
-        train_loss_history, val_loss_history = train_learned_mesh_p2(
-            model, train_loader, val_loader, device,
-            epochs=args.get("epochs"),
-            lambda_budget=args.get("lambda_budget"),
-            lambda_smooth=args.get("lambda_smooth"),
-            tau_start=args.get("tau_start_phase2"),
-            tau_end=args.get("tau_end_phase2"),
-            scorer_lr=args.get("scorer_lr"),
-            transformer_lr=args.get("transformer_lr"),
-            n_max=args.get("n_max"),
-            save_path="outputs/checkpoints/phase2_joint.pt",
-        )
-    else:
+    
+    if args.get("refinement_mode") == "deterministic":
         train_loss_history, val_loss_history = train_deterministic_mesh(
             model, train_loader, val_loader, device,
             epochs=args.get("epochs"),
@@ -194,6 +170,33 @@ def main(args=None):
             warmup_steps=args.get("warmup_steps"),
             checkpoint_path="outputs/checkpoints",
         )
+    else:
+        if args.get("training_phase") == 1:
+            train_loss_history, val_loss_history = train_learned_mesh_p1(
+                model, train_loader, val_loader, device,
+                epochs=args.get("epochs"),
+                lambda_budget=args.get("lambda_budget"),
+                lambda_smooth=args.get("lambda_smooth"),
+                tau_start=args.get("tau_start_phase1"),
+                tau_end=args.get("tau_end_phase1"),
+                scorer_lr=args.get("scorer_lr"),
+                n_max=args.get("n_max"),
+                save_path="outputs/checkpoints/phase1_scorer.pt",
+            )
+        elif args.get("training_phase") == 2:
+            train_loss_history, val_loss_history = train_learned_mesh_p2(
+                model, train_loader, val_loader, device,
+                epochs=args.get("epochs"),
+                lambda_budget=args.get("lambda_budget"),
+                lambda_smooth=args.get("lambda_smooth"),
+                tau_start=args.get("tau_start_phase2"),
+                tau_end=args.get("tau_end_phase2"),
+                scorer_lr=args.get("scorer_lr"),
+                transformer_lr=args.get("transformer_lr"),
+                n_max=args.get("n_max"),
+                save_path="outputs/checkpoints/phase2_joint.pt",
+            )
+
 
     config_name = Path(cli.config).stem
     plot_loss_curves(train_loss_history, val_loss_history, args.get("epochs"), save_path=f"outputs/loss/{config_name}_config_loss.png")

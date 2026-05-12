@@ -14,7 +14,7 @@ from src.utils.prediction_visualization import plot_flow_comparison, plot_3d_pre
 if __name__ == "__main__":
     model = AdaptiveMeshAeroModel(
         input_channels=3,
-        output_dim=3,
+        output_channels=3,
         d_model=256,
         n_layers=6,
         n_heads=4,
@@ -26,7 +26,7 @@ if __name__ == "__main__":
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
-    dataset = AeroDataset(input_path="data/crmmgeom.npy", target_path="data/crmmdata.npy")
+    dataset = AeroDataset(input_path="data/crmmgeom.npy", target_path="data/crmmdata.npy", index_path="data/crmmindex.npy")
     first_sample = dataset[0]
     input = first_sample["input"]
     input = torch.from_numpy(input)
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     # sample = sample.transpose(2, 1, 0).astype(np.float32)  # (H, W, C) = (128, 256, 3)
     # input = torch.from_numpy(sample)
     # prediction = model.forward_single(input)
-    # prediction = prediction["prediction"].cpu().numpy()  # [H, W, output_dim]
+    # prediction = prediction["prediction"].cpu().numpy()  # [H, W, output_channels]
 
     # target_data = np.load("data/crmmdata.npy")
     # ground_truth = target_data[0]

@@ -18,11 +18,11 @@ class DeterministicCollateFn:
     Python's multiprocessing.
  
     Batch dict keys:
-        packed_tokens  : [total_N, C+4]            concatenated tokenized inputs
-        packed_targets : [total_N, output_dim]     per-token averaged ground truth
-        seq_lens       : List[int]                 token count per sample
-        token_lists    : List[List[QuadNode]]      leaf nodes per sample
-        grid_targets   : [B, H, W, output_dim]     full-resolution GT for evaluation
+        packed_tokens  : [total_N, C+4]             concatenated tokenized inputs
+        packed_targets : [total_N, output_channels] per-token averaged ground truth
+        seq_lens       : List[int]                  token count per sample
+        token_lists    : List[List[QuadNode]]       leaf nodes per sample
+        grid_targets   : [B, H, W, output_channels] full-resolution GT for evaluation
         grid_shape     : (H, W)
     """
  
@@ -38,14 +38,14 @@ class DeterministicCollateFn:
  
         for s in samples:
             input = s["input"]   # [H, W, C]
-            target = s["target"]  # [H, W, output_dim]
+            target = s["target"]  # [H, W, output_channels]
  
             token_arr, leaves = self.tokenizer.tokenize(input)
  
-            H, W       = target.shape[:2]
-            output_dim = target.shape[2]
-            N          = len(leaves)
-            token_target  = np.zeros((N, output_dim), dtype=np.float32)
+            H, W = target.shape[:2]
+            output_channels = target.shape[2]
+            N = len(leaves)
+            token_target  = np.zeros((N, output_channels), dtype=np.float32)
             for i, node in enumerate(leaves):
                 token_target[i] = target[node.r0:node.r1, node.c0:node.c1].mean(axis=(0, 1))
  
@@ -68,7 +68,7 @@ class LearnedCollateFn:
     """Stacks per-sample input/target grids into a batch. No tokenization."""
 
     def __call__(self, samples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        grids = torch.stack([torch.from_numpy(np.asarray(s["input"], dtype=np.float32)) for s in samples])   # [B, H, W, C]
-        targets = torch.stack([torch.from_numpy(np.asarray(s["target"], dtype=np.float32)) for s in samples])   # [B, H, W, output_dim]
+        grids = torch.stack([torch.from_numpy(np.asarray(s["input"], dtype=np.float32)) for s in samples])    # [B, H, W, C]
+        targets = torch.stack([torch.from_numpy(np.asarray(s["target"], dtype=np.float32)) for s in samples]) # [B, H, W, output_channels]
 
         return {"grids": grids, "targets": targets}

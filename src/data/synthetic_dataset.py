@@ -9,7 +9,10 @@ make_synthetic_field  - raw numpy field generator (shockwave + vortex + turbulen
 SyntheticDataset      - PyTorch Dataset wrapping make_synthetic_field
 
 Returns samples as:
-    {"input": np.ndarray [H, W, C], "target": np.ndarray [H, W, output_dim]}
+    {
+        "input": np.ndarray [H, W, C], 
+        "target": np.ndarray [H, W, output_channels]
+    }
 """
 
 from typing import Dict
@@ -123,12 +126,12 @@ class SyntheticDataset(Dataset):
         p = -0.5 * (u ** 2 + v ** 2)
         self._targets = np.stack([u, v, p], axis=-1).astype(np.float32)  # [N, H, W, 3]
 
-        self.H, self.W      = height, width
+        self.H, self.W = height, width
         self.input_channels = self._inputs.shape[-1]
-        self.output_dim     = self._targets.shape[-1]
+        self.output_channels = self._targets.shape[-1]
         print(f"SyntheticDataset: {n_samples} samples  |  "
               f"grid {self.H}x{self.W}  |  "
-              f"input_channels={self.input_channels}  output_dim={self.output_dim}")
+              f"input_channels={self.input_channels}  output_channels={self.output_channels}")
 
     def __len__(self) -> int:
         return len(self._inputs)

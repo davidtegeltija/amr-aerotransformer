@@ -32,12 +32,12 @@ def plot_flow_comparison(
     if ground_truth.shape != prediction.shape:
         raise ValueError(f"Shape mismatch: ground_truth={ground_truth.shape} prediction={prediction.shape}")
     
-    output_dim = ground_truth.shape[-1]
-    names = channel_names or [f"channel {i}" for i in range(output_dim)]
+    output_channels = ground_truth.shape[-1]
+    names = channel_names or [f"channel {i}" for i in range(output_channels)]
 
     # 3 cols per output channel: GT | Pred | |Error|
     n_cols = 3
-    n_rows = output_dim
+    n_rows = output_channels
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * figsize_per_col, n_rows * figsize_per_col))
 
     if n_rows == 1:
@@ -45,7 +45,7 @@ def plot_flow_comparison(
 
     fig.suptitle(title, fontsize=13, y=1.01)
 
-    for r in range(output_dim):
+    for r in range(output_channels):
         gt = ground_truth[..., r]
         pred = prediction[..., r]
         err  = np.abs(gt - pred)

@@ -12,7 +12,7 @@ grid -> RefinementNet scorer -> score-guided quadtree -> transformer
       ↓ inline token packing
     packed_tokens [total_N, C+4]
       ↓ AeroTransformer
-    token predictions [total_N, output_dim]
+    token predictions [total_N, output_channels]
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ class AdaptiveMeshAeroModel(nn.Module):
 
     Parameters
     ----------
-    input_channels      : C - number of physical input channels
-    output_dim          : number of predicted quantities (e.g. 3 for u, v, p)
+    input_channels      : number of physical input channels
+    output_channels     : number of predicted quantities (e.g. 3 for u, v, p)
     d_model             : transformer hidden dimension
     n_layers            : number of transformer encoder layers
     n_heads             : number of attention heads
@@ -61,7 +61,7 @@ class AdaptiveMeshAeroModel(nn.Module):
     def __init__(
         self,
         input_channels: int,
-        output_dim: int = 3,
+        output_channels: int = 3,
         d_model: int = 256,
         n_layers: int = 6,
         n_heads: int = 4,
@@ -85,7 +85,7 @@ class AdaptiveMeshAeroModel(nn.Module):
             )
 
         self.input_channels = input_channels
-        self.output_dim = output_dim
+        self.output_channels = output_channels
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.min_cell_size = min_cell_size
@@ -104,7 +104,7 @@ class AdaptiveMeshAeroModel(nn.Module):
         token_dim = input_channels + 4  # C + (x_c, y_c, s, d_norm)
         self.transformer = AeroTransformer(
             token_dim=token_dim,
-            output_dim=output_dim,
+            output_channels=output_channels,
             d_model=d_model,
             n_layers=n_layers,
             n_heads=n_heads,
@@ -138,7 +138,7 @@ class AdaptiveMeshAeroModel(nn.Module):
 
         Returns:
             Dict with keys:
-                token_preds: [total_N, output_dim]
+                token_preds: [total_N, output_channels]
                 score_map:   None  (no scorer in this mode)
                 soft_N:      None  (no budget loss in this mode)
                 seq_lens:    List[int] (len B)
@@ -163,7 +163,7 @@ class AdaptiveMeshAeroModel(nn.Module):
 
         Returns:
             Dict with keys:
-                token_preds: [total_N, output_dim] from the transformer
+                token_preds: [total_N, output_channels] from the transformer
                 score_map:   [B, 1, H, W] raw CNN output (kept attached for L_smooth)
                 soft_N:      0-dim differentiable tensor = mean-over-batch soft_N
                 seq_lens:    List[int] (len B), tokens per sample

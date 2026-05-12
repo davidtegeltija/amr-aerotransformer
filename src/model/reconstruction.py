@@ -35,32 +35,32 @@ def tokens_to_grid(
     token_list: List[QuadNode],
     H: int,
     W: int,
-    output_dim: int,
+    output_channels: int,
     mode: str = "fill",
 ) -> torch.Tensor:
     """
-    Reconstruct the full [H, W, output_dim] prediction grid from token predictions.
+    Reconstruct the full [H, W, output_channels] prediction grid from token predictions.
 
     Parameters
     ----------
-    predictions : [N, output_dim] - per-token flow predictions (on any device)
-    token_list  : list of N QuadNode objects
-    H, W        : original grid dimensions
-    output_dim  : number of output channels (e.g. 3 for u, v, p)
-    mode        : "fill"   - fast nearest-fill (default)
-                  "interp" - bilinear interpolation from token centres
+    predictions     : [N, output_channels] - per-token flow predictions (on any device)
+    token_list      : list of N QuadNode objects
+    H, W            : original grid dimensions
+    output_channels : number of output channels (e.g. 3 for u, v, p)
+    mode            : "fill"   - fast nearest-fill (default)
+                      "interp" - bilinear interpolation from token centres
 
     Returns
     -------
-    grid : [H, W, output_dim] float32 tensor (on CPU)
+    grid : [H, W, output_channels] float32 tensor (on CPU)
     """
     assert mode in ("fill", "interp"), f"Unknown mode: {mode}"
-    preds_np = predictions.detach().cpu().numpy()  # [N, output_dim]
+    preds_np = predictions.detach().cpu().numpy()  # [N, output_channels]
 
     if mode == "fill":
-        return _fill_reconstruction(preds_np, token_list, H, W, output_dim)
+        return _fill_reconstruction(preds_np, token_list, H, W, output_channels)
     else:
-        return _interp_reconstruction(preds_np, token_list, H, W, output_dim)
+        return _interp_reconstruction(preds_np, token_list, H, W, output_channels)
 
 
 # ---------------------------------------------------------------------------
@@ -72,10 +72,10 @@ def _fill_reconstruction(
     token_list: List[QuadNode],
     H: int,
     W: int,
-    output_dim: int,
+    output_channels: int,
 ) -> torch.Tensor:
     """Fill the bounding box of each token with its prediction."""
-    grid = np.zeros((H, W, output_dim), dtype=np.float32)
+    grid = np.zeros((H, W, output_channels), dtype=np.float32)
     # Process tokens from coarsest (largest cells) to finest so that finer
     # cells overwrite coarser ones - consistent with AMR multi-scale storage.
     order = sorted(range(len(token_list)), key=lambda i: -(token_list[i].width * token_list[i].height))
@@ -94,7 +94,7 @@ def _interp_reconstruction(
     token_list: List[QuadNode],
     H: int,
     W: int,
-    output_dim: int,
+    output_channels: int,
 ) -> torch.Tensor:
     """
     Scatter token predictions to their centres on a sparse grid, then
@@ -104,7 +104,7 @@ def _interp_reconstruction(
     """
     # Build a sparse canvas at the resolution of the finest tokens
     # We use the full H×W canvas with scattered values + count for averaging
-    sum_grid   = np.zeros((H, W, output_dim), dtype=np.float64)
+    sum_grid   = np.zeros((H, W, output_channels), dtype=np.float64)
     count_grid = np.zeros((H, W, 1), dtype=np.float64)
 
     for idx, t in enumerate(token_list):
@@ -138,7 +138,7 @@ def batch_tokens_to_grid(
     seq_lens: List[int],
     H: int,
     W: int,
-    output_dim: int,
+    output_channels: int,
     mode: str = "fill",
 ) -> torch.Tensor:
     """
@@ -146,16 +146,16 @@ def batch_tokens_to_grid(
 
     Parameters
     ----------
-    predictions : [total_N, output_dim]
-    token_lists : list of B token lists (one per sample)
-    seq_lens    : list of B token counts (must sum to total_N)
-    H, W        : grid dimensions
-    output_dim  : output channels
-    mode        : "fill" or "interp"
+    predictions     : [total_N, output_channels]
+    token_lists     : list of B token lists (one per sample)
+    seq_lens        : list of B token counts (must sum to total_N)
+    H, W            : grid dimensions
+    output_channels : output channels
+    mode            : "fill" or "interp"
 
     Returns
     -------
-    grids : [B, H, W, output_dim]
+    grids : [B, H, W, output_channels]
     """
     B = len(token_lists)
     grids = []
@@ -163,7 +163,7 @@ def batch_tokens_to_grid(
     for b in range(B):
         L = seq_lens[b]
         preds_b = predictions[offset:offset + L]
-        grid_b  = tokens_to_grid(preds_b, token_lists[b], H, W, output_dim, mode=mode)
+        grid_b  = tokens_to_grid(preds_b, token_lists[b], H, W, output_channels, mode=mode)
         grids.append(grid_b)
         offset += L
-    return torch.stack(grids, dim=0)  # [B, H, W, output_dim]
+    return torch.stack(grids, dim=0)  # [B, H, W, output_channels]

@@ -67,7 +67,7 @@ def create_sample_npz(
     
     Args:
         input_array  : [H, W, C] float32 input field
-        target_array : [H, W, output_dim] float32 target field
+        target_array : [H, W, output_channels] float32 target field
         save_path    : if given, write a compressed .npz to this path with keys 'input' and 'target'`.'
     """
     if save_path:

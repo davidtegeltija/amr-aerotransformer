@@ -5,10 +5,10 @@ Transformer-based neural solver for the adaptive mesh CFD pipeline.
 
 Architecture
 ------------
-  token_embedding : MLP(C+4  → d_model)          projects raw tokens to latent space
-  positional_enc  : learned MLP(4 → d_model)      encodes (x_c, y_c, s, d_norm)
+  token_embedding : MLP(C+4  → d_model)            projects raw tokens to latent space
+  positional_enc  : learned MLP(4 → d_model)       encodes (x_c, y_c, s, d_norm)
   transformer_enc : nn.TransformerEncoder          6 layers, 4 heads, d_model=256, ff=1024
-  prediction_head : MLP(d_model → output_dim)     per-token flow-field prediction
+  prediction_head : MLP(d_model → output_channels) per-token flow-field prediction
 
 Batching strategy (FlashAttention / sequence packing)
 ------------------------------------------------------
@@ -117,7 +117,6 @@ class TokenEmbedding(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    # TODO : try without this encoding
     """
     Learned positional encoding from spatial meta-data:
         input  : [N, 4]  → (x_c, y_c, s, d_norm)
@@ -289,13 +288,13 @@ class AeroTransformer(nn.Module):
         seq_lens : [N]
 
     Returns:
-        predictions: [total_N, output_dim]  - token-level flow predictions
+        predictions: [total_N, output_channels]  - token-level flow predictions
     """
 
     def __init__(
         self,
         token_dim: int,           # C + 4  (physical channels + positional meta)
-        output_dim: int = 3,      # e.g. u, v, p
+        output_channels: int = 3,      # e.g. u, v, p
         d_model: int = 256,
         n_layers: int = 6,
         n_heads: int = 4,
@@ -324,7 +323,7 @@ class AeroTransformer(nn.Module):
         ])
 
         # --- Prediction head ---
-        self.head = MLP(d_model, d_model, output_dim, dropout=dropout)
+        self.head = MLP(d_model, d_model, output_channels, dropout=dropout)
 
         self._init_weights()
 
@@ -344,7 +343,7 @@ class AeroTransformer(nn.Module):
         tokens   : [total_N, token_dim]
         seq_lens : list of per-sample token counts
 
-        Returns predictions: [total_N, output_dim]
+        Returns predictions: [total_N, output_channels]
         """
         device = tokens.device
         total_N = tokens.shape[0]
@@ -372,4 +371,4 @@ class AeroTransformer(nn.Module):
             x = layer(x, attn_mask=attn_mask, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
 
         # Per-token predictions
-        return self.head(x)  # [total_N, output_dim]
+        return self.head(x)  # [total_N, output_channels]
