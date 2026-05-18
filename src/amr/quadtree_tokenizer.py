@@ -114,18 +114,12 @@ class QuadtreeTokenizer:
         token_array = self._tokens_to_array(token_list, H, W, C)
         return token_array, token_list
 
-    def tokenize_tensor(self, grid: torch.Tensor) -> Tuple[torch.Tensor, List[QuadNode]]:
-        """Convenience wrapper that accepts and returns torch.Tensor."""
-        arr = grid.cpu().numpy() if isinstance(grid, torch.Tensor) else grid
-        token_np, token_list = self.tokenize(arr)
-        return torch.from_numpy(token_np), token_list
-
     # ------------------------------------------------------------------
     # Conversion helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _tokens_to_array(tokens: List[QuadNode], H: int, W: int, C: int, max_depth: int = 20) -> np.ndarray:
+    def _tokens_to_array(tokens: List[QuadNode], H: int, W: int, C: int) -> np.ndarray:
         """
         Stack leaf QuadNodes (tokens) into a [N, C+4] float32 array.
         
@@ -134,15 +128,14 @@ class QuadtreeTokenizer:
             C       : x_center  -- normalised column centre  = (c0+c1)/2 / W
             C+1     : y_center  -- normalised row centre     = (r0+r1)/2 / H
             C+2     : cell_size -- normalised max dimension  = max(width/W, height/H)
-            C+3     : depth_norm -- depth / max_depth
         """
         N = len(tokens)
         arr = np.empty((N, C + 4), dtype=np.float32)
         for i, token in enumerate(tokens):
-            arr[i, :C]  = token.features if token.features is not None else 0.0
-            arr[i, C]   = (token.c0 + token.c1) / 2.0 / W   # x_center
-            arr[i, C+1] = (token.r0 + token.r1) / 2.0 / H   # y_center
+            y_center, x_center = token.center
+            arr[i, :C] = token.features if token.features is not None else 0.0
+            arr[i, C] = x_center / W   # x_center
+            arr[i, C+1] = y_center / H   # y_center
             arr[i, C+2] = max(token.width / W, token.height / H)  # cell_size
-            arr[i, C+3] = token.depth / max_depth
         return arr
 

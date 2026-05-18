@@ -101,7 +101,7 @@ class AdaptiveMeshAeroModel(nn.Module):
         self.tau = 1.0  # Gumbel-Softmax temperature; unused in deterministic mode.
 
         # --- Transformer solver ---
-        token_dim = input_channels + 4  # C + (x_c, y_c, s, d_norm)
+        token_dim = input_channels + 3  # C + (x_center, y_center, size)
         self.transformer = AeroTransformer(
             token_dim=token_dim,
             output_channels=output_channels,
@@ -134,7 +134,7 @@ class AdaptiveMeshAeroModel(nn.Module):
 
         Args:
             packed_tokens : [total_N, C+4]  - concatenated tokens of all samples
-            seq_lens      : List[int]        - per-sample token counts
+            seq_lens      : List[int]       - per-sample token counts
 
         Returns:
             Dict with keys:
@@ -215,6 +215,7 @@ class AdaptiveMeshAeroModel(nn.Module):
             "token_lists": token_lists,
         }
 
+
     def _pack_tokens(self, leaves, H, W, C):
         """Extract the token-packing loop into a reusable method."""
         N = len(leaves)
@@ -225,12 +226,8 @@ class AdaptiveMeshAeroModel(nn.Module):
             tokens[i, C]      = (c0 + c1) / 2.0 / W
             tokens[i, C + 1]  = (r0 + r1) / 2.0 / H
             tokens[i, C + 2]  = max((c1 - c0) / W, (r1 - r0) / H)
-            tokens[i, C + 3]  = leaf.depth / self.max_depth
         return tokens
 
-    # ------------------------------------------------------------------
-    # Parameter count
-    # ------------------------------------------------------------------
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

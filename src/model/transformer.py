@@ -31,8 +31,7 @@ its `varlen` (variable-length) API.
 
 from __future__ import annotations
 
-import math
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -81,80 +80,10 @@ def _make_cumulative_seqlens(seq_lengths: List[int], device: torch.device) -> to
 
 
 # ---------------------------------------------------------------------------
-# Building blocks
+# Packed-sequence Transformer Block
 # ---------------------------------------------------------------------------
 
-class MLP(nn.Module):
-    """Simple 2-layer MLP with GELU activation and optional dropout."""
-
-    def __init__(self, in_dim: int, hidden_dim: int, out_dim: int, dropout: float = 0.0):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, out_dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-class TokenEmbedding(nn.Module):
-    """
-    Projects raw token features [C+4] into the latent space [d_model].
-
-    C+4 = C physical channels + (x_c, y_c, s, d_norm).
-    """
-
-    def __init__(self, in_dim: int, d_model: int, dropout: float = 0.1):
-        super().__init__()
-        self.proj = MLP(in_dim, d_model * 2, d_model, dropout=dropout)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(self.proj(x))
-
-
-class PositionalEncoding(nn.Module):
-    """
-    Learned positional encoding from spatial meta-data:
-        input  : [N, 4]  → (x_c, y_c, s, d_norm)
-        output : [N, d_model]
-
-    We use a small MLP with sinusoidal feature expansion as the first layer
-    (Fourier features), following common practice in neural fields.
-    """
-
-    def __init__(self, d_model: int, n_fourier: int = 64):
-        super().__init__()
-        # Fixed Fourier frequencies (not learned) - doubles expressiveness
-        self.register_buffer(
-            'freqs',
-            2.0 ** torch.linspace(0, 8, n_fourier // 2).unsqueeze(0)  # [1, F/2]
-        )
-        fourier_dim = 4 * n_fourier  # 4 spatial inputs × n_fourier features
-        self.mlp = MLP(fourier_dim, d_model * 2, d_model)
-        self.norm = nn.LayerNorm(d_model)
-
-    def forward(self, pos: torch.Tensor) -> torch.Tensor:
-        """
-        pos: [..., 4]  (x_c, y_c, s, d_norm)
-        returns: [..., d_model]
-        """
-        # Fourier expansion: sin + cos for each frequency
-        # pos: [..., 4] → [..., 4, 1] × [1, F/2] → [..., 4, F/2]
-        angles = pos.unsqueeze(-1) * self.freqs  # [..., 4, F/2]
-        features = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # [..., 4, F]
-        features = features.flatten(-2)  # [..., 4*F]
-        return self.norm(self.mlp(features))
-
-
-# ---------------------------------------------------------------------------
-# Packed-sequence FlashAttention layer
-# ---------------------------------------------------------------------------
-
-class PackedFlashTransformerEncoderLayer(nn.Module):
+class TransformerBlock(nn.Module):
     """
     Transformer encoder layer that operates on a packed sequence.
     Uses FlashAttention-2 varlen API when available, otherwise falls back
@@ -293,8 +222,8 @@ class AeroTransformer(nn.Module):
 
     def __init__(
         self,
-        token_dim: int,           # C + 4  (physical channels + positional meta)
-        output_channels: int = 3,      # e.g. u, v, p
+        token_dim: int,           # C + 3  (physical channels + positional meta)
+        output_channels: int = 3,
         d_model: int = 256,
         n_layers: int = 6,
         n_heads: int = 4,
@@ -305,25 +234,46 @@ class AeroTransformer(nn.Module):
         super().__init__()
         self.token_dim = token_dim
         self.d_model = d_model
-        self.pos_dim = 4  # (x_c, y_c, s, d_norm)
+        self.pos_dim = 3
 
-        phys_dim = token_dim - self.pos_dim  # C
+        # --- Token Embedding layer ---
+        # Projects raw token features [C] into the latent space [d_model]
+        self.token_embedding = nn.Sequential(
+            nn.LayerNorm(token_dim),
+            nn.Linear(token_dim, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model)
+        )
 
-        # --- Embedding layers ---
-        self.token_embedding = TokenEmbedding(token_dim, d_model, dropout=dropout)
-        self.pos_encoding    = PositionalEncoding(d_model, n_fourier=n_fourier)
+        # --- Positional Embedding layer ---
+        # Fixed log-spaced frequencies, not learned
+        self.register_buffer("pos_freqs", 2.0 ** torch.linspace(0, 8, n_fourier // 2).unsqueeze(0))  # [1, F/2]
+        fourier_dim = self.pos_dim * n_fourier
+        # Projects raw token position meta [3] into the latent space [d_model].
+        self.pos_embedding = nn.Sequential(
+            nn.Linear(fourier_dim, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, d_model),
+            nn.LayerNorm(d_model),
+        )
 
-        # Combine token + positional embeddings
+        # --- Combine token + positional embeddings ---
         self.input_norm = nn.LayerNorm(d_model)
 
         # --- Transformer encoder ---
         self.layers = nn.ModuleList([
-            PackedFlashTransformerEncoderLayer(d_model, n_heads, d_ff, dropout)
+            TransformerBlock(d_model, n_heads, d_ff, dropout)
             for _ in range(n_layers)
         ])
 
         # --- Prediction head ---
-        self.head = MLP(d_model, d_model, output_channels, dropout=dropout)
+        self.head = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, output_channels),
+        )
 
         self._init_weights()
 
@@ -333,6 +283,19 @@ class AeroTransformer(nn.Module):
                 nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+
+    def embedd_position(self, pos: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pos:   [total_N, 3]  (x_c, y_c, size)
+            freqs: [1, F/2]      fixed log-spaced frequencies
+        
+        Returns:
+            [total_N, 3*F]  Fourier features
+        """
+        angles = pos.unsqueeze(-1) * freqs # [total_N, 3, F/2]
+        features = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        return features.flatten(-2) # [total_N, 3*F]
 
     def forward(
         self,
@@ -346,14 +309,14 @@ class AeroTransformer(nn.Module):
         Returns predictions: [total_N, output_channels]
         """
         device = tokens.device
-        total_N = tokens.shape[0]
 
         # Split into physical features and positional meta
-        pos = tokens[:, -self.pos_dim:]          # [total_N, 4]
+        physical_channels = tokens[:, :-self.pos_dim]       # [total_N, 5]
+        positional_channels = tokens[:, -self.pos_dim:]     # [total_N, 3]
 
         # Embed
-        tok_emb = self.token_embedding(tokens)   # [total_N, d_model]
-        pos_emb = self.pos_encoding(pos)         # [total_N, d_model]
+        tok_emb = self.token_embedding(physical_channels)   # [total_N, d_model]
+        pos_emb = self.pos_embedding(self.embedd_position(positional_channels, self.pos_freqs)) # [total_N, d_model]
         x = self.input_norm(tok_emb + pos_emb)   # [total_N, d_model]
 
         # Prepare attention infrastructure
