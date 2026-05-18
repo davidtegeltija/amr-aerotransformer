@@ -1,0 +1,26 @@
+# ViT baseline — dense prediction on [H, W, C] grids, NMSE loss only.
+# ---- Data ----
+input_file: "data/crmmgeom.npy"            # path to .npy/.npz (channel-last [N,H,W,C])
+target_file: "data/crmmdata.npy"
+index_file: "data/crmmindex.npy"            # AoA, Mach per sample
+val_split: 0.1
+
+# ---- Model ----
+model_type: vit             # switch consumed by the entry point
+image_size: [256, 128]      # must match dataset H, W
+patch_size: 4               # H and W must be divisible by this
+n_hidden: 256               # must be divisible by n_head; divisible by 4 if sincos
+n_layers: 6
+n_head: 8
+mlp_ratio: 4
+dropout: 0.1
+pos_embedding: sincos       # or 'trainable'
+
+# ---- Training ----
+epochs: 200
+batch_size: 8
+lr: 1.0e-4
+weight_decay: 1.0e-4
+grad_clip: 1.0
+num_workers: 4
+checkpoint_path: outputs/vit

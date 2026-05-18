@@ -14,7 +14,8 @@ from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn
 from src.data.dataset import AeroDataset
 from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.train import train_deterministic_mesh, train_learned_mesh_p1, train_learned_mesh_p2
+from src.model.vit import ViT
+from src.train import train_deterministic_mesh, train_learned_mesh_p1, train_learned_mesh_p2, train_vit
 from src.utils.train_utils import plot_loss_curves
 
 
@@ -79,6 +80,62 @@ def main(args=None):
         output_channels = dataset.output_channels
         n_val = max(1, int(args.get("val_split") * len(dataset)))
         train_dataset, val_dataset = random_split(dataset, [len(dataset) - n_val, n_val], generator=torch.Generator().manual_seed(seed),)
+
+    # ----------------------------------------------------------------
+    # ViT baseline branch (standalone, no AMR / scorer / quadtree)
+    # ----------------------------------------------------------------
+    if args.get("model_type") == "vit":
+        print("\n======== Model (ViT baseline) ========")
+        H, W = args.get("image_size")
+        patch_size = args.get("patch_size")
+        n_hidden = args.get("n_hidden")
+        n_head = args.get("n_head")
+        pos_embedding = args.get("pos_embedding", "sincos")
+        assert H % patch_size == 0 and W % patch_size == 0, \
+            f"image_size {(H, W)} must be divisible by patch_size {patch_size}"
+        assert n_hidden % n_head == 0, \
+            f"n_hidden {n_hidden} must be divisible by n_head {n_head}"
+        assert pos_embedding != "sincos" or n_hidden % 4 == 0, \
+            f"n_hidden {n_hidden} must be divisible by 4 when pos_embedding='sincos'"
+
+        model = ViT(
+            image_size=(H, W),
+            patch_size=patch_size,
+            fun_dim=input_channels,
+            out_dim=output_channels,
+            n_layers=args.get("n_layers"),
+            n_hidden=n_hidden,
+            n_head=n_head,
+            mlp_ratio=args.get("mlp_ratio"),
+            dropout=args.get("dropout"),
+            pos_embedding=pos_embedding,
+        ).to(device)
+        print(f"ViT parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+        collate_fn = LearnedCollateFn()
+        train_loader = DataLoader(train_dataset, batch_size=args.get("batch_size"),
+                                  num_workers=args.get("num_workers"), shuffle=True,
+                                  collate_fn=collate_fn,
+                                  pin_memory=device.type == "cuda")
+        val_loader = DataLoader(val_dataset, batch_size=args.get("batch_size"),
+                                num_workers=args.get("num_workers"), shuffle=False,
+                                collate_fn=collate_fn,
+                                pin_memory=device.type == "cuda")
+
+        ckpt_path = args.get("checkpoint_path", "outputs/vit")
+        train_loss_history, val_loss_history = train_vit(
+            model, train_loader, val_loader, device,
+            epochs=args.get("epochs"),
+            lr=args.get("lr"),
+            weight_decay=args.get("weight_decay"),
+            grad_clip=args.get("grad_clip"),
+            save_path=f"{ckpt_path}/best.pt",
+        )
+
+        config_name = Path(cli.config).stem
+        plot_loss_curves(train_loss_history, val_loss_history, args.get("epochs"),
+                         save_path=f"outputs/loss/{config_name}_config_loss.png")
+        return
 
     # ----------------------------------------------------------------
     # Model

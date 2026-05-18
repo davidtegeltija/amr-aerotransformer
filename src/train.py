@@ -35,9 +35,8 @@ from datetime import datetime
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -460,6 +459,103 @@ def _validate_phase3(model, val_loader, device) -> float:
             out = model(grids)
             packed_targets = average_targets_per_token(targets, out["token_lists"])
             total += nmse_loss(out["token_preds"], packed_targets).item()
+            n += 1
+    model.train()
+    return total / max(1, n)
+
+
+# ---------------------------------------------------------------------------
+# ViT baseline training (dense prediction, NMSE only)
+# ---------------------------------------------------------------------------
+if TYPE_CHECKING:
+    from src.model.vit import ViT
+
+def train_vit(
+    model: "ViT",
+    train_loader: DataLoader,
+    val_loader: Optional[DataLoader],
+    device: torch.device,
+    *,
+    epochs: int,
+    lr: float = 1e-4,
+    weight_decay: float = 1e-4,
+    grad_clip: float = 1.0,
+    save_path: str = "outputs/vit/best.pt",
+) -> Tuple[List[float], List[Optional[float]]]:
+    """Train a ViT on dense [B, H, W, C] grids with NMSE loss only.
+
+    Args:
+        model: ViT instance (src.model.vit.ViT).
+        train_loader: DataLoader yielding {"grids": [B,H,W,C], "targets": [B,H,W,OC]}.
+        val_loader: Optional validation DataLoader (same batch dict shape).
+        device: torch device.
+        epochs: Number of training epochs.
+        lr: AdamW learning rate.
+        weight_decay: AdamW weight decay.
+        grad_clip: Max grad-norm for clipping.
+        save_path: Path to write best-val checkpoint.
+
+    Returns:
+        (train_loss_history, val_loss_history). val entries are None when
+        val_loader is None.
+    """
+    model = model.to(device)
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+    best_val = float("inf")
+    train_hist: List[float] = []
+    val_hist: List[Optional[float]] = []
+    interactive = sys.stderr.isatty()
+
+    for epoch in range(epochs):
+        model.train()
+        epoch_loss, n_steps = 0.0, 0
+        with tqdm(train_loader, leave=False,
+                  desc=f"ViT epoch {epoch}/{epochs}",
+                  disable=not interactive) as tq:
+            for batch in tq:
+                grids   = batch["grids"].to(device).permute(0, 3, 1, 2).float()
+                targets = batch["targets"].to(device).permute(0, 3, 1, 2).float()
+
+                preds = model(grids)
+                loss  = nmse_loss(preds, targets)
+
+                optimizer.zero_grad()
+                loss.backward()
+                clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                n_steps    += 1
+        scheduler.step()
+
+        train_hist.append(epoch_loss / max(1, n_steps))
+
+        val_loss = _validate_vit(model, val_loader, device) if val_loader else None
+        val_hist.append(val_loss)
+
+        print(f"[vit] epoch {epoch:03d}/{epochs}  "
+              f"train={train_hist[-1]:.4f}"
+              + (f"  val={val_loss:.4f}" if val_loss is not None else ""))
+
+        if val_loss is not None and val_loss < best_val:
+            best_val = val_loss
+            torch.save({"model": model.state_dict(),
+                        "epoch": epoch, "val_loss": val_loss}, save_path)
+
+    return train_hist, val_hist
+
+
+def _validate_vit(model, val_loader, device) -> float:
+    model.eval()
+    total, n = 0.0, 0
+    with torch.no_grad():
+        for batch in val_loader:
+            grids   = batch["grids"].to(device).permute(0, 3, 1, 2).float()
+            targets = batch["targets"].to(device).permute(0, 3, 1, 2).float()
+            total += nmse_loss(model(grids), targets).item()
             n += 1
     model.train()
     return total / max(1, n)

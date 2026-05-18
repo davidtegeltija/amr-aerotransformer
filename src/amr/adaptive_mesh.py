@@ -40,6 +40,7 @@ def build_adaptive_mesh(
     max_depth: int = 6,
     min_cell_size: int = 4,
     refinement_criteria: Optional[RefinementCriteria] = None,
+    uniform_cell_size: Optional[int] = None,
 ) -> List[QuadNode]:
     """
     Build an adaptive mesh over a single physical field.
@@ -56,6 +57,10 @@ def build_adaptive_mesh(
         Thresholds controlling subdivision.  Defaults to AERODYNAMIC_CONFIG.
         Use config.scale(factor) to uniformly loosen or tighten the mesh.
         Set individual thresholds to None to disable specific metrics.
+    uniform_cell_size : int, optional
+        When set, skip adaptive refinement and return a regular grid of
+        cells of exactly this pixel size (e.g. 4 for a 4x4 uniform mesh).
+        Cells at the right/bottom edge are clamped to the grid boundary.
 
     Returns
     -------
@@ -79,11 +84,57 @@ def build_adaptive_mesh(
     data = data.astype(np.float64)
     H, W, C = data.shape
 
+    if uniform_cell_size is not None:
+        return _build_uniform_mesh(data, uniform_cell_size)
+
     # Build the quadtree starting with the whole field
     root = QuadNode(bbox=(0, 0, H, W), depth=0)
     _build_node(data=data, node=root, max_depth=max_depth, min_cell_size=min_cell_size, refinement_criteria=refinement_criteria)
 
     return collect_leaves(root)
+
+
+# ---------------------------------------------------------------------------
+# Uniform mesh builder
+# ---------------------------------------------------------------------------
+
+def _build_uniform_mesh(data: np.ndarray, cell_size: int) -> List[QuadNode]:
+    """
+    Partition the grid into a regular cell_size × cell_size mesh.
+
+    Parameters
+    ----------
+    data      : (H, W, C) float64 array
+    cell_size : side length of each cell in pixels
+
+    Returns
+    -------
+    List[QuadNode]  Row-major ordered leaf nodes, one per cell.
+    """
+    H, W, _ = data.shape
+    if cell_size < 1:
+        raise ValueError(f"uniform_cell_size must be >= 1, got {cell_size}")
+
+    import math
+    depth = max(0, int(round(math.log2(max(H, W) / cell_size))))
+
+    leaves: List[QuadNode] = []
+    r = 0
+    while r < H:
+        r1 = min(r + cell_size, H)
+        c = 0
+        while c < W:
+            c1 = min(c + cell_size, W)
+            node = QuadNode(bbox=(r, c, r1, c1), depth=depth)
+            node.is_leaf = True
+            region = data[r:r1, c:c1, :]
+            node.features = region.mean(axis=(0, 1))
+            node.metrics = {}
+            leaves.append(node)
+            c = c1
+        r = r1
+
+    return leaves
 
 
 # ---------------------------------------------------------------------------
