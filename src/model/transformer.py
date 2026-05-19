@@ -238,9 +238,10 @@ class AeroTransformer(nn.Module):
 
         # --- Token Embedding layer ---
         # Projects raw token features [C] into the latent space [d_model]
+        physical_dim = token_dim - self.pos_dim
         self.token_embedding = nn.Sequential(
-            nn.LayerNorm(token_dim),
-            nn.Linear(token_dim, d_model),
+            nn.LayerNorm(physical_dim),
+            nn.Linear(physical_dim, d_model),
             nn.GELU(),
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model)

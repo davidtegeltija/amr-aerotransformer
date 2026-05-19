@@ -130,7 +130,7 @@ class QuadtreeTokenizer:
             C+2     : cell_size -- normalised max dimension  = max(width/W, height/H)
         """
         N = len(tokens)
-        arr = np.empty((N, C + 4), dtype=np.float32)
+        arr = np.empty((N, C + 3), dtype=np.float32)
         for i, token in enumerate(tokens):
             y_center, x_center = token.center
             arr[i, :C] = token.features if token.features is not None else 0.0

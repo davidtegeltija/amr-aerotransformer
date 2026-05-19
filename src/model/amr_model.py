@@ -219,7 +219,7 @@ class AdaptiveMeshAeroModel(nn.Module):
     def _pack_tokens(self, leaves, H, W, C):
         """Extract the token-packing loop into a reusable method."""
         N = len(leaves)
-        tokens = torch.zeros(N, C + 4, dtype=torch.float32)
+        tokens = torch.zeros(N, C + 3, dtype=torch.float32)
         for i, leaf in enumerate(leaves):
             r0, c0, r1, c1 = leaf.bbox
             tokens[i, :C]     = torch.from_numpy(leaf.features)
