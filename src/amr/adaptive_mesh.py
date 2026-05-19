@@ -169,8 +169,8 @@ def _build_node(
     # 2. Compute per-channel mean features (Storage AVG step, Fig. 2 of AMR-Transformer)
     node.features = region.mean(axis=(0, 1))  # (C,)
 
-    # 3. Compute only the metrics whose thresholds are enabled
-    metrics = refinement_criteria.compute_enabled_metrics(region)
+    # 3. Compute only the metrics whose thresholds are enabled for the x, y, z channels
+    metrics = refinement_criteria.compute_enabled_metrics(region[:, :, :3])
     node.metrics = metrics
 
     # 4. Check stop conditions
@@ -185,7 +185,7 @@ def _build_node(
         return
 
     # 5. Subdivision decision via RefinementCriteria
-    if not _should_subdivide(region, refinement_criteria, metrics=metrics):
+    if not _should_subdivide(refinement_criteria, metrics):
         node.is_leaf = True
         return
 
@@ -199,9 +199,8 @@ def _build_node(
 # ---------------------------------------------------------------------------
 
 def _should_subdivide(
-    region: np.ndarray,
     refinement_criteria: RefinementCriteria,
-    metrics: Optional[Dict[str, float]] = None,
+    metrics: Dict[str, float],
 ) -> bool:
     """
     Decide whether a region should be subdivided.
@@ -220,9 +219,6 @@ def _should_subdivide(
     -------
     bool  True -> subdivide this cell.
     """
-    if metrics is None:
-        metrics = refinement_criteria.compute_enabled_metrics(region)
-        
     for metric_name, threshold in refinement_criteria.threshold_checks():
         if metrics.get(metric_name, 0.0) > threshold:
             return True
