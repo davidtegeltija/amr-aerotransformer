@@ -6,7 +6,7 @@ import yaml
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
@@ -16,6 +16,7 @@ from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.vit import ViT
 from src.train import train_deterministic_mesh, train_learned_mesh_p1, train_learned_mesh_p2, train_vit
+from src.utils.data_utils import geometry_disjoint_split
 from src.utils.train_utils import plot_loss_curves
 
 
@@ -70,8 +71,24 @@ def main(args=None):
         dataset = AeroDataset(input_path=args.get("input_file"), target_path=args.get("target_file"), index_path=args.get("index_file"))
         input_channels = dataset.input_channels
         output_channels = dataset.output_channels
-        n_val = max(1, int(args.get("val_split") * len(dataset)))
-        train_dataset, val_dataset = random_split(dataset, [len(dataset) - n_val, n_val])
+
+        # Split by geometry, not by row. Each geometry spans many rows (one per
+        # operating condition); a row-level split leaks the same wing into both
+        # train and val, so val_loss measures interpolation, not generalization.
+        seed = args.get("seed", 42)
+        try:
+            train_idx, val_idx = geometry_disjoint_split(
+                dataset.geometry_ids(), args.get("val_split"), seed
+            )
+            train_dataset, val_dataset = Subset(dataset, train_idx), Subset(dataset, val_idx)
+            print(f"Geometry-disjoint split (seed={seed}): "
+                  f"{len(train_idx)} train rows / {len(val_idx)} val rows")
+        except ValueError as e:
+            print(f"WARNING: {e}")
+            print("Falling back to validating on the full training set. "
+                  "This is an overfit sanity check only — val_loss is NOT a "
+                  "generalization metric when train and val share geometries.")
+            train_dataset = val_dataset = dataset
     else:
         print("No input and target data provided -> using synthetic dataset.")
         seed = np.random.randint(0, 1e6)

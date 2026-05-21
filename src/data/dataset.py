@@ -122,13 +122,12 @@ class AeroDataset(Dataset):
         self._inputs = np.concatenate([self._inputs, aoa_channel, mach_channel], axis=-1)    # (N, H, W, C+2)
 
         # Expose dataset metadata
-        self.H, self.W = H, W
         self.input_channels = self._inputs.shape[3]
         self.output_channels = self._targets.shape[3]
 
         print(
             f"AeroDataset: {len(self)} samples  |  "
-            f"grid {self.H}x{self.W}  |  "
+            f"grid {H}x{W}  |  "
             f"input_channels={self.input_channels}  output_channels={self.output_channels}"
         )
 
@@ -140,6 +139,20 @@ class AeroDataset(Dataset):
             "input":  self._inputs[index],
             "target": self._targets[index],
         }
+
+    def geometry_ids(self) -> np.ndarray:
+        """Return the geometry id of every dataset row.
+
+        Each geometry (a single wing) is simulated at many operating
+        conditions, so it spans several dataset rows that share the same
+        geometry id (column 0 of the index file). Use this to build a
+        geometry-disjoint train/val split — splitting rows directly leaks a
+        geometry across the boundary.
+
+        Returns:
+            Integer array of shape [N] with the geometry id of each row.
+        """
+        return self._index[:, 0].astype(int)
 
 
 

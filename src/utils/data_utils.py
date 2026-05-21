@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 import numpy as np
 
 
@@ -81,6 +81,45 @@ def create_sample_npz(
         print(f"New .npz sample created at {save_path}.\nInput: {input_array.shape}, Target: {target_array.shape}\n")
     else:
         print("If you want the new .npz sample to be saved add a save_path argument to the function call")
+
+
+def geometry_disjoint_split(
+    geometry_ids: np.ndarray,
+    val_split: float,
+    seed: int,
+) -> Tuple[List[int], List[int]]:
+    """
+    Split row indices into train/val so no geometry appears in both.
+
+    Args:
+        geometry_ids : [N] geometry id of every dataset row
+                       (see ``AeroDataset.geometry_ids``)
+        val_split    : fraction of *geometries* (not rows) to hold out
+        seed         : seed for the geometry choice, so the split is
+                       reproducible across runs
+
+    Returns:
+        ``(train_idx, val_idx)``: two lists of row indices, disjoint by
+        geometry.
+    """
+    geometry_ids = np.asarray(geometry_ids)
+    unique = np.unique(geometry_ids)
+    n_val_geom = int(val_split * len(unique))
+
+    # Check if there are too few geometries to form a non-empty train and val split
+    if n_val_geom < 1 or n_val_geom >= len(unique):
+        raise ValueError(
+            f"Cannot build a geometry-disjoint split. {len(unique)} unique "
+            f"geometry with val_split={val_split} yields {n_val_geom} validation "
+            f"geometries. Need at least 1 geometry on each side."
+        )
+
+    rng = np.random.default_rng(seed)
+    val_geoms = set(rng.choice(unique, size=n_val_geom, replace=False).tolist())
+
+    train_idx = [i for i, g in enumerate(geometry_ids) if g not in val_geoms]
+    val_idx = [i for i, g in enumerate(geometry_ids) if g in val_geoms]
+    return train_idx, val_idx
 
 
 if __name__ == "__main__":
