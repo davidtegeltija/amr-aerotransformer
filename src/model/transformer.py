@@ -36,7 +36,7 @@ import torch.nn.functional as F
 # Utilities
 # ---------------------------------------------------------------------------
 
-def _make_block_diagonal_mask(seq_lengths: List[int], device: torch.device) -> torch.Tensor:
+def _make_block_diagonal_mask(tokens_per_sample: List[int], device: torch.device) -> torch.Tensor:
     """Build an additive block-diagonal attention mask for a packed sequence.
 
     Within-sample positions get 0.0 (attend); cross-sample positions get -inf
@@ -44,18 +44,18 @@ def _make_block_diagonal_mask(seq_lengths: List[int], device: torch.device) -> t
     torch.nn.functional.scaled_dot_product_attention.
 
     Args:
-        seq_lengths: Per-sample token counts in the packed sequence.
+        tokens_per_sample: Per-sample token counts in the packed sequence.
         device:      Device on which to allocate the mask.
 
     Returns:
         Float tensor of shape [total_len, total_len] with values in {0.0, -inf}.
     """
-    total = sum(seq_lengths)
+    total = sum(tokens_per_sample)
     mask = torch.full((total, total), float('-inf'), device=device)
     offset = 0
-    for L in seq_lengths:
-        mask[offset:offset + L, offset:offset + L] = 0.0
-        offset += L
+    for N in tokens_per_sample:
+        mask[offset:offset + N, offset:offset + N] = 0.0
+        offset += N
     return mask
 
 
@@ -159,12 +159,12 @@ class AeroTransformer(nn.Module):
     embedding is mapped to `output_channels` flow-field predictions.
 
     Forward pass (packed / training mode):
-        tokens:   [total_N, token_dim]  concatenated tokens from all samples
-        seq_lens: List[int]             per-sample token counts
+        tokens:            [total_N, token_dim]  concatenated tokens from all samples
+        tokens_per_sample: List[int]             per-sample token counts
 
     Forward pass (single sample / inference):
-        tokens:   [N, token_dim]
-        seq_lens: [N]
+        tokens:            [N, token_dim]
+        tokens_per_sample: [N]
 
     Returns:
         Predictions of shape [total_N, output_channels].
@@ -251,14 +251,13 @@ class AeroTransformer(nn.Module):
     def forward(
         self,
         tokens: torch.Tensor,
-        seq_lens: List[int],
+        tokens_per_sample: List[int],
     ) -> torch.Tensor:
         """Run the encoder over a packed token sequence and produce per-token predictions.
 
         Args:
-            tokens:   Packed token features of shape [total_N, token_dim], with
-                the last 3 channels treated as positional meta (x_c, y_c, size).
-            seq_lens: Per-sample token counts in the packed sequence.
+            tokens:            Packed token features of shape [total_N, token_dim], with the last 3 channels treated as positional meta (x_c, y_c, size).
+            tokens_per_sample: Per-sample token counts in the packed sequence.
 
         Returns:
             Per-token predictions of shape [total_N, output_channels].
@@ -281,7 +280,7 @@ class AeroTransformer(nn.Module):
         x = self.input_norm(tok_emb + pos_emb)   # [total_N, d_model]
 
         # Prepare attention infrastructure
-        attn_mask  = _make_block_diagonal_mask(seq_lens, device)
+        attn_mask  = _make_block_diagonal_mask(tokens_per_sample, device)
 
         # Transformer encoder
         for layer in self.layers:

@@ -118,14 +118,14 @@ def train_deterministic_mesh(
             for step, batch in enumerate(tq_loader):
                 packed_tokens  = batch["packed_tokens"].to(device)
                 packed_targets = batch["packed_targets"].to(device)
-                seq_lens       = batch["seq_lens"]
+                tokens_per_sample = batch["tokens_per_sample"]
 
-                batch_tokens = sum(seq_lens)
-                batch_mean_tokens = batch_tokens / len(seq_lens)
+                batch_tokens = sum(tokens_per_sample)
+                batch_mean_tokens = batch_tokens / len(tokens_per_sample)
                 epoch_token_total += batch_tokens
-                epoch_sample_count += len(seq_lens)
+                epoch_sample_count += len(tokens_per_sample)
 
-                out = model(packed_tokens, seq_lens)
+                out = model(packed_tokens, tokens_per_sample)
 
                 loss = nmse_loss(out["token_preds"], packed_targets)
 
@@ -264,7 +264,7 @@ def train_learned_mesh_p1(
                 epoch_pred   += L_pred.item()
                 epoch_budget += L_budget.item()
                 epoch_smooth += L_smooth.item()
-                epoch_n      += sum(out["seq_lens"])
+                epoch_n      += sum(out["tokens_per_sample"])
                 n_steps      += 1
 
             scheduler.step()
@@ -415,7 +415,7 @@ def train_learned_mesh_p2(
                 epoch_pred   += L_pred.item()
                 epoch_budget += L_budget.item()
                 epoch_smooth += L_smooth.item()
-                epoch_n      += sum(out["seq_lens"])
+                epoch_n      += sum(out["tokens_per_sample"])
                 n_steps      += 1
 
             scheduler.step()

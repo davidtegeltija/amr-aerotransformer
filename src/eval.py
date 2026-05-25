@@ -26,8 +26,8 @@ def evaluate(
     for batch in loader:
         packed_tokens  = batch["packed_tokens"].to(device)
         packed_targets = batch["packed_targets"].to(device)
-        seq_lens       = batch["seq_lens"]
-        out = model(packed_tokens, seq_lens)
+        tokens_per_sample = batch["tokens_per_sample"]
+        out = model(packed_tokens, tokens_per_sample)
         total_loss += nmse_loss(out["token_preds"], packed_targets).item()
     model.train()
     return total_loss / len(loader)

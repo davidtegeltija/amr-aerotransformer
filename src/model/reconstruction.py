@@ -135,7 +135,7 @@ def _interp_reconstruction(
 def batch_tokens_to_grid(
     predictions: torch.Tensor,
     token_lists: List[List[QuadNode]],
-    seq_lens: List[int],
+    tokens_per_sample: List[int],
     H: int,
     W: int,
     output_channels: int,
@@ -148,7 +148,7 @@ def batch_tokens_to_grid(
     ----------
     predictions     : [total_N, output_channels]
     token_lists     : list of B token lists (one per sample)
-    seq_lens        : list of B token counts (must sum to total_N)
+    tokens_per_sample : list of B token counts (must sum to total_N)
     H, W            : grid dimensions
     output_channels : output channels
     mode            : "fill" or "interp"
@@ -161,7 +161,7 @@ def batch_tokens_to_grid(
     grids = []
     offset = 0
     for b in range(B):
-        L = seq_lens[b]
+        L = tokens_per_sample[b]
         preds_b = predictions[offset:offset + L]
         grid_b  = tokens_to_grid(preds_b, token_lists[b], H, W, output_channels, mode=mode)
         grids.append(grid_b)

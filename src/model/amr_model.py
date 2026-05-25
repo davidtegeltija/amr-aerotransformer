@@ -119,38 +119,38 @@ class AdaptiveMeshAeroModel(nn.Module):
     def forward(self, *args, **kwargs):
         """
         Dispatch by refinement_mode:
-          deterministic: forward(packed_tokens, seq_lens)  — tokens pre-built by DeterministicCollateFn
-          learned:       forward(grids)                    — grids [B, H, W, C], tokenization happens inside
+          deterministic: forward(packed_tokens, tokens_per_sample) - tokens pre-built by DeterministicCollateFn
+          learned:       forward(grids)-  grids [B, H, W, C], tokenization happens inside
         """
         if self.refinement_mode == "deterministic":
             return self._forward_deterministic(*args, **kwargs)
         else:
             return self._forward_learned(*args, **kwargs)
 
-    def _forward_deterministic(self, packed_tokens, seq_lens):
+    def _forward_deterministic(self, packed_tokens, tokens_per_sample):
         """
         Tokens were already built in the collate function.
         Forward pass is just the transformer.
 
         Args:
-            packed_tokens : [total_N, C+4]  - concatenated tokens of all samples
-            seq_lens      : List[int]       - per-sample token counts
+            packed_tokens :    [total_N, C+4] concatenated tokens of all samples
+            tokens_per_sample: List[int] per-sample token counts
 
         Returns:
             Dict with keys:
-                token_preds: [total_N, output_channels]
-                score_map:   None  (no scorer in this mode)
-                soft_N:      None  (no budget loss in this mode)
-                seq_lens:    List[int] (len B)
-                token_lists: None  (targets are pre-averaged by DeterministicCollateFn)
+                token_preds:       [total_N, output_channels]
+                score_map:         None  (no scorer in this mode)
+                soft_N:            None  (no budget loss in this mode)
+                tokens_per_sample: List[int] (len B)
+                token_lists:       None  (targets are pre-averaged by DeterministicCollateFn)
         """
-        preds = self.transformer(packed_tokens, seq_lens)
+        preds = self.transformer(packed_tokens, tokens_per_sample)
 
         return {
             "token_preds": preds,
-            "score_map":   None,
-            "soft_N":      None,
-            "seq_lens":    seq_lens,
+            "score_map": None,
+            "soft_N": None,
+            "tokens_per_sample": tokens_per_sample,
             "token_lists": None,
         }
 
@@ -163,11 +163,11 @@ class AdaptiveMeshAeroModel(nn.Module):
 
         Returns:
             Dict with keys:
-                token_preds: [total_N, output_channels] from the transformer
-                score_map:   [B, 1, H, W] raw CNN output (kept attached for L_smooth)
-                soft_N:      0-dim differentiable tensor = mean-over-batch soft_N
-                seq_lens:    List[int] (len B), tokens per sample
-                token_lists: List[List[QuadNode]] (len B)
+                token_preds:       [total_N, output_channels] from the transformer
+                score_map:         [B, 1, H, W] raw CNN output (kept attached for L_smooth)
+                soft_N:            0-dim differentiable tensor = mean-over-batch soft_N
+                tokens_per_sample: List[int] (len B), tokens per sample
+                token_lists:       List[List[QuadNode]] (len B)
         """
         B, H, W, C = grids.shape
         device = grids.device
@@ -182,7 +182,7 @@ class AdaptiveMeshAeroModel(nn.Module):
         grids_np  = grids.detach().cpu().numpy()
 
         all_tokens: List[torch.Tensor] = []
-        seq_lens: List[int]            = []
+        tokens_per_sample: List[int]   = []
         token_lists: List[List]        = []
         soft_Ns: List[torch.Tensor]    = []
 
@@ -199,19 +199,19 @@ class AdaptiveMeshAeroModel(nn.Module):
             )
             tokens = self._pack_tokens(leaves, H, W, C)
             all_tokens.append(tokens)
-            seq_lens.append(len(leaves))
+            tokens_per_sample.append(len(leaves))
             token_lists.append(leaves)
             soft_Ns.append(soft_N_b)
 
         packed = torch.cat(all_tokens, dim=0).to(device)
-        preds = self.transformer(packed, seq_lens)
+        preds = self.transformer(packed, tokens_per_sample)
         soft_N_mean = torch.stack(soft_Ns).mean().to(device)
 
         return {
             "token_preds": preds,
-            "score_map":   score_map,
-            "soft_N":      soft_N_mean,
-            "seq_lens":    seq_lens,
+            "score_map": score_map,
+            "soft_N": soft_N_mean,
+            "tokens_per_sample": tokens_per_sample,
             "token_lists": token_lists,
         }
 

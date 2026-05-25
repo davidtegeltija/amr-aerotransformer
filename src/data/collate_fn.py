@@ -18,23 +18,18 @@ class DeterministicCollateFn:
     Python's multiprocessing.
  
     Batch dict keys:
-        packed_tokens  : [total_N, C+4]             concatenated tokenized inputs
-        packed_targets : [total_N, output_channels] per-token averaged ground truth
-        seq_lens       : List[int]                  token count per sample
-        token_lists    : List[List[QuadNode]]       leaf nodes per sample
-        grid_targets   : [B, H, W, output_channels] full-resolution GT for evaluation
-        grid_shape     : (H, W)
+        packed_tokens     : [total_N, C+3]             concatenated tokenized inputs
+        packed_targets    : [total_N, output_channels] per-token averaged ground truth
+        tokens_per_sample : List[int]                  token count per sample
     """
  
     def __init__(self, tokenizer: QuadtreeTokenizer):
         self.tokenizer = tokenizer
  
     def __call__(self, samples: List[Dict]) -> Dict:
-        all_tokens   = []
-        all_targets  = []
-        seq_lens     = []
-        token_lists  = []
-        grid_targets = []
+        all_tokens = []
+        all_targets = []
+        tokens_per_sample = []
  
         for s in samples:
             input = s["input"]   # [H, W, C]
@@ -42,8 +37,7 @@ class DeterministicCollateFn:
  
             token_arr, leaves = self.tokenizer.tokenize(input)
  
-            H, W = target.shape[:2]
-            output_channels = target.shape[2]
+            output_channels = target.shape[-1]
             N = len(leaves)
             token_target  = np.zeros((N, output_channels), dtype=np.float32)
             for i, node in enumerate(leaves):
@@ -51,17 +45,12 @@ class DeterministicCollateFn:
  
             all_tokens.append(torch.from_numpy(token_arr))
             all_targets.append(torch.from_numpy(token_target))
-            seq_lens.append(N)
-            token_lists.append(leaves)
-            grid_targets.append(torch.from_numpy(target))
+            tokens_per_sample.append(N)
  
         return {
             "packed_tokens":  torch.cat(all_tokens,  dim=0),
             "packed_targets": torch.cat(all_targets, dim=0),
-            "seq_lens":       seq_lens,
-            "token_lists":    token_lists,
-            "grid_targets":   torch.stack(grid_targets, dim=0),
-            "grid_shape":     (H, W),
+            "tokens_per_sample":       tokens_per_sample,
         }
 
 class LearnedCollateFn:
