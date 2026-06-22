@@ -17,8 +17,8 @@ def save_plot(save_path: str | Path, figure: Figure, dpi: int = 150, use_date_su
         save_path = save_path.with_suffix(".png")
 
     # Add a timestamp
-    timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
-    save_path = save_path.with_name(f"{save_path.stem}_{timestamp}{save_path.suffix}")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    save_path = save_path.with_name(f"{timestamp}_{save_path.stem}{save_path.suffix}")
 
     # Add a current date subfolder for better organization
     if use_date_subfolder:
