@@ -1,18 +1,44 @@
 """
 ========================================================================
+Adaptive-mesh aerodynamic flow predictor
+
 Full pipeline:
-grid -> RefinementNet scorer -> score-guided quadtree -> transformer
+grid -> AMR tokens build from quadtree -> transformer
 ========================================================================
+
+The model turns a dense geometry grid into adaptive-mesh tokens and predicts a
+per-token flow field with a transformer. Where the mesh comes from depends on
+``refinement_mode``:
+
+--- "deterministic" -----------------------------------------------------
+The mesh is built outside the model, in the DataLoader worker, by a physics-
+based AMR criterion. The model forward is just the transformer.
+
+    grid_input [B, H, W, C]
+      ↓ QuadtreeTokenizer + build_adaptive_mesh   (in DeterministicCollateFn, CPU worker)
+    packed_tokens [total_N, C+3]                  (already batched/packed)
+      ↓ AeroTransformer                           (model.forward(packed_tokens, tokens_per_sample))
+    token predictions [total_N, output_channels]
+
+--- "learned" -----------------------------------------------------------
+A RefinementNet CNN scores the grid; a deterministic running-depth quadtree
+turns that score into the mesh, inline in the forward pass.
 
     grid_input [B, H, W, C]
       ↓ RefinementNet (CNN scorer)
-    score_map [B, 1, H, W]
-      ↓ build_learned_adaptive_mesh (Gumbel-ST quadtree)
-    leaves + soft_N
+    depth_map d_pred [B, 1, H, W]                 (predicted target depth, not a sign logit)
+      ↓ build_depth_guided_mesh                   (running-depth quadtree: split iff max(d_pred)>d+offset)
+    leaves
       ↓ inline token packing
-    packed_tokens [total_N, C+4]
-      ↓ AeroTransformer
+    packed_tokens [total_N, C+3]
+      ↓ AeroTransformer                           (model.forward(grids))
     token predictions [total_N, output_channels]
+
+In learned mode the scorer is trained separately by supervised regression to
+the variance oracle (see src/amr/oracle_depth.py and train_scorer_supervised);
+this forward is used for inference and the end-to-end sanity metric. There is no
+Gumbel sampling, no soft token count, and no straight-through leaf weights — the
+mesh build is deterministic and detached from the autograd graph.
 """
 
 from __future__ import annotations
@@ -22,9 +48,8 @@ from typing import Dict, List, Literal, Optional
 import torch
 import torch.nn as nn
 
-from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.refinement_criteria import RefinementCriteria
-from src.amr.learned_adaptive_mesh import build_learned_adaptive_mesh
+from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
 from src.model.refinement_net import RefinementNet
 from src.model.transformer import AeroTransformer
 
@@ -39,7 +64,7 @@ class AdaptiveMeshAeroModel(nn.Module):
 
     A RefinementNet CNN emits a per-pixel importance map on GPU; a per-sample
     score-guided quadtree (CPU, Gumbel-Softmax straight-through) turns that
-    map into leaf QuadNodes, which are packed inline into the same [N, C+4]
+    map into leaf QuadNodes, which are packed inline into the same [N, C+3]
     token layout the transformer expects.
 
     Parameters
@@ -70,7 +95,7 @@ class AdaptiveMeshAeroModel(nn.Module):
         min_depth: int = 2,
         max_depth: int = 6,
         min_cell_size: int = 4,
-        refinement_mode: Literal["learned", "deterministic"] = "learned",
+        refinement_mode: Literal["learned", "deterministic"] = "deterministic",
         refinement_criteria: Optional[RefinementCriteria] = None,
     ):
         super().__init__()
@@ -96,9 +121,12 @@ class AdaptiveMeshAeroModel(nn.Module):
         # Only instantiated in learned mode; deterministic mode has no scorer.
         if refinement_mode == "learned":
             self.scorer = RefinementNet(input_channels=input_channels)
+            # Global budget offset added to the running depth in the subdivision
+            # test (positive -> coarser mesh, negative -> finer). Solve per sample
+            # at eval if an exact token count is required; default 0.
+            self.offset = 0.0
         else:
             self.scorer = None
-        self.tau = 1.0  # Gumbel-Softmax temperature; unused in deterministic mode.
 
         # --- Transformer solver ---
         token_dim = input_channels + 3  # C + (x_center, y_center, size)
@@ -133,7 +161,7 @@ class AdaptiveMeshAeroModel(nn.Module):
         Forward pass is just the transformer.
 
         Args:
-            packed_tokens :    [total_N, C+4] concatenated tokens of all samples
+            packed_tokens :    [total_N, C+3] concatenated tokens of all samples
             tokens_per_sample: List[int] per-sample token counts
 
         Returns:
@@ -156,7 +184,13 @@ class AdaptiveMeshAeroModel(nn.Module):
 
     def _forward_learned(self, grids):
         """
-        Scorer → tree → transformer, all in forward for gradient flow.
+        Scorer → depth-guided tree → transformer in one forward pass.
+
+        The scorer emits a predicted depth map ``d_pred``; the deterministic
+        running-depth builder turns it into leaves (no Gumbel, no temperature).
+        The mesh build is detached — the scorer is trained separately by
+        supervised regression to the variance oracle, so no gradient needs to
+        flow back through the discrete tree here.
 
         Args:
             grids: [B, H, W, C] float32 input geometry, channel-last.
@@ -164,57 +198,63 @@ class AdaptiveMeshAeroModel(nn.Module):
         Returns:
             Dict with keys:
                 token_preds:       [total_N, output_channels] from the transformer
-                score_map:         [B, 1, H, W] raw CNN output (kept attached for L_smooth)
-                soft_N:            0-dim differentiable tensor = mean-over-batch soft_N
+                score_map:         [B, 1, H, W] predicted depth map d_pred (attached)
                 tokens_per_sample: List[int] (len B), tokens per sample
                 token_lists:       List[List[QuadNode]] (len B)
         """
         B, H, W, C = grids.shape
         device = grids.device
 
-        # 1. Score map (GPU)
+        # 1. Predicted depth map d_pred (GPU).
         geom = grids.permute(0, 3, 1, 2).contiguous()
         score_map = self.scorer(geom)                    # [B, 1, H, W]
 
-        # 2. Build trees (CPU, per-sample — unavoidable)
-        score_np  = score_map.squeeze(1).detach().cpu().numpy()
-        score_cpu = score_map.squeeze(1).cpu()
-        grids_np  = grids.detach().cpu().numpy()
+        # 2. Build trees deterministically (CPU, per-sample). Detached: the
+        #    discrete build carries no gradient by design.
+        depth_np = score_map.squeeze(1).detach().cpu().numpy()
+        grids_np = grids.detach().cpu().numpy()
 
         all_tokens: List[torch.Tensor] = []
-        tokens_per_sample: List[int]   = []
-        token_lists: List[List]        = []
-        soft_Ns: List[torch.Tensor]    = []
+        tokens_per_sample: List[int] = []
+        token_lists: List[List] = []
 
         for b in range(B):
-            leaves, soft_N_b = build_learned_adaptive_mesh(
+            leaves = build_depth_guided_mesh(
                 data=grids_np[b],
-                score_map=score_np[b],
-                score_tensor=score_cpu[b],
+                depth_map=depth_np[b],
                 max_depth=self.max_depth,
                 min_depth=self.min_depth,
                 min_cell_size=self.min_cell_size,
-                training=self.training,
-                tau=self.tau,
+                offset=self.offset,
             )
-            tokens = self._pack_tokens(leaves, H, W, C)
-            all_tokens.append(tokens)
+            all_tokens.append(self._pack_tokens(leaves, H, W, C))
             tokens_per_sample.append(len(leaves))
             token_lists.append(leaves)
-            soft_Ns.append(soft_N_b)
 
         packed = torch.cat(all_tokens, dim=0).to(device)
         preds = self.transformer(packed, tokens_per_sample)
-        soft_N_mean = torch.stack(soft_Ns).mean().to(device)
 
         return {
             "token_preds": preds,
             "score_map": score_map,
-            "soft_N": soft_N_mean,
             "tokens_per_sample": tokens_per_sample,
             "token_lists": token_lists,
         }
 
+    def predict_depth(self, grids: torch.Tensor) -> torch.Tensor:
+        """Run only the scorer and return the predicted depth map ``d_pred``.
+
+        This is the forward used by the decoupled supervised scorer training —
+        it never touches the transformer or builds a quadtree.
+
+        Args:
+            grids: ``[B, H, W, C]`` float32 input geometry, channel-last.
+
+        Returns:
+            ``[B, 1, H, W]`` predicted depth map.
+        """
+        geom = grids.permute(0, 3, 1, 2).contiguous()
+        return self.scorer(geom)
 
     def _pack_tokens(self, leaves, H, W, C):
         """Extract the token-packing loop into a reusable method."""

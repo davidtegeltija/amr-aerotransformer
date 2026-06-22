@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from matplotlib import pyplot as plt
 import torch
@@ -8,9 +8,9 @@ from src.amr.quadtree import QuadNode
 from src.utils.visualization_utils import save_plot
 
 
-def save_checkpoint(checkpoint_path, checkpoint_name, model, optimizer=None, scheduler=None, epoch=None, val_loss=None):
+def save_checkpoint(save_path, checkpoint_name, model, optimizer=None, scheduler=None, epoch=None, val_loss=None):
     """ Save model, optimizer, and scheduler at their current state to checkpoint_path/checkpoint_name """
-    save_path = Path(checkpoint_path) / checkpoint_name
+    save_path = Path(save_path) / checkpoint_name
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     torch.save({
@@ -28,7 +28,12 @@ def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
 
         tau(epoch) = tau_start * (tau_end / tau_start) ** (epoch / max(1, T - 1))
 
-    Clamped at tau_end for epoch >= T - 1. Defined for epoch >= 0
+    Clamped at tau_end for epoch >= T - 1. Defined for epoch >= 0.
+
+    Note: with hard Gumbel-max sampling this is a GRADIENT-SHARPNESS anneal,
+    not an exploration schedule — the sampling distribution is softmax(logits)
+    independent of tau; tau only scales the gradient of the soft
+    (straight-through) component that flows back into the scorer.
     """
     if T <= 1:
         return tau_end
@@ -67,6 +72,49 @@ def average_targets_per_token(targets: torch.Tensor, token_lists: List[List[Quad
             rows.append(patch.mean(dim=(0, 1)))
 
     return torch.stack(rows, dim=0)
+
+
+def mesh_token_bounds(
+    H: int,
+    W: int,
+    min_depth: int,
+    max_depth: int,
+    min_cell_size: int,
+) -> Tuple[int, int]:
+    """
+    Reachable leaf-count bounds for the depth-guided builder.
+
+    The floor is the leaf count when every non-forced decision says "stop"
+    (collapse to the ``min_depth`` floor); the cap is the leaf count when every
+    non-forced decision says "subdivide" (max refinement under ``min_cell_size``
+    / ``max_depth``). Used to annotate the end-to-end sanity log with the token
+    range the mesh can occupy.
+
+    Args:
+        H, W: Grid dimensions in pixels.
+        min_depth: Depth below which subdivision is forced.
+        max_depth: Depth at which subdivision stops unconditionally.
+        min_cell_size: Cells whose next split would drop either axis below
+            this size are forced leaves.
+
+    Returns:
+        (floor_tokens, max_tokens) leaf counts.
+    """
+    def count(h: int, w: int, depth: int, always_subdivide: bool) -> int:
+        if h // 2 < min_cell_size or w // 2 < min_cell_size:
+            return 1
+        if depth >= max_depth:
+            return 1
+        if depth >= min_depth and not always_subdivide:
+            return 1
+        # Child sizes follow QuadNode.compute_child_bboxes (h//2 and h - h//2).
+        return sum(
+            count(hh, ww, depth + 1, always_subdivide)
+            for hh in (h // 2, h - h // 2)
+            for ww in (w // 2, w - w // 2)
+        )
+
+    return count(H, W, 0, False), count(H, W, 0, True)
 
 
 def plot_loss_curves(

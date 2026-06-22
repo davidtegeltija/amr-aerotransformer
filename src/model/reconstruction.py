@@ -17,13 +17,69 @@ Two modes are provided:
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from src.amr.quadtree_tokenizer import QuadNode
+
+
+# ---------------------------------------------------------------------------
+# Differentiable reconstruction (for the dense training loss)
+# ---------------------------------------------------------------------------
+
+def tokens_to_grid_torch(
+    token_preds: torch.Tensor,
+    token_lists: List[List[QuadNode]],
+    tokens_per_sample: List[int],
+    H: int,
+    W: int,
+    leaf_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Differentiable nearest-fill reconstruction of a packed prediction batch.
+
+    Builds, per sample, an integer owner map ``owner[H, W] -> packed token
+    index`` (plain numpy ints — indices carry no gradient) and gathers the
+    dense grid with advanced indexing, which keeps the autograd graph
+    connected to ``token_preds``. This is the loss-side counterpart of
+    ``tokens_to_grid`` (which detaches and is for visualization only).
+
+    Args:
+        token_preds: [total_N, output_channels] packed per-token predictions
+            (any device, graph attached).
+        token_lists: Length-B list of per-sample QuadNode leaf lists. Leaves
+            of one sample must tile the full H x W grid exactly.
+        tokens_per_sample: Per-sample token counts; must sum to total_N.
+        H, W: Grid dimensions.
+        leaf_weights: Optional [total_N] straight-through ancestry weights
+            aligned with token_preds (forward value 1, gradient connects the
+            dense loss to the scorer's subdivide decisions). Multiplied into
+            the painted predictions when given.
+
+    Returns:
+        [B, H, W, output_channels] dense predictions on token_preds' device.
+    """
+    B = len(token_lists)
+    assert sum(tokens_per_sample) == token_preds.shape[0], (
+        f"tokens_per_sample sums to {sum(tokens_per_sample)}, "
+        f"but token_preds has {token_preds.shape[0]} rows"
+    )
+
+    owners = np.empty((B, H, W), dtype=np.int64)
+    offset = 0
+    for b, leaves in enumerate(token_lists):
+        for i, leaf in enumerate(leaves):
+            owners[b, leaf.r0:leaf.r1, leaf.c0:leaf.c1] = offset + i
+        offset += tokens_per_sample[b]
+
+    owner_flat = torch.from_numpy(owners.reshape(-1)).to(token_preds.device)
+    gathered = token_preds[owner_flat]                       # [B*H*W, C_out]
+    if leaf_weights is not None:
+        gathered = leaf_weights[owner_flat].unsqueeze(-1) * gathered
+    return gathered.view(B, H, W, -1)
 
 
 # ---------------------------------------------------------------------------
@@ -58,14 +114,11 @@ def tokens_to_grid(
     preds_np = predictions.detach().cpu().numpy()  # [N, output_channels]
 
     if mode == "fill":
+        # Nearest-fill
         return _fill_reconstruction(preds_np, token_list, H, W, output_channels)
     else:
+        # Bilinear interpolation
         return _interp_reconstruction(preds_np, token_list, H, W, output_channels)
-
-
-# ---------------------------------------------------------------------------
-# Nearest-fill
-# ---------------------------------------------------------------------------
 
 def _fill_reconstruction(
     preds: np.ndarray,
@@ -83,11 +136,6 @@ def _fill_reconstruction(
         t = token_list[idx]
         grid[t.r0:t.r1, t.c0:t.c1] = preds[idx]
     return torch.from_numpy(grid)
-
-
-# ---------------------------------------------------------------------------
-# Bilinear interpolation
-# ---------------------------------------------------------------------------
 
 def _interp_reconstruction(
     preds: np.ndarray,

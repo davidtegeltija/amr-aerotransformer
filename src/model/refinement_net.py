@@ -4,9 +4,17 @@ RefinementNet — learned per-pixel importance scorer for adaptive meshing.
 ========================================================================
 
 A small U-Net-style CNN that maps a geometry grid [B, C_in, H, W] to a
-per-pixel importance score [B, 1, H, W] in (0, 1). The output score map
-drives a Gumbel-Softmax quadtree subdivision decision downstream, making
-the adaptive-mesh pipeline differentiable end-to-end.
+per-pixel scalar map [B, 1, H, W] with an unbounded (raw) head. The map is
+interpreted as a predicted target depth ``d_pred``: the depth-guided builder
+subdivides a depth-``d`` cell iff ``max(d_pred over the cell) > d + offset``
+(running-depth comparison). The scorer is trained by supervised regression of
+``d_pred`` to the variance-oracle depth target (src/amr/oracle_depth.py); there is
+no Gumbel sampling and no sign threshold.
+
+The head is deliberately NOT squashed by a sigmoid: a sigmoid followed by
+clamp + log made gradients vanish once the scorer saturated, which made
+mesh collapse irreversible. Keeping it unbounded also lets the same output 
+represent depths outside the [0, 1] range directly.
 
 Architecture:
 
@@ -14,7 +22,7 @@ Architecture:
 
 Encoder halves spatial resolution at enc2 and enc3; the decoder restores
 it with nearest-neighbor upsampling and concatenative skip connections.
-GroupNorm(8, *) + GELU throughout; Sigmoid on the final 1x1 conv.
+GroupNorm(8, *) + ReLU throughout; raw 1x1 conv head.
 """
 
 import torch
@@ -54,23 +62,24 @@ class RefinementNet(nn.Module):
         Args:
             x: [B, C_in, H, W] float32 geometry grid (channel-first).
         Returns:
-            score_map: [B, 1, H, W] values in (0, 1).
+            score_map: [B, 1, H, W] raw (unbounded) scalar map, interpreted as
+                the predicted target depth d_pred.
         """
-        e1 = F.gelu(self.enc1_norm(self.enc1_conv(x)))        # [B, 32, H, W]
-        e2 = F.gelu(self.enc2_norm(self.enc2_conv(e1)))       # [B, 64, H/2, W/2]
-        e3 = F.gelu(self.enc3_norm(self.enc3_conv(e2)))       # [B, 128, H/4, W/4]
+        e1 = F.relu(self.enc1_norm(self.enc1_conv(x)))        # [B, 32, H, W]
+        e2 = F.relu(self.enc2_norm(self.enc2_conv(e1)))       # [B, 64, H/2, W/2]
+        e3 = F.relu(self.enc3_norm(self.enc3_conv(e2)))       # [B, 128, H/4, W/4]
 
-        b = F.gelu(self.bot_norm(self.bot_conv(e3)))          # [B, 128, H/4, W/4]
+        b = F.relu(self.bot_norm(self.bot_conv(e3)))          # [B, 128, H/4, W/4]
 
         u2 = F.interpolate(b, scale_factor=2, mode="nearest") # [B, 128, H/2, W/2]
         u2 = torch.cat([u2, e2], dim=1)                       # [B, 192, H/2, W/2]
-        u2 = F.gelu(self.up2_norm(self.up2_conv(u2)))         # [B, 64, H/2, W/2]
+        u2 = F.relu(self.up2_norm(self.up2_conv(u2)))         # [B, 64, H/2, W/2]
 
         u1 = F.interpolate(u2, scale_factor=2, mode="nearest")# [B, 64, H, W]
         u1 = torch.cat([u1, e1], dim=1)                       # [B, 96, H, W]
-        u1 = F.gelu(self.up1_norm(self.up1_conv(u1)))         # [B, 32, H, W]
+        u1 = F.relu(self.up1_norm(self.up1_conv(u1)))         # [B, 32, H, W]
 
-        score_map = torch.sigmoid(self.head(u1))              # [B, 1, H, W]
+        score_map = self.head(u1)                             # [B, 1, H, W] logits
         return score_map
 
 
@@ -83,8 +92,8 @@ if __name__ == "__main__":
     x = torch.randn(2, 3, 256, 128)
     y = model(x)
     assert y.shape == (2, 1, 256, 128), f"shape mismatch: {y.shape}"
-    assert (y >= 0).all() and (y <= 1).all(), "sigmoid output out of range"
-    print(f"Forward OK. Output range: [{y.min():.4f}, {y.max():.4f}]")
+    assert torch.isfinite(y).all(), "non-finite logits"
+    print(f"Forward OK. Logit range: [{y.min():.4f}, {y.max():.4f}]")
 
     # Gradient sanity
     loss = y.mean()

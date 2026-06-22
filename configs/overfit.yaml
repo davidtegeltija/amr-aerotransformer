@@ -1,0 +1,38 @@
+# ---- Data ----
+input_file: "data/crmmgeom.npy"     # Path to .npz/.npy [N, H, W, C] representing the geometry of the problem
+target_file: "data/crmmdata.npy"    # Path to .npz/.npy [M, H, W, C] representing the steady flow state
+index_file: "data/crmmindex.npy"
+val_split: 0.1                      # Fraction of *geometries* held out for validation
+seed: 42                            # RNG seed for the geometry-disjoint train/val split
+
+# ---- Model ----
+d_model: 256
+n_layers: 5
+n_heads: 8
+d_ff: 512
+dropout: 0.0
+min_depth: 2                                  # Quadtree minimum subdivision depth
+max_depth: 6                                  # Quadtree maximum subdivision depth
+refinement_mode: deterministic                      # "learned" or "deterministic"
+refinement_criteria: GEOMETRY_ONLY_COMBINED_CONFIG   # Name of RefinementCriteria (see CRITERIA_REGISTRY). Used only when --refinement_mode deterministic."
+
+# ---- Training ----
+epochs: 1000
+batch_size: 4
+warmup_steps: 1000
+num_workers: 4
+
+# ---- Learned-Scorer Training (refinement_mode: learned) ----
+learned_training_mode: null   # "scorer" or "fine-tune", null for standard training
+checkpoint_file: null         # Path to checkpoint to load before training. For --phase 1 this should be a pretrained-transformer checkpoint. For --phase 2 this should be a trained-scorer checkpoint from phase 2
+end_to_end_every: 0           # If > 0, every N epochs build meshes with the current scorer, run the frozen transformer and report dense painting NMSE + token counts (sanity only, never backpropagated).
+
+# Oracle target
+n_target: 1024                # Desired MEAN oracle leaf (token) count; a single global tolerance is calibrated to hit this. Per-sample counts vary with geometry complexity.
+calib_samples: 64             # Number of train samples used to calibrate the global tolerance.
+
+# Scorer loss
+tv_weight: 0.0                # Small total-variation regulariser on the predicted depth map (0 = off).
+decision_weight: 0.0          # Decision-consistency term weight (0 = off; enable only if d_pred is jittery near decision boundaries).
+decision_margin: 0.0
+decision_temp: null           # Smooth-max temperature for the decision term (null = hard max).

@@ -10,12 +10,13 @@ from torch.utils.data import DataLoader, Subset, random_split
 
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
-from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn
+from src.amr.oracle_depth import calibrate_global_tolerance, max_reachable_depth
+from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn
 from src.data.dataset import AeroDataset
 from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.vit import ViT
-from src.train import train_deterministic_mesh, train_learned_mesh_p1, train_learned_mesh_p2, train_vit
+from src.train import train_deterministic_mesh, train_scorer_supervised, train_learned_mesh_p2, train_vit
 from src.utils.data_utils import geometry_disjoint_split
 from src.utils.train_utils import plot_loss_curves
 
@@ -161,6 +162,12 @@ def main(args=None):
     if args.get("refinement_mode") not in ["deterministic", "learned"]:
         raise SystemExit("Only 'deterministic' or 'learned' are acceptable refinement modes")
     
+    if args.get("refinement_mode") == "deterministic" and args.get("learned_training_mode"):
+        raise SystemExit("Deterministic mesh is incompatible with --learned_training_mode (no scorer to train)")
+    
+    if args.get("learned_training_mode") and args.get("learned_training_mode") not in ["scorer", "fine-tune"]:
+        raise SystemExit("Only 'learned_training' or 'fine-tune' are acceptable learned training modes")
+    
     if args.get("refinement_mode") == "deterministic":
         if args.get("refinement_criteria") not in CRITERIA_REGISTRY:
             valid = ", ".join(sorted(CRITERIA_REGISTRY))
@@ -176,7 +183,35 @@ def main(args=None):
         collate_fn = DeterministicCollateFn(tokenizer)
     else:
         criteria = None
-        collate_fn = LearnedCollateFn() # Collate (tokenization now happens inside the model)
+
+        if args.get("learned_training_mode") == "scorer":
+            # Supervised scorer training: calibrate ONE global tolerance on a subset
+            # of the train split so the mean oracle leaf count lands near n_target.
+            # A single global tol keeps the error scale fixed and lets per-sample
+            # counts vary with geometry complexity.
+            min_depth = args.get("min_depth")
+            max_depth = args.get("max_depth")
+            min_cell_size = args.get("min_cell_size", 4)
+            n_target = args.get("n_target", 256)
+            n_calib = min(args.get("calib_samples", 64), len(train_dataset))
+            calib_targets = [np.asarray(train_dataset[i]["target"], dtype=np.float32)
+                            for i in range(n_calib)]
+            tol = calibrate_global_tolerance(
+                calib_targets, n_target=n_target,
+                min_depth=min_depth, max_depth=max_depth, min_cell_size=min_cell_size,
+            )
+            reachable = max_reachable_depth(
+                calib_targets[0].shape[0], calib_targets[0].shape[1],
+                min_cell_size, max_depth,
+            )
+            print(f"Oracle target: global tol={tol:.4g} (n_target={n_target}, "
+                f"calib n={n_calib}, reachable_depth={reachable})")
+            collate_fn = ScorerCollateFn(
+                tol=tol, min_depth=min_depth, max_depth=max_depth,
+                min_cell_size=min_cell_size,
+            )
+        elif args.get("learned_training_mode") == "fine-tune":
+            collate_fn = LearnedCollateFn() # Collate (tokenization now happens inside the model)
 
     model = AdaptiveMeshAeroModel(
         input_channels=input_channels,
@@ -188,6 +223,7 @@ def main(args=None):
         dropout=args.get("dropout"),
         min_depth=args.get("min_depth"),
         max_depth=args.get("max_depth"),
+        min_cell_size=args.get("min_cell_size", 4),
         refinement_mode=args.get("refinement_mode"),
         refinement_criteria=criteria,
     )
@@ -201,63 +237,50 @@ def main(args=None):
         ckpt = torch.load(args.get("checkpoint_file"), map_location=device)
         state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
 
-        # Allow partial loads: phase 2 starts from a transformer-only checkpoint
-        # (no scorer weights yet), so strict=False is the right default here.
+        # Allow partial loads: a transformer-only checkpoint can warm-start the
+        # frozen transformer used by the optional end-to-end sanity metric.
         missing, unexpected = model.load_state_dict(state, strict=False)
         print(f"Loaded checkpoint {args.get('checkpoint_file')}")
-        print(f"  missing keys:    {len(missing)} (expected: scorer.* on first phase-2 run)")
+        print(f"  missing keys:    {len(missing)} (expected: scorer.* before scorer training)")
         print(f"  unexpected keys: {len(unexpected)} (should be 0 or near 0)")
-    elif args.get("training_phase") == 1:
-        print("WARNING: --phase 2 invoked without --checkpoint. "
-              "Starting from a RANDOMLY-INITIALIZED transformer - useful for "
-              "smoke tests only, not a real phase-2 run.")
-    elif args.get("training_phase") == 2:
-        raise SystemExit(
-            "--phase 3 requires --checkpoint pointing to a phase-2 scorer "
-            "checkpoint (e.g. outputs/phase2_scorer.pt)."
-        )
+    elif args.get("learned_training_mode") == "fine-tune":
+        raise SystemExit("--learned_training_mode fine-tune requires --checkpoint pointing to a scorer checkpoint")
 
     # ----------------------------------------------------------------
     # Train
     # ----------------------------------------------------------------
     print("\n======== Training ========")
-    if args.get("training_phase") and args.get("training_phase") not in [1, 2]:
-        raise SystemExit("Only 1 or 2 are acceptable training phases.")
-    
-    if args.get("refinement_mode") == "deterministic" and args.get("training_phase") in [1, 2]:
-        raise SystemExit("Deterministic mesh is incompatible with --training_phase (no scorer to train)")
     
     model = model.to(device)
 
     train_loader = DataLoader(train_dataset, batch_size=args.get("batch_size"), shuffle=True,
                               num_workers=args.get("num_workers"), collate_fn=collate_fn,
                               pin_memory=device.type == "cuda")
-    val_loader   = DataLoader(val_dataset,   batch_size=args.get("batch_size"), shuffle=False,
+    val_loader = DataLoader(val_dataset, batch_size=args.get("batch_size"), shuffle=False,
                               num_workers=args.get("num_workers"), collate_fn=collate_fn,
                               pin_memory=device.type == "cuda")
-    
+
     if args.get("refinement_mode") == "deterministic":
         train_loss_history, val_loss_history = train_deterministic_mesh(
             model, train_loader, val_loader, device,
             epochs=args.get("epochs"),
             d_model=args.get("d_model"),
             warmup_steps=args.get("warmup_steps"),
-            checkpoint_path="outputs/checkpoints",
+            save_path="outputs/checkpoints",
         )
     else:
-        if args.get("training_phase") == 1:
-            train_loss_history, val_loss_history = train_learned_mesh_p1(
+        if args.get("learned_training_mode") == "scorer":
+            train_loss_history, val_loss_history = train_scorer_supervised(
                 model, train_loader, val_loader, device,
                 epochs=args.get("epochs"),
-                lambda_budget=args.get("lambda_budget"),
-                lambda_smooth=args.get("lambda_smooth"),
-                tau_start=args.get("tau_start_phase1"),
-                tau_end=args.get("tau_end_phase1"),
-                scorer_lr=args.get("scorer_lr"),
-                n_max=args.get("n_max"),
-                save_path="outputs/checkpoints/phase1_scorer.pt",
+                tv_weight=args.get("tv_weight", 0.0),
+                decision_weight=args.get("decision_weight", 0.0),
+                decision_margin=args.get("decision_margin", 0.0),
+                decision_temp=args.get("decision_temp", None),
+                end_to_end_every=args.get("end_to_end_every", 0),
+                save_path="outputs/checkpoints",
             )
-        elif args.get("training_phase") == 2:
+        elif args.get("learned_training_mode") == "fine-tune":
             train_loss_history, val_loss_history = train_learned_mesh_p2(
                 model, train_loader, val_loader, device,
                 epochs=args.get("epochs"),
@@ -270,7 +293,6 @@ def main(args=None):
                 n_max=args.get("n_max"),
                 save_path="outputs/checkpoints/phase2_joint.pt",
             )
-
 
     config_name = Path(cli.config).stem
     plot_loss_curves(train_loss_history, val_loss_history, args.get("epochs"), save_path=f"outputs/loss/{config_name}_config_loss.png")

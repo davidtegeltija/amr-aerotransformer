@@ -1,4 +1,4 @@
-"""
+﻿"""
 ========================================================================
 Training pipeline for the Adaptive Mesh CFD model.
 ========================================================================
@@ -8,24 +8,21 @@ Key design decisions
 1. **Sequence packing** (APT / NaViT style): instead of padding variable-
    length token sequences with zeros, we concatenate all tokens in a batch
    into a single packed tensor and use a block-diagonal attention mask.
-   This is natively handled by FlashAttention-2's varlen API, so there is
-   zero memory wasted on padding and zero extra overhead.
 
 2. **Warmup LR schedule** (AMR-Transformer style):
-       lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t · warmup^{-1.5})
-   This is the "Transformer warmup" from the original Attention is All You
-   Need paper, adapted from the AMR-Transformer implementation.
+       lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t * warmup^{-1.5})
 
-3. **NMSE loss**: normalised MSE = MSE / (variance of ground-truth + ε),
-   which makes the loss scale-invariant across different flow quantities.
+3. **NMSE loss**: per-channel normalised MSE, scale-invariant across flow
+   quantities (see src.model.loss.nmse_loss).
 
 4. **Tokenization is done in the DataLoader workers** (CPU) so the GPU
    only ever touches float tensors.
 
-Usage
------
-    python train.py                  # toy synthetic dataset
-    python train.py --epochs 200     # more epochs
+Learned-scorer training
+-----------------------
+The RefinementNet scorer is trained by **supervised regression** of its
+predicted depth map against the variance-oracle depth target
+(``train_scorer_supervised``), fully decoupled from the transformer.
 """
 
 from __future__ import annotations
@@ -45,14 +42,12 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from src.model.loss import nmse_loss, smooth_loss, budget_loss
+from src.amr.oracle_depth import max_reachable_depth
+from src.model.loss import nmse_loss, scorer_depth_loss
+from src.model.reconstruction import tokens_to_grid_torch
 from src.eval import evaluate
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.utils.train_utils import (
-    average_targets_per_token,
-    save_checkpoint,
-    tau_schedule,
-)
+from src.utils.train_utils import mesh_token_bounds, save_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -94,19 +89,19 @@ def train_deterministic_mesh(
     epochs: int,
     d_model: int = 256,
     warmup_steps: int = 4000,
-    checkpoint_path: Optional[str] = None,
+    save_path: Optional[str] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
     best_val_loss = float('inf')
-    interactive = sys.stderr.isatty()    
+    interactive = sys.stderr.isatty()
 
     # Track loss history to see how the network behaves during training
     train_loss_history = []
     val_loss_history = []
-    
+
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
@@ -133,7 +128,7 @@ def train_deterministic_mesh(
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-                # scheduler.step()
+                scheduler.step()
 
                 epoch_loss += loss.item()
 
@@ -146,7 +141,7 @@ def train_deterministic_mesh(
         epoch_mean = epoch_token_total / max(1, epoch_sample_count)
         elapsed = time.time() - t0
 
-        # Validation 
+        # Validation
         if val_loader is not None:
             val_loss = evaluate(model, val_loader, device)
             val_loss_history.append(val_loss)
@@ -154,167 +149,215 @@ def train_deterministic_mesh(
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                if checkpoint_path:
-                    timestamp = datetime.now().strftime("%d-%m-%Y")
-                    checkpoint_name = f"best_model_{timestamp}.pt"
-                    save_checkpoint(checkpoint_path, checkpoint_name, model)
+                if save_path:
+                    timestamp = datetime.now().strftime("%Y-%m-%d")
+                    checkpoint_name = f"{timestamp}_deterministic.pt"
+                    save_checkpoint(save_path, checkpoint_name, model)
                     print(f"  OK Saved best model to {checkpoint_name}")
         else:
             print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  mean_N={epoch_mean:.1f}  time={elapsed:.1f}s")
 
         # Periodic checkpoint
-        if checkpoint_path and epoch % 50 == 0:
+        if save_path and epoch % 50 == 0:
             checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
-            save_checkpoint(checkpoint_path, checkpoint_name, model, optimizer, scheduler)
+            save_checkpoint(save_path, checkpoint_name, model, optimizer, scheduler)
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
     return train_loss_history, val_loss_history
 
 
-
 # ---------------------------------------------------------------------------
-# Train only RefinementNet (learned adaptive mesh), transformer frozen
+# Supervised scorer training (variance-oracle target, transformer decoupled)
 # ---------------------------------------------------------------------------
 
-def train_learned_mesh_p1(
-    model,
-    train_loader,
-    val_loader,
-    device,
+def train_scorer_supervised(
+    model: AdaptiveMeshAeroModel,
+    train_loader: DataLoader,
+    val_loader: Optional[DataLoader],
+    device: torch.device,
     *,
     epochs: int,
-    lambda_budget: float = 0.01,
-    lambda_smooth: float = 0.001,
-    tau_start: float = 5.0,
-    tau_end: float = 0.5,
-    scorer_lr: float = 1e-3,
-    weight_decay: float = 1e-4,
-    n_max: int = 1024,
-    grad_clip: float = 1.0,
-    save_path: str = "outputs/phase2_scorer.pt",
+    tv_weight: float = 0.0,
+    decision_weight: float = 0.0,
+    decision_margin: float = 0.0,
+    decision_temp: Optional[float] = None,
+    end_to_end_every: int = 0,
+    save_path: Optional[str] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
-    """
-    Train the RefinementNet scorer with the transformer frozen.
+    """Train the RefinementNet scorer by supervised regression to the oracle.
 
-    Loss per step:
-        L = nmse_loss(preds, packed_targets)
-            + lambda_budget * budget_loss(soft_N, n_max)
-            + lambda_smooth * smooth_loss(score_map)
+    Forward is ``grid -> scorer -> d_pred``; the loss is ``scorer_depth_loss`` against
+    the precomputed oracle depth (``batch["oracle_depth"]``). Only the scorer's
+    parameters are optimised — the transformer, token packing, the quadtree
+    build and any sampling are entirely out of this loop.
 
-    Writes the best (lowest val_loss) model state_dict to `save_path`.
+    Args:
+        model: A learned-mode ``AdaptiveMeshAeroModel`` (only ``model.scorer`` is
+            trained; the transformer is used only for the optional end-to-end
+            sanity metric).
+        train_loader / val_loader: Loaders built with ``ScorerCollateFn`` (yield
+            ``grids``, ``targets`` and ``oracle_depth``).
+        epochs: Number of epochs.
+        tv_weight: Small TV regulariser weight on ``d_pred`` (0 = off).
+        decision_weight: Decision-consistency term weight (0 = off, default).
+        decision_margin, decision_temp: Decision-term margin / smooth-max temp.
+        end_to_end_every: If > 0, every this many epochs build meshes with the
+            current scorer, run the (frozen) transformer and report the dense
+            painting NMSE + token-count stats as a sanity metric (NOT the
+            training signal).
+        save_path: Directory to write the best-val checkpoint into (a
+            timestamped ``*_scorer_supervised.pt`` file). ``None`` disables
+            checkpointing.
+
+    Returns:
+        ``(train_loss_history, val_loss_history)``.
     """
     if getattr(model, "refinement_mode", "learned") != "learned":
-        raise ValueError("train_learned_mesh_p1 requires refinement_mode='learned'.")
+        raise ValueError("train_scorer_supervised requires refinement_mode='learned'.")
 
-    # 1. Freeze transformer
+    model = model.to(device)
+    # The transformer never participates in scorer training; freeze it so the
+    # decoupling is explicit (and the optional end-to-end check uses a fixed
+    # transformer).
     for p in model.transformer.parameters():
         p.requires_grad = False
-    model.transformer.eval()          # BN/dropout stay frozen too
+    model.transformer.eval()
 
-    # 2. Scorer-only optimizer
-    optimizer = AdamW(
-        [{"params": model.scorer.parameters(), "lr": scorer_lr,
-          "weight_decay": weight_decay}],
-    )
+    optimizer = AdamW(model.scorer.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-
     best_val_loss = float("inf")
-    interactive = sys.stderr.isatty() 
+    interactive = sys.stderr.isatty()
+    train_loss_history: List[float] = []
+    val_loss_history: List[Optional[float]] = []
 
-    train_loss_history = []
-    val_loss_history = []
+    reachable: Optional[int] = None
 
     for epoch in range(epochs):
-        # Gumbel temperature for this epoch
-        model.tau = tau_schedule(epoch, tau_start, tau_end, epochs)
-
-        # --- Train ---
-        model.scorer.train()           # scorer-only: keep transformer in eval
+        model.scorer.train()
         epoch_loss = 0.0
-        epoch_pred = 0.0
-        epoch_budget = 0.0
-        epoch_smooth = 0.0
-        epoch_n = 0
         n_steps = 0
+        t0 = time.time()
 
-        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
-            for step, batch in enumerate(tq_loader):
-                grids        = batch["grids"].to(device)
-                grid_targets = batch["targets"].to(device)
+        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Scorer Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
+            for batch in tq_loader:
+                grids = batch["grids"].to(device)
+                oracle = batch["oracle_depth"].to(device)
 
-                out = model(grids)
-                packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
+                if reachable is None:
+                    H, W = grids.shape[1], grids.shape[2]
+                    reachable = max_reachable_depth(H, W, model.min_cell_size, model.max_depth)
 
-                L_pred   = nmse_loss(out["token_preds"], packed_targets)
-                L_budget = budget_loss(out["soft_N"], n_max)
-                L_smooth = smooth_loss(out["score_map"])
-
-                loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
+                d_hat = model.predict_depth(grids)              # [B, 1, H, W]
+                loss, comp = scorer_depth_loss(
+                    d_hat, oracle,
+                    tv_weight=tv_weight,
+                    decision_weight=decision_weight,
+                    min_depth=model.min_depth,
+                    max_depth=reachable,
+                    margin=decision_margin,
+                    decision_temp=decision_temp,
+                )
 
                 optimizer.zero_grad()
                 loss.backward()
-                clip_grad_norm_(model.scorer.parameters(), max_norm=grad_clip)
+                clip_grad_norm_(model.scorer.parameters(), max_norm=1.0)
                 optimizer.step()
 
-                # Stats
-                epoch_loss   += loss.item()
-                epoch_pred   += L_pred.item()
-                epoch_budget += L_budget.item()
-                epoch_smooth += L_smooth.item()
-                epoch_n      += sum(out["tokens_per_sample"])
-                n_steps      += 1
+                epoch_loss += comp["total"]
+                n_steps += 1
+                tq_loader.set_postfix(loss=f"{comp['total']:.4f}", reg=f"{comp['reg']:.4f}")
 
-            scheduler.step()
+        scheduler.step()
+        train_loss_history.append(epoch_loss / max(1, n_steps))
 
-        train_loss_history.append(epoch_pred / len(train_loader))
-
-        # --- Validate ---
-        val_loss = _validate_phase2(model, val_loader, device) if val_loader else None
+        # --- Supervised validation (cheap model selection) ---
+        val_loss = _validate_scorer_supervised(
+            model, val_loader, device,
+            reachable=reachable, tv_weight=tv_weight,
+            decision_weight=decision_weight, decision_margin=decision_margin,
+            decision_temp=decision_temp,
+        ) if val_loader else None
         val_loss_history.append(val_loss)
 
-        # --- Log ---
-        print(
-            f"[phase2] epoch {epoch:03d}/{epochs}  "
-            f"tau={model.tau:.3f}  "
-            f"loss={epoch_loss / n_steps:.4f} "
-            f"(pred={epoch_pred / n_steps:.4f} "
-            f"budget={epoch_budget / n_steps:.4f} "
-            f"smooth={epoch_smooth / n_steps:.4f})  "
-            f"mean_N={epoch_n / max(1, n_steps) / max(1, train_loader.batch_size):.1f}"
-            + (f"  val={val_loss:.4f}" if val_loss is not None else "")
-        )
+        elapsed = time.time() - t0
+        msg = (f"[scorer] epoch {epoch:03d}/{epochs}  "
+               f"train={train_loss_history[-1]:.4f}"
+               + (f"  val={val_loss:.4f}" if val_loss is not None else "")
+               + f"  time={elapsed:.1f}s")
+
+        # --- Optional end-to-end sanity metric (not the training signal) ---
+        if end_to_end_every and val_loader is not None and (epoch + 1) % end_to_end_every == 0:
+            dense_nmse, mean_N = _end_to_end_sanity(model, val_loader, device)
+            floor, cap = mesh_token_bounds(
+                H, W, min_depth=model.min_depth, max_depth=model.max_depth,
+                min_cell_size=model.min_cell_size,
+            )
+            msg += f"  [e2e dense_nmse={dense_nmse:.4f} mean_N={mean_N:.1f} ({floor}..{cap})]"
+
+        print(msg)
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({"model": model.state_dict(), 
-                        "epoch": epoch,
-                        "val_loss": val_loss}, save_path)
-            
+            if save_path:
+                timestamp = datetime.now().strftime("%Y-%m-%d")
+                checkpoint_name = f"{timestamp}_scorer_supervised.pt"
+                save_checkpoint(save_path, checkpoint_name, model, epoch=epoch, val_loss=val_loss)
+                print(f"  OK Saved best scorer to {checkpoint_name}")
+
     return train_loss_history, val_loss_history
 
 
+@torch.no_grad()
+def _validate_scorer_supervised(
+    model, val_loader, device, *, reachable, tv_weight,
+    decision_weight, decision_margin, decision_temp,
+) -> float:
+    """Mean supervised scorer loss over the val split."""
+    model.scorer.eval()
+    total, n = 0.0, 0
+    for batch in val_loader:
+        grids = batch["grids"].to(device)
+        oracle = batch["oracle_depth"].to(device)
+        d_hat = model.predict_depth(grids)
+        _, comp = scorer_depth_loss(
+            d_hat, oracle,
+            tv_weight=tv_weight, decision_weight=decision_weight,
+            min_depth=model.min_depth, max_depth=reachable,
+            margin=decision_margin, decision_temp=decision_temp,
+        )
+        total += comp["total"]
+        n += 1
+    model.scorer.train()
+    return total / max(1, n)
 
-def _validate_phase2(model, val_loader, device) -> float:
+
+@torch.no_grad()
+def _end_to_end_sanity(model, loader, device) -> Tuple[float, float]:
+    """Build meshes with the current scorer, run the frozen transformer, and
+    report dense painting NMSE (no leaf_weights) plus the mean token count.
+
+    This is a sanity check only — it is never backpropagated.
+    """
     model.eval()
-    total = 0.0
-    n = 0
-    with torch.no_grad():
-        for batch in val_loader:
-            grids = batch["grids"].to(device)
-            targets = batch["targets"].to(device)
-            out = model(grids)
-            packed_targets = average_targets_per_token(targets, out["token_lists"])
-            total += nmse_loss(out["token_preds"], packed_targets).item()
-            n += 1
-    # Restore: scorer back to train, transformer stays frozen+eval
+    total_nmse, n = 0.0, 0
+    tokens, samples = 0, 0
+    for batch in loader:
+        grids = batch["grids"].to(device)
+        targets = batch["targets"].to(device)
+        out = model(grids)
+        dense = tokens_to_grid_torch(
+            out["token_preds"], out["token_lists"],
+            out["tokens_per_sample"], grids.shape[1], grids.shape[2],
+        )
+        total_nmse += nmse_loss(dense, targets).item()
+        n += 1
+        tokens += sum(out["tokens_per_sample"])
+        samples += len(out["tokens_per_sample"])
     model.scorer.train()
     model.transformer.eval()
-    for p in model.transformer.parameters():
-        p.requires_grad = False
-    return total / max(1, n)
+    return total_nmse / max(1, n), tokens / max(1, samples)
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +563,7 @@ def train_vit(
                 targets = batch["targets"].to(device).permute(0, 3, 1, 2).float()
 
                 preds = model(grids)
-                loss  = nmse_loss(preds, targets)
+                loss  = nmse_loss(preds, targets, channel_dim=1)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -555,7 +598,7 @@ def _validate_vit(model, val_loader, device) -> float:
         for batch in val_loader:
             grids   = batch["grids"].to(device).permute(0, 3, 1, 2).float()
             targets = batch["targets"].to(device).permute(0, 3, 1, 2).float()
-            total += nmse_loss(model(grids), targets).item()
+            total += nmse_loss(model(grids), targets, channel_dim=1).item()
             n += 1
     model.train()
     return total / max(1, n)
