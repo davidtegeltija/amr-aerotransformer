@@ -25,7 +25,9 @@ def load_config(path: str) -> Dict:
     """Load a YAML config and return a flat namespace mimicking the argparse args."""
     with open(path, "r") as f:
         cfg = yaml.safe_load(f)
-
+    
+    # Print out the whole yaml file so it can be logged
+    print(cfg)
     return cfg
 
 
@@ -306,7 +308,7 @@ if __name__ == "__main__":
 
     # When calling the function from IDE
     else:            
-        config = "configs/baseline.yaml"
+        config = "configs/overfit.yaml"
         args = ["--config", config]
         print(args)
         main(args)
