@@ -1,5 +1,7 @@
 matplotlib>=3.10.8
 numpy>=2.3.5
 Pillow>=12.1.1
+setuptools<81           # TensorBoard 2.20 imports pkg_resources, removed in setuptools 81+
+tensorboard>=2.20.0
 torch>=2.10.0
 tqdm>=4.67.0

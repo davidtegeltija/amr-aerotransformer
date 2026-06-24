@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 from pathlib import Path
 import sys
 from typing import Dict
@@ -7,6 +8,7 @@ import yaml
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.tensorboard import SummaryWriter
 
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
@@ -64,6 +66,18 @@ def main(args=None):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    # ----------------------------------------------------------------
+    # TensorBoard writer (one run dir per config + timestamp)
+    # ----------------------------------------------------------------
+    config_name = Path(cli.config).stem
+    run_name = f"{config_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    log_dir = Path("runs") / run_name
+    writer = SummaryWriter(log_dir=str(log_dir))
+    # Persist the resolved config so each run is self-documenting in TensorBoard's
+    # TEXT tab (markdown code block renders the dict readably).
+    writer.add_text("config", f"```yaml\n{yaml.safe_dump(args, sort_keys=False)}```", 0)
+    print(f"TensorBoard logging to {log_dir}  (view: tensorboard --logdir runs)")
 
     # ----------------------------------------------------------------
     # Build Dataset
@@ -150,11 +164,12 @@ def main(args=None):
             weight_decay=args.get("weight_decay"),
             grad_clip=args.get("grad_clip"),
             save_path=f"{ckpt_path}/best.pt",
+            writer=writer,
         )
 
-        config_name = Path(cli.config).stem
         plot_loss_curves(train_loss_history, val_loss_history, args.get("epochs"),
                          save_path=f"outputs/loss/{config_name}_config_loss.png")
+        writer.close()
         return
 
     # ----------------------------------------------------------------
@@ -269,6 +284,7 @@ def main(args=None):
             d_model=args.get("d_model"),
             warmup_steps=args.get("warmup_steps"),
             save_path="outputs/checkpoints",
+            writer=writer,
         )
     else:
         if args.get("learned_training_mode") == "scorer":
@@ -281,6 +297,7 @@ def main(args=None):
                 decision_temp=args.get("decision_temp", None),
                 end_to_end_every=args.get("end_to_end_every", 0),
                 save_path="outputs/checkpoints",
+                writer=writer,
             )
         elif args.get("learned_training_mode") == "fine-tune":
             train_loss_history, val_loss_history = train_learned_mesh_p2(
@@ -294,10 +311,11 @@ def main(args=None):
                 transformer_lr=args.get("transformer_lr"),
                 n_max=args.get("n_max"),
                 save_path="outputs/checkpoints/phase2_joint.pt",
+                writer=writer,
             )
 
-    config_name = Path(cli.config).stem
     plot_loss_curves(train_loss_history, val_loss_history, args.get("epochs"), save_path=f"outputs/loss/{config_name}_config_loss.png")
+    writer.close()
 
 
 if __name__ == "__main__":

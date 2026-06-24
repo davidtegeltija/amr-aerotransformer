@@ -62,4 +62,28 @@ The config is a flat YAML mapping. See `configs/baseline.yaml` for the canonical
 
 Checkpoints are written under `outputs/checkpoints/` (`phase1_scorer.pt`, `phase2_joint.pt`).
 
+## Monitoring with TensorBoard
+
+Every run writes scalar metrics (per-epoch train/val loss, learning rate, mean token count `mean_N`) plus the resolved config under `runs/<config-name>_<timestamp>/`. The deterministic loop also logs per-step loss/LR, recovering the step-level signal that `tqdm` drops under `nohup`.
+
+`tensorboard` is included in `requirements.txt`. Note the `setuptools<81` pin there:
+TensorBoard 2.20 imports `pkg_resources`, which newer setuptools removes — without the
+pin TensorBoard fails to launch.
+
+### Viewing the dashboard
+
+From the project root, with the virtual environment active:
+
+```console
+tensorboard --logdir runs
+```
+
+then open <http://localhost:6006> in a browser.
+
+To view it embedded in VSCode instead, install Microsoft's **TensorBoard** extension and
+run **Python: Launch TensorBoard** from the Command Palette (`Ctrl+Shift+P`), pointing it
+at the workspace folder. Alternatively, run the `tensorboard` command above and open
+**Command Palette -> Simple Browser: Show -> `http://localhost:6006`** to view it in a
+VSCode tab.
+
 ## References

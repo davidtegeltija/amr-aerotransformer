@@ -1,6 +1,15 @@
+# Python-generated files
 __pycache__/
 *.pyc
+
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+
+# Environment
 venv/
 
-outputs/
-/data
+/outputs/
+/runs/
+/data/

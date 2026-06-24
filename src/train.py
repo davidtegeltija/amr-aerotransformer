@@ -40,6 +40,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.amr.oracle_depth import max_reachable_depth
@@ -90,6 +91,7 @@ def train_deterministic_mesh(
     d_model: int = 256,
     warmup_steps: int = 4000,
     save_path: Optional[str] = None,
+    writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -97,6 +99,7 @@ def train_deterministic_mesh(
 
     best_val_loss = float('inf')
     interactive = sys.stderr.isatty()
+    global_step = 0
 
     # Track loss history to see how the network behaves during training
     train_loss_history = []
@@ -136,16 +139,30 @@ def train_deterministic_mesh(
                 lr = scheduler.get_last_lr()[0]
                 tq_loader.set_postfix(loss=f"{loss.item():.6f}", lr=f"{lr:.2e}", mean_N=f"{batch_mean_tokens:.1f}")
 
+                # Per-step scalars recover the signal tqdm drops under nohup.
+                if writer is not None:
+                    writer.add_scalar("Loss/train_step", loss.item(), global_step)
+                    writer.add_scalar("LR", lr, global_step)
+                    writer.add_scalar("Tokens/mean_N_step", batch_mean_tokens, global_step)
+                global_step += 1
+
         avg_loss = epoch_loss / len(train_loader)
         train_loss_history.append(avg_loss)
         epoch_mean = epoch_token_total / max(1, epoch_sample_count)
         elapsed = time.time() - t0
+
+        if writer is not None:
+            writer.add_scalar("Loss/train", avg_loss, epoch)
+            writer.add_scalar("Tokens/mean_N", epoch_mean, epoch)
+            writer.add_scalar("Time/epoch_s", elapsed, epoch)
 
         # Validation
         if val_loader is not None:
             val_loss = evaluate(model, val_loader, device)
             val_loss_history.append(val_loss)
             print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  val_loss={val_loss:.6f}  mean_N={epoch_mean:.1f}  time={elapsed:.1f}s")
+            if writer is not None:
+                writer.add_scalar("Loss/val", val_loss, epoch)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -184,6 +201,7 @@ def train_scorer_supervised(
     decision_temp: Optional[float] = None,
     end_to_end_every: int = 0,
     save_path: Optional[str] = None,
+    writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     """Train the RefinementNet scorer by supervised regression to the oracle.
 
@@ -249,9 +267,9 @@ def train_scorer_supervised(
                     H, W = grids.shape[1], grids.shape[2]
                     reachable = max_reachable_depth(H, W, model.min_cell_size, model.max_depth)
 
-                d_hat = model.predict_depth(grids)              # [B, 1, H, W]
+                d_pred = model.predict_depth(grids)              # [B, 1, H, W]
                 loss, comp = scorer_depth_loss(
-                    d_hat, oracle,
+                    d_pred, oracle,
                     tv_weight=tv_weight,
                     decision_weight=decision_weight,
                     min_depth=model.min_depth,
@@ -281,6 +299,12 @@ def train_scorer_supervised(
         ) if val_loader else None
         val_loss_history.append(val_loss)
 
+        if writer is not None:
+            writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
+            writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
+            if val_loss is not None:
+                writer.add_scalar("Loss/val", val_loss, epoch)
+
         elapsed = time.time() - t0
         msg = (f"[scorer] epoch {epoch:03d}/{epochs}  "
                f"train={train_loss_history[-1]:.4f}"
@@ -295,6 +319,9 @@ def train_scorer_supervised(
                 min_cell_size=model.min_cell_size,
             )
             msg += f"  [e2e dense_nmse={dense_nmse:.4f} mean_N={mean_N:.1f} ({floor}..{cap})]"
+            if writer is not None:
+                writer.add_scalar("E2E/dense_nmse", dense_nmse, epoch)
+                writer.add_scalar("E2E/mean_N", mean_N, epoch)
 
         print(msg)
 
@@ -320,9 +347,9 @@ def _validate_scorer_supervised(
     for batch in val_loader:
         grids = batch["grids"].to(device)
         oracle = batch["oracle_depth"].to(device)
-        d_hat = model.predict_depth(grids)
+        d_pred = model.predict_depth(grids)
         _, comp = scorer_depth_loss(
-            d_hat, oracle,
+            d_pred, oracle,
             tv_weight=tv_weight, decision_weight=decision_weight,
             min_depth=model.min_depth, max_depth=reachable,
             margin=decision_margin, decision_temp=decision_temp,
@@ -381,6 +408,7 @@ def train_learned_mesh_p2(
     n_max: int = 1024,
     grad_clip: float = 1.0,
     save_path: str = "outputs/phase3_joint.pt",
+    writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     """
     Joint fine-tuning of scorer and transformer.
@@ -470,6 +498,7 @@ def train_learned_mesh_p2(
         val_loss_history.append(val_loss)
 
         # --- Log ---
+        mean_N = epoch_n / max(1, n_steps) / max(1, train_loader.batch_size)
         print(
             f"[phase3] epoch {epoch:03d}/{epochs}  "
             f"tau={model.tau:.3f}  "
@@ -477,9 +506,20 @@ def train_learned_mesh_p2(
             f"(pred={epoch_pred / n_steps:.4f} "
             f"budget={epoch_budget / n_steps:.4f} "
             f"smooth={epoch_smooth / n_steps:.4f})  "
-            f"mean_N={epoch_n / max(1, n_steps) / max(1, train_loader.batch_size):.1f}"
+            f"mean_N={mean_N:.1f}"
             + (f"  val={val_loss:.4f}" if val_loss is not None else "")
         )
+
+        if writer is not None:
+            writer.add_scalar("Loss/train_total", epoch_loss / n_steps, epoch)
+            writer.add_scalar("Loss/train_pred", epoch_pred / n_steps, epoch)
+            writer.add_scalar("Loss/budget", epoch_budget / n_steps, epoch)
+            writer.add_scalar("Loss/smooth", epoch_smooth / n_steps, epoch)
+            writer.add_scalar("Tau", model.tau, epoch)
+            writer.add_scalar("Tokens/mean_N", mean_N, epoch)
+            writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
+            if val_loss is not None:
+                writer.add_scalar("Loss/val", val_loss, epoch)
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -524,6 +564,7 @@ def train_vit(
     weight_decay: float = 1e-4,
     grad_clip: float = 1.0,
     save_path: str = "outputs/vit/best.pt",
+    writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     """Train a ViT on dense [B, H, W, C] grids with NMSE loss only.
 
@@ -582,6 +623,12 @@ def train_vit(
         print(f"[vit] epoch {epoch:03d}/{epochs}  "
               f"train={train_hist[-1]:.4f}"
               + (f"  val={val_loss:.4f}" if val_loss is not None else ""))
+
+        if writer is not None:
+            writer.add_scalar("Loss/train", train_hist[-1], epoch)
+            writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
+            if val_loss is not None:
+                writer.add_scalar("Loss/val", val_loss, epoch)
 
         if val_loss is not None and val_loss < best_val:
             best_val = val_loss
