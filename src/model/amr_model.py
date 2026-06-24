@@ -50,13 +50,10 @@ import torch.nn as nn
 
 from src.amr.refinement_criteria import RefinementCriteria
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
+from src.amr.quadtree_tokenizer import nodes_to_token_array
 from src.model.refinement_net import RefinementNet
 from src.model.transformer import AeroTransformer
 
-
-# ---------------------------------------------------------------------------
-# Full model
-# ---------------------------------------------------------------------------
 
 class AdaptiveMeshAeroModel(nn.Module):
     """
@@ -227,7 +224,7 @@ class AdaptiveMeshAeroModel(nn.Module):
                 min_cell_size=self.min_cell_size,
                 offset=self.offset,
             )
-            all_tokens.append(self._pack_tokens(leaves, H, W, C))
+            all_tokens.append(torch.from_numpy(nodes_to_token_array(leaves, H, W, C)))
             tokens_per_sample.append(len(leaves))
             token_lists.append(leaves)
 
@@ -255,19 +252,6 @@ class AdaptiveMeshAeroModel(nn.Module):
         """
         geom = grids.permute(0, 3, 1, 2).contiguous()
         return self.scorer(geom)
-
-    def _pack_tokens(self, leaves, H, W, C):
-        """Extract the token-packing loop into a reusable method."""
-        N = len(leaves)
-        tokens = torch.zeros(N, C + 3, dtype=torch.float32)
-        for i, leaf in enumerate(leaves):
-            r0, c0, r1, c1 = leaf.bbox
-            tokens[i, :C]     = torch.from_numpy(leaf.features)
-            tokens[i, C]      = (c0 + c1) / 2.0 / W
-            tokens[i, C + 1]  = (r0 + r1) / 2.0 / H
-            tokens[i, C + 2]  = max((c1 - c0) / W, (r1 - r0) / H)
-        return tokens
-
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

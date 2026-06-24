@@ -19,16 +19,16 @@ The actual patch generation is now handled by three dedicated modules:
     adaptive_mesh.py   - build_adaptive_mesh() pipeline that drives the tree
 
 This module's only job is to:
-1. Call build_adaptive_mesh() with with a RefinementCriteria and collect leaf QuadNodes.
-2. Stack the leaf nodes into the [N, C+4] float32 token array the Transformer consumes.
+1. Call build_adaptive_mesh() with a RefinementCriteria and collect leaf QuadNodes.
+2. Stack the leaf nodes into the [N, C+3] float32 token array the Transformer consumes.
 3. Pass the leaf nodes directly to reconstruction.py and visualization.py.
    QuadNode already carries everything those modules need (bbox, depth, features).
 
-Public API (unchanged from previous version)
+Public API
 --------------------------------------------
-  QuadtreeToken               - dataclass holding one cell's data + bbox
-  QuadtreeTokenizer           - tokenizes a [H, W, C] grid to [N, C+4]
-  RefinementCriteria          - base class for custom criteria
+  QuadNode               - dataclass holding one cell's data + bbox
+  QuadtreeTokenizer      - tokenizes a [H, W, C] grid to [N, C+3]
+  RefinementCriteria     - base class for custom criteria
 """
 
 from __future__ import annotations
@@ -36,16 +36,11 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
  
 import numpy as np
-import torch
  
 from src.amr.refinement_criteria import AERODYNAMIC_CRITERIA, RefinementCriteria
 from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.quadtree import QuadNode
 
-
-# ---------------------------------------------------------------------------
-# QuadtreeTokenizer
-# ---------------------------------------------------------------------------
 
 class QuadtreeTokenizer:
     """
@@ -53,7 +48,7 @@ class QuadtreeTokenizer:
     physics-aware AMR pipeline from adaptive_mesh.py.
 
     Drives build_adaptive_mesh() and converts its List[dict] patch output
-    into the [N, C+4] token array and List[QuadtreeToken] metadata that the
+    into the [N, C+3] token array and List[QuadNode] metadata that the
     Transformer pipeline expects.
 
     Args
@@ -77,10 +72,6 @@ class QuadtreeTokenizer:
         self.min_cell_size       = min_cell_size
         self.refinement_criteria = refinement_criteria or AERODYNAMIC_CRITERIA
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def tokenize(self, grid: np.ndarray) -> Tuple[np.ndarray, List[QuadNode]]:
         """
         Tokenize a single spatial grid.
@@ -91,14 +82,14 @@ class QuadtreeTokenizer:
 
         Returns
         -------
-        token_array : [N, C+4] float32 array
-                      columns: [feat_0...feat_{C-1}, x_c, y_c, cell_size, depth_norm]
+        token_array : [N, C+3] float32 array
+                      columns: [feat_0...feat_{C-1}, x_c, y_c, cell_size]
         token_list  : List[QuadNode] with bounding boxes for reconstruction
         """
         assert grid.ndim == 3, f"Expected [H, W, C], got shape {grid.shape}"
         H, W, C = grid.shape
 
-        token_list: List[QuadNode] = build_adaptive_mesh(
+        node_list: List[QuadNode] = build_adaptive_mesh(
             grid,
             max_depth=self.max_depth,
             min_cell_size=self.min_cell_size,
@@ -107,35 +98,43 @@ class QuadtreeTokenizer:
 
         # Discard patches from shallower levels
         if self.min_depth > 0:
-            filtered = [t for t in token_list if t.depth >= self.min_depth]
+            filtered = [t for t in node_list if t.depth >= self.min_depth]
             # Guard against empty result on very small grids
-            token_list = filtered if filtered else token_list
+            node_list = filtered if filtered else node_list
 
-        token_array = self._tokens_to_array(token_list, H, W, C)
-        return token_array, token_list
+        token_array = nodes_to_token_array(node_list, H, W, C)
+        return token_array, node_list
 
-    # ------------------------------------------------------------------
-    # Conversion helpers
-    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _tokens_to_array(tokens: List[QuadNode], H: int, W: int, C: int) -> np.ndarray:
-        """
-        Stack leaf QuadNodes (tokens) into a [N, C+4] float32 array.
-        
-        Columns:
-            0..C-1  : per-channel mean features (from node.features)
-            C       : x_center  -- normalised column centre  = (c0+c1)/2 / W
-            C+1     : y_center  -- normalised row centre     = (r0+r1)/2 / H
-            C+2     : cell_size -- normalised max dimension  = max(width/W, height/H)
-        """
-        N = len(tokens)
-        arr = np.empty((N, C + 3), dtype=np.float32)
-        for i, token in enumerate(tokens):
-            y_center, x_center = token.center
-            arr[i, :C] = token.features if token.features is not None else 0.0
-            arr[i, C] = x_center / W   # x_center
-            arr[i, C+1] = y_center / H   # y_center
-            arr[i, C+2] = max(token.width / W, token.height / H)  # cell_size
-        return arr
+# ------------------------------------------------------------------
+# Convert Quadtree leaves to token array helper
+# ------------------------------------------------------------------
 
+def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int) -> np.ndarray:
+    """
+    Stack leaf QuadNodes into a [N, C+3] float32 token array.
+
+    Columns:
+        0..C-1  : per-channel mean features (from node.features)
+        C       : x_center  -- normalised column centre  = x_center / W
+        C+1     : y_center  -- normalised row centre     = y_center / H
+        C+2     : cell_size -- normalised max dimension  = max(width/W, height/H)
+
+    Args:
+        nodes: Leaf ``QuadNode`` s to tokenize.
+        H: Grid height (rows), used to normalise the row centre.
+        W: Grid width (columns), used to normalise the column centre.
+        C: Number of feature channels.
+
+    Returns:
+        ``[N, C+3]`` float32 array, one row per node.
+    """
+    N = len(nodes)
+    arr = np.empty((N, C + 3), dtype=np.float32)
+    for i, node in enumerate(nodes):
+        y_center, x_center = node.center
+        arr[i, :C] = node.features if node.features is not None else 0.0
+        arr[i, C] = x_center / W
+        arr[i, C+1] = y_center / H
+        arr[i, C+2] = max(node.width / W, node.height / H)
+    return arr
