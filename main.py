@@ -18,7 +18,7 @@ from src.data.dataset import AeroDataset
 from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.vit import ViT
-from src.train import train_deterministic_mesh, train_scorer_supervised, train_learned_mesh_p2, train_vit
+from src.train import train_deterministic_mesh, train_scorer_supervised, train_learned_mesh_p2, train_vit, evaluate_end_to_end
 from src.utils.data_utils import geometry_disjoint_split
 from src.utils.train_utils import plot_loss_curves
 
@@ -289,16 +289,32 @@ def main(args=None):
     else:
         if args.get("learned_training_mode") == "scorer":
             train_loss_history, val_loss_history = train_scorer_supervised(
-                model, train_loader, val_loader, device,
+                model.scorer, train_loader, val_loader, device,
                 epochs=args.get("epochs"),
+                min_depth=args.get("min_depth"),
+                max_depth=args.get("max_depth"),
+                min_cell_size=args.get("min_cell_size", 4),
                 tv_weight=args.get("tv_weight", 0.0),
                 decision_weight=args.get("decision_weight", 0.0),
                 decision_margin=args.get("decision_margin", 0.0),
                 decision_temp=args.get("decision_temp", None),
-                end_to_end_every=args.get("end_to_end_every", 0),
                 save_path="outputs/checkpoints",
                 writer=writer,
             )
+
+            # End-to-end sanity metric (scorer mesh -> frozen transformer ->
+            # dense NMSE). Only meaningful with a PRETRAINED transformer: this run
+            # never trains the transformer, so without a loaded checkpoint its
+            # weights are random and the number is noise. Run it once, post-hoc,
+            # only when a transformer checkpoint was actually loaded.
+            if val_loader is not None and args.get("checkpoint_file") is not None:
+                dense_nmse, mean_N = evaluate_end_to_end(model, val_loader, device)
+                print(f"[scorer] final end-to-end: dense_nmse={dense_nmse:.4f}  mean_N={mean_N:.1f}")
+                writer.add_scalar("E2E/dense_nmse", dense_nmse, args.get("epochs"))
+                writer.add_scalar("E2E/mean_N", mean_N, args.get("epochs"))
+            else:
+                print("[scorer] skipping end-to-end metric: no transformer checkpoint "
+                      "loaded (--checkpoint_file), so the transformer is untrained.")
         elif args.get("learned_training_mode") == "fine-tune":
             train_loss_history, val_loss_history = train_learned_mesh_p2(
                 model, train_loader, val_loader, device,

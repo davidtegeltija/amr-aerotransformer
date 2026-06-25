@@ -45,10 +45,9 @@ from tqdm import tqdm
 
 from src.amr.oracle_depth import max_reachable_depth
 from src.model.loss import nmse_loss, scorer_depth_loss
-from src.model.reconstruction import tokens_to_grid_torch
 from src.eval import evaluate
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.utils.train_utils import mesh_token_bounds, save_checkpoint
+from src.utils.train_utils import save_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -189,41 +188,41 @@ def train_deterministic_mesh(
 # ---------------------------------------------------------------------------
 
 def train_scorer_supervised(
-    model: AdaptiveMeshAeroModel,
+    scorer: nn.Module,
     train_loader: DataLoader,
     val_loader: Optional[DataLoader],
     device: torch.device,
     *,
     epochs: int,
+    min_depth: int,
+    max_depth: int,
+    min_cell_size: int,
     tv_weight: float = 0.0,
     decision_weight: float = 0.0,
     decision_margin: float = 0.0,
     decision_temp: Optional[float] = None,
-    end_to_end_every: int = 0,
     save_path: Optional[str] = None,
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     """Train the RefinementNet scorer by supervised regression to the oracle.
 
     Forward is ``grid -> scorer -> d_pred``; the loss is ``scorer_depth_loss`` against
-    the precomputed oracle depth (``batch["oracle_depth"]``). Only the scorer's
-    parameters are optimised — the transformer, token packing, the quadtree
-    build and any sampling are entirely out of this loop.
+    the precomputed oracle depth (``batch["oracle_depth"]``). This loop is fully
+    decoupled — it depends only on the scorer module; the transformer, token
+    packing and the quadtree build never appear here.
 
     Args:
-        model: A learned-mode ``AdaptiveMeshAeroModel`` (only ``model.scorer`` is
-            trained; the transformer is used only for the optional end-to-end
-            sanity metric).
+        scorer: The ``RefinementNet`` to train (e.g. ``model.scorer``). It takes
+            channel-last grids ``[B, H, W, C]`` and returns ``d_pred [B, 1, H, W]``.
         train_loader / val_loader: Loaders built with ``ScorerCollateFn`` (yield
             ``grids``, ``targets`` and ``oracle_depth``).
         epochs: Number of epochs.
+        min_depth, max_depth, min_cell_size: Quadtree geometry; must match the
+            oracle and the mesh builder. The reachable depth is derived from
+            ``min_cell_size`` and used as the loss's ``max_depth``.
         tv_weight: Small TV regulariser weight on ``d_pred`` (0 = off).
         decision_weight: Decision-consistency term weight (0 = off, default).
         decision_margin, decision_temp: Decision-term margin / smooth-max temp.
-        end_to_end_every: If > 0, every this many epochs build meshes with the
-            current scorer, run the (frozen) transformer and report the dense
-            painting NMSE + token-count stats as a sanity metric (NOT the
-            training signal).
         save_path: Directory to write the best-val checkpoint into (a
             timestamped ``*_scorer_supervised.pt`` file). ``None`` disables
             checkpointing.
@@ -231,18 +230,9 @@ def train_scorer_supervised(
     Returns:
         ``(train_loss_history, val_loss_history)``.
     """
-    if getattr(model, "refinement_mode", "learned") != "learned":
-        raise ValueError("train_scorer_supervised requires refinement_mode='learned'.")
+    scorer = scorer.to(device)
 
-    model = model.to(device)
-    # The transformer never participates in scorer training; freeze it so the
-    # decoupling is explicit (and the optional end-to-end check uses a fixed
-    # transformer).
-    for p in model.transformer.parameters():
-        p.requires_grad = False
-    model.transformer.eval()
-
-    optimizer = AdamW(model.scorer.parameters(), lr=1e-3, weight_decay=1e-4)
+    optimizer = AdamW(scorer.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     best_val_loss = float("inf")
@@ -253,7 +243,7 @@ def train_scorer_supervised(
     reachable: Optional[int] = None
 
     for epoch in range(epochs):
-        model.scorer.train()
+        scorer.train()
         epoch_loss = 0.0
         n_steps = 0
         t0 = time.time()
@@ -265,14 +255,14 @@ def train_scorer_supervised(
 
                 if reachable is None:
                     H, W = grids.shape[1], grids.shape[2]
-                    reachable = max_reachable_depth(H, W, model.min_cell_size, model.max_depth)
+                    reachable = max_reachable_depth(H, W, min_cell_size, max_depth)
 
-                d_pred = model.predict_depth(grids)              # [B, 1, H, W]
+                d_pred = scorer(grids)                           # [B, 1, H, W]
                 loss, comp = scorer_depth_loss(
                     d_pred, oracle,
                     tv_weight=tv_weight,
                     decision_weight=decision_weight,
-                    min_depth=model.min_depth,
+                    min_depth=min_depth,
                     max_depth=reachable,
                     margin=decision_margin,
                     decision_temp=decision_temp,
@@ -280,7 +270,7 @@ def train_scorer_supervised(
 
                 optimizer.zero_grad()
                 loss.backward()
-                clip_grad_norm_(model.scorer.parameters(), max_norm=1.0)
+                clip_grad_norm_(scorer.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 epoch_loss += comp["total"]
@@ -292,8 +282,8 @@ def train_scorer_supervised(
 
         # --- Supervised validation (cheap model selection) ---
         val_loss = _validate_scorer_supervised(
-            model, val_loader, device,
-            reachable=reachable, tv_weight=tv_weight,
+            scorer, val_loader, device,
+            reachable=reachable, min_depth=min_depth, tv_weight=tv_weight,
             decision_weight=decision_weight, decision_margin=decision_margin,
             decision_temp=decision_temp,
         ) if val_loader else None
@@ -306,31 +296,17 @@ def train_scorer_supervised(
                 writer.add_scalar("Loss/val", val_loss, epoch)
 
         elapsed = time.time() - t0
-        msg = (f"[scorer] epoch {epoch:03d}/{epochs}  "
-               f"train={train_loss_history[-1]:.4f}"
-               + (f"  val={val_loss:.4f}" if val_loss is not None else "")
-               + f"  time={elapsed:.1f}s")
-
-        # --- Optional end-to-end sanity metric (not the training signal) ---
-        if end_to_end_every and val_loader is not None and (epoch + 1) % end_to_end_every == 0:
-            dense_nmse, mean_N = _end_to_end_sanity(model, val_loader, device)
-            floor, cap = mesh_token_bounds(
-                H, W, min_depth=model.min_depth, max_depth=model.max_depth,
-                min_cell_size=model.min_cell_size,
-            )
-            msg += f"  [e2e dense_nmse={dense_nmse:.4f} mean_N={mean_N:.1f} ({floor}..{cap})]"
-            if writer is not None:
-                writer.add_scalar("E2E/dense_nmse", dense_nmse, epoch)
-                writer.add_scalar("E2E/mean_N", mean_N, epoch)
-
-        print(msg)
+        print(f"[scorer] epoch {epoch:03d}/{epochs}  "
+              f"train={train_loss_history[-1]:.4f}"
+              + (f"  val={val_loss:.4f}" if val_loss is not None else "")
+              + f"  time={elapsed:.1f}s")
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
             if save_path:
                 timestamp = datetime.now().strftime("%Y-%m-%d")
                 checkpoint_name = f"{timestamp}_scorer_supervised.pt"
-                save_checkpoint(save_path, checkpoint_name, model, epoch=epoch, val_loss=val_loss)
+                save_checkpoint(save_path, checkpoint_name, scorer, epoch=epoch, val_loss=val_loss, prefix="scorer")
                 print(f"  OK Saved best scorer to {checkpoint_name}")
 
     return train_loss_history, val_loss_history
@@ -338,53 +314,26 @@ def train_scorer_supervised(
 
 @torch.no_grad()
 def _validate_scorer_supervised(
-    model, val_loader, device, *, reachable, tv_weight,
+    scorer, val_loader, device, *, reachable, min_depth, tv_weight,
     decision_weight, decision_margin, decision_temp,
 ) -> float:
     """Mean supervised scorer loss over the val split."""
-    model.scorer.eval()
+    scorer.eval()
     total, n = 0.0, 0
     for batch in val_loader:
         grids = batch["grids"].to(device)
         oracle = batch["oracle_depth"].to(device)
-        d_pred = model.predict_depth(grids)
+        d_pred = scorer(grids)
         _, comp = scorer_depth_loss(
             d_pred, oracle,
             tv_weight=tv_weight, decision_weight=decision_weight,
-            min_depth=model.min_depth, max_depth=reachable,
+            min_depth=min_depth, max_depth=reachable,
             margin=decision_margin, decision_temp=decision_temp,
         )
         total += comp["total"]
         n += 1
-    model.scorer.train()
+    scorer.train()
     return total / max(1, n)
-
-
-@torch.no_grad()
-def _end_to_end_sanity(model, loader, device) -> Tuple[float, float]:
-    """Build meshes with the current scorer, run the frozen transformer, and
-    report dense painting NMSE (no leaf_weights) plus the mean token count.
-
-    This is a sanity check only — it is never backpropagated.
-    """
-    model.eval()
-    total_nmse, n = 0.0, 0
-    tokens, samples = 0, 0
-    for batch in loader:
-        grids = batch["grids"].to(device)
-        targets = batch["targets"].to(device)
-        out = model(grids)
-        dense = tokens_to_grid_torch(
-            out["token_preds"], out["token_lists"],
-            out["tokens_per_sample"], grids.shape[1], grids.shape[2],
-        )
-        total_nmse += nmse_loss(dense, targets).item()
-        n += 1
-        tokens += sum(out["tokens_per_sample"])
-        samples += len(out["tokens_per_sample"])
-    model.scorer.train()
-    model.transformer.eval()
-    return total_nmse / max(1, n), tokens / max(1, samples)
 
 
 # ---------------------------------------------------------------------------

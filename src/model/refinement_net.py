@@ -60,11 +60,14 @@ class RefinementNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: [B, C_in, H, W] float32 geometry grid (channel-first).
+            x: [B, H, W, C_in] float32 geometry grid (channel-last, the layout the
+                rest of the pipeline holds grids in). Permuted to channel-first
+                internally for the convolutions.
         Returns:
             score_map: [B, 1, H, W] raw (unbounded) scalar map, interpreted as
                 the predicted target depth d_pred.
         """
+        x = x.permute(0, 3, 1, 2).contiguous()                # [B, H, W, C] -> [B, C, H, W]
         e1 = F.relu(self.enc1_norm(self.enc1_conv(x)))        # [B, 32, H, W]
         e2 = F.relu(self.enc2_norm(self.enc2_conv(e1)))       # [B, 64, H/2, W/2]
         e3 = F.relu(self.enc3_norm(self.enc3_conv(e2)))       # [B, 128, H/4, W/4]
@@ -89,7 +92,7 @@ if __name__ == "__main__":
     n_params = sum(p.numel() for p in model.parameters())
     print(f"RefinementNet params: {n_params:,}")
 
-    x = torch.randn(2, 3, 256, 128)
+    x = torch.randn(2, 256, 128, 3)   # channel-last [B, H, W, C]
     y = model(x)
     assert y.shape == (2, 1, 256, 128), f"shape mismatch: {y.shape}"
     assert torch.isfinite(y).all(), "non-finite logits"

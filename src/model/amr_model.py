@@ -202,9 +202,9 @@ class AdaptiveMeshAeroModel(nn.Module):
         B, H, W, C = grids.shape
         device = grids.device
 
-        # 1. Predicted depth map d_pred (GPU).
-        geom = grids.permute(0, 3, 1, 2).contiguous()
-        score_map = self.scorer(geom)                    # [B, 1, H, W]
+        # 1. Predicted depth map d_pred (GPU). The scorer takes channel-last
+        #    grids and permutes internally.
+        score_map = self.scorer(grids)                   # [B, 1, H, W]
 
         # 2. Build trees deterministically (CPU, per-sample). Detached: the
         #    discrete build carries no gradient by design.
@@ -237,21 +237,6 @@ class AdaptiveMeshAeroModel(nn.Module):
             "tokens_per_sample": tokens_per_sample,
             "token_lists": token_lists,
         }
-
-    def predict_depth(self, grids: torch.Tensor) -> torch.Tensor:
-        """Run only the scorer and return the predicted depth map ``d_pred``.
-
-        This is the forward used by the decoupled supervised scorer training —
-        it never touches the transformer or builds a quadtree.
-
-        Args:
-            grids: ``[B, H, W, C]`` float32 input geometry, channel-last.
-
-        Returns:
-            ``[B, 1, H, W]`` predicted depth map.
-        """
-        geom = grids.permute(0, 3, 1, 2).contiguous()
-        return self.scorer(geom)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

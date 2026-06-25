@@ -4,17 +4,30 @@ from typing import List, Optional, Tuple
 from matplotlib import pyplot as plt
 import torch
 
+from model.loss import nmse_loss
+from model.reconstruction import tokens_to_grid_torch
 from src.amr.quadtree import QuadNode
 from src.utils.visualization_utils import save_plot
 
 
-def save_checkpoint(save_path, checkpoint_name, model, optimizer=None, scheduler=None, epoch=None, val_loss=None):
-    """ Save model, optimizer, and scheduler at their current state to checkpoint_path/checkpoint_name """
+def save_checkpoint(save_path, checkpoint_name, model, optimizer=None, scheduler=None, epoch=None, val_loss=None, prefix=""):
+    """Save model, optimizer, and scheduler at their current state to checkpoint_path/checkpoint_name.
+
+    Args:
+        prefix: Optional string prepended to every key of ``model.state_dict()``.
+            Use ``"scorer."`` to save a bare submodule (e.g. ``RefinementNet``)
+            so its keys namespace into the parent ``AdaptiveMeshAeroModel`` and
+            still load via ``load_state_dict(state, strict=False)``.
+    """
     save_path = Path(save_path) / checkpoint_name
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
+    state = model.state_dict() if model else None
+    if state is not None and prefix:
+        state = {f"{prefix}.{k}": v for k, v in state.items()}
+
     torch.save({
-        "model": model.state_dict() if model else None,
+        "model": state,
         "optimizer": optimizer.state_dict() if optimizer else None,
         "scheduler": scheduler.state_dict() if scheduler else None,
         "epoch": epoch,
@@ -115,6 +128,37 @@ def mesh_token_bounds(
         )
 
     return count(H, W, 0, False), count(H, W, 0, True)
+
+
+@torch.no_grad()
+def evaluate_end_to_end(model, loader, device) -> Tuple[float, float]:
+    """End-to-end sanity metric: scorer mesh -> frozen transformer -> dense NMSE.
+
+    Builds meshes with the current scorer, runs the full model, paints the token
+    predictions back to the dense grid and reports ``(dense_nmse, mean_N)``. This
+    is the one path that genuinely needs the whole model, so it lives outside the
+    scorer trainer and is called by the caller that owns the model.
+
+    It is a diagnostic only — never backpropagated. Sets the model to ``eval``
+    and leaves it there; the scorer trainer re-asserts ``scorer.train()`` each
+    epoch.
+    """
+    model.eval()
+    total_nmse, n = 0.0, 0
+    tokens, samples = 0, 0
+    for batch in loader:
+        grids = batch["grids"].to(device)
+        targets = batch["targets"].to(device)
+        out = model(grids)
+        dense = tokens_to_grid_torch(
+            out["token_preds"], out["token_lists"],
+            out["tokens_per_sample"], grids.shape[1], grids.shape[2],
+        )
+        total_nmse += nmse_loss(dense, targets).item()
+        n += 1
+        tokens += sum(out["tokens_per_sample"])
+        samples += len(out["tokens_per_sample"])
+    return total_nmse / max(1, n), tokens / max(1, samples)
 
 
 def plot_loss_curves(
