@@ -156,14 +156,12 @@ def main(args=None):
                                 collate_fn=collate_fn,
                                 pin_memory=device.type == "cuda")
 
-        ckpt_path = args.get("checkpoint_path", "outputs/vit")
         train_loss_history, val_loss_history = train_vit(
             model, train_loader, val_loader, device,
             epochs=args.get("epochs"),
             lr=args.get("lr"),
             weight_decay=args.get("weight_decay"),
             grad_clip=args.get("grad_clip"),
-            save_path=f"{ckpt_path}/best.pt",
             writer=writer,
         )
 
@@ -283,7 +281,6 @@ def main(args=None):
             epochs=args.get("epochs"),
             d_model=args.get("d_model"),
             warmup_steps=args.get("warmup_steps"),
-            save_path="outputs/checkpoints",
             writer=writer,
         )
     else:
@@ -298,7 +295,6 @@ def main(args=None):
                 decision_weight=args.get("decision_weight", 0.0),
                 decision_margin=args.get("decision_margin", 0.0),
                 decision_temp=args.get("decision_temp", None),
-                save_path="outputs/checkpoints",
                 writer=writer,
             )
 
@@ -321,7 +317,6 @@ def main(args=None):
                 epochs=args.get("epochs"),
                 d_model=args.get("d_model"),
                 warmup_steps=args.get("warmup_steps"),
-                save_path="outputs/checkpoints/transformer_on_learned_mesh.pt",
                 writer=writer,
             )
 

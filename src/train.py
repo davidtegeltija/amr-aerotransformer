@@ -28,10 +28,8 @@ predicted depth map against the variance-oracle depth target
 from __future__ import annotations
 
 
-from datetime import datetime
 import sys
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
@@ -90,7 +88,7 @@ def train_on_deterministic_mesh(
     epochs: int,
     d_model: int = 256,
     warmup_steps: int = 4000,
-    save_path: Optional[str] = None,
+    save_path: Optional[str] = "outputs/checkpoints/deterministic_mesh.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     model = model.to(device)
@@ -167,17 +165,15 @@ def train_on_deterministic_mesh(
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 if save_path:
-                    timestamp = datetime.now().strftime("%Y-%m-%d")
-                    checkpoint_name = f"{timestamp}_deterministic.pt"
-                    save_checkpoint(save_path, checkpoint_name, model)
-                    print(f"  OK Saved best model to {checkpoint_name}")
+                    saved = save_checkpoint(save_path, model, val_loss=val_loss)
+                    print(f"  OK Saved best model to {saved.name}")
         else:
             print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  mean_N={epoch_mean:.1f}  time={elapsed:.1f}s")
 
         # Periodic checkpoint
         if save_path and epoch % 50 == 0:
             checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
-            save_checkpoint(save_path, checkpoint_name, model, optimizer, scheduler)
+            save_checkpoint(save_path, model, optimizer, scheduler, checkpoint_name=checkpoint_name)
 
     print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
@@ -202,7 +198,7 @@ def train_scorer_supervised(
     decision_weight: float = 0.0,
     decision_margin: float = 0.0,
     decision_temp: Optional[float] = None,
-    save_path: Optional[str] = None,
+    save_path: Optional[str] = "outputs/checkpoints/scorer_supervised.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     """Train the RefinementNet scorer by supervised regression to the oracle.
@@ -224,9 +220,10 @@ def train_scorer_supervised(
         tv_weight: Small TV regulariser weight on ``d_pred`` (0 = off).
         decision_weight: Decision-consistency term weight (0 = off, default).
         decision_margin, decision_temp: Decision-term margin / smooth-max temp.
-        save_path: Directory to write the best-val checkpoint into (a
-            timestamped ``*_scorer_supervised.pt`` file). ``None`` disables
-            checkpointing.
+        save_path: Full checkpoint path (e.g. ``outputs/checkpoints/scorer_supervised.pt``).
+            ``save_checkpoint`` prepends the date to the filename. The best-val
+            checkpoint reuses this name; a periodic checkpoint (with optimizer/
+            scheduler) is written every 50 epochs. ``None`` disables checkpointing.
 
     Returns:
         ``(train_loss_history, val_loss_history)``.
@@ -351,10 +348,15 @@ def train_scorer_supervised(
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
             if save_path:
-                timestamp = datetime.now().strftime("%Y-%m-%d")
-                checkpoint_name = f"{timestamp}_scorer_supervised.pt"
-                save_checkpoint(save_path, checkpoint_name, scorer, epoch=epoch, val_loss=val_loss, prefix="scorer")
-                print(f"  OK Saved best scorer to {checkpoint_name}")
+                saved = save_checkpoint(save_path, scorer, epoch=epoch, val_loss=val_loss, prefix="scorer")
+                print(f"  OK Saved best scorer to {saved.name}")
+
+        # Periodic checkpoint
+        if save_path and (epoch + 1) % 50 == 0:
+            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
+            save_checkpoint(save_path, scorer, optimizer, scheduler, epoch=epoch, prefix="scorer", checkpoint_name=checkpoint_name)
+
+    print(f"\nScorer training complete. Best val loss: {best_val_loss:.6f}")
 
     return train_loss_history, val_loss_history
 
@@ -396,7 +398,7 @@ def train_on_learned_mesh(
     epochs: int,
     d_model: int = 256,
     warmup_steps: int = 1000,
-    save_path: str = "outputs/transformer_on_learned_mesh.pt",
+    save_path: Optional[str] = "outputs/checkpoints/learned_mesh.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     """Train the transformer on meshes produced by an already-trained scorer.
@@ -417,7 +419,11 @@ def train_on_learned_mesh(
         epochs: Number of epochs.
         d_model: Model width used to scale the inverse-sqrt warmup learning rate.
         warmup_steps: Number of warmup steps for the learning-rate schedule.
-        save_path: Path to write the best-val full-model checkpoint.
+        save_path: Full checkpoint path (e.g. ``outputs/checkpoints/learned_mesh.pt``).
+            ``save_checkpoint`` prepends the date to the filename. The best-val
+            full-model checkpoint reuses this name; a periodic checkpoint (with
+            optimizer/scheduler) is written every 50 epochs. ``None`` disables
+            checkpointing.
         writer: Optional TensorBoard writer.
 
     Returns:
@@ -436,8 +442,6 @@ def train_on_learned_mesh(
 
     optimizer = AdamW(model.transformer.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
-
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")
     interactive = sys.stderr.isatty()
@@ -512,9 +516,16 @@ def train_on_learned_mesh(
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({"model": model.state_dict(),
-                        "epoch": epoch,
-                        "val_loss": val_loss}, save_path)
+            if save_path:
+                saved = save_checkpoint(save_path, model, epoch=epoch, val_loss=val_loss)
+                print(f"  OK Saved best model to {saved.name}")
+
+        # Periodic checkpoint
+        if save_path and (epoch + 1) % 50 == 0:
+            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
+            save_checkpoint(save_path, model, optimizer, scheduler, epoch=epoch, checkpoint_name=checkpoint_name)
+
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
 
     return train_loss_history, val_loss_history
 
@@ -552,7 +563,7 @@ def train_vit(
     lr: float = 1e-4,
     weight_decay: float = 1e-4,
     grad_clip: float = 1.0,
-    save_path: str = "outputs/vit/best.pt",
+    save_path: Optional[str] = "outputs/checkpoints/vit.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
     """Train a ViT on dense [B, H, W, C] grids with NMSE loss only.
@@ -566,7 +577,10 @@ def train_vit(
         lr: AdamW learning rate.
         weight_decay: AdamW weight decay.
         grad_clip: Max grad-norm for clipping.
-        save_path: Path to write best-val checkpoint.
+        save_path: Full checkpoint path (e.g. ``outputs/checkpoints/vit.pt``).
+            ``save_checkpoint`` prepends the date to the filename. The best-val
+            checkpoint reuses this name; a periodic checkpoint (with optimizer/
+            scheduler) is written every 50 epochs. ``None`` disables checkpointing.
 
     Returns:
         (train_loss_history, val_loss_history). val entries are None when
@@ -575,7 +589,6 @@ def train_vit(
     model = model.to(device)
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     best_val = float("inf")
     train_hist: List[float] = []
@@ -621,8 +634,16 @@ def train_vit(
 
         if val_loss is not None and val_loss < best_val:
             best_val = val_loss
-            torch.save({"model": model.state_dict(),
-                        "epoch": epoch, "val_loss": val_loss}, save_path)
+            if save_path:
+                saved = save_checkpoint(save_path, model, epoch=epoch, val_loss=val_loss)
+                print(f"  OK Saved best model to {saved.name}")
+
+        # Periodic checkpoint
+        if save_path and (epoch + 1) % 50 == 0:
+            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
+            save_checkpoint(save_path, model, optimizer, scheduler, epoch=epoch, checkpoint_name=checkpoint_name)
+
+    print(f"\nViT training complete. Best val loss: {best_val:.6f}")
 
     return train_hist, val_hist
 

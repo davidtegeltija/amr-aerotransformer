@@ -1,25 +1,36 @@
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from matplotlib import pyplot as plt
 import torch
 
-from model.loss import nmse_loss
-from model.reconstruction import tokens_to_grid_torch
+from src.model.loss import nmse_loss
+from src.model.reconstruction import tokens_to_grid_torch
 from src.amr.quadtree import QuadNode
 from src.utils.visualization_utils import save_plot
 
 
-def save_checkpoint(save_path, checkpoint_name, model, optimizer=None, scheduler=None, epoch=None, val_loss=None, prefix=""):
-    """Save model, optimizer, and scheduler at their current state to checkpoint_path/checkpoint_name.
+def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None, val_loss=None, prefix="", checkpoint_name=None):
+    """Save model, optimizer, and scheduler at their current state.
 
     Args:
+        save_path: Full checkpoint path (outputs/checkpoints/vit.pt)
+        checkpoint_name: Optional filename (checkpoint_epoch0050.pt)
+            that overrides the filename in ``save_path`` while keeping its parent
+            directory. Used for periodic checkpoints.
         prefix: Optional string prepended to every key of ``model.state_dict()``.
             Use ``"scorer."`` to save a bare submodule (e.g. ``RefinementNet``)
             so its keys namespace into the parent ``AdaptiveMeshAeroModel`` and
             still load via ``load_state_dict(state, strict=False)``.
+
+    Returns:
+        The full ``Path`` the checkpoint was written to (timestamp included).
     """
-    save_path = Path(save_path) / checkpoint_name
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    save_path = Path(save_path)
+    name = checkpoint_name if checkpoint_name is not None else save_path.name
+    save_path = save_path.with_name(f"{timestamp}_{name}")
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     state = model.state_dict() if model else None
@@ -33,6 +44,8 @@ def save_checkpoint(save_path, checkpoint_name, model, optimizer=None, scheduler
         "epoch": epoch,
         "val_loss": val_loss
         }, save_path)
+
+    return save_path
 
 
 def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
