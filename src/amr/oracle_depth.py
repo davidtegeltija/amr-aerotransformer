@@ -393,8 +393,21 @@ def calibrate_global_tolerance(
     # request is outside the reachable range we return the closest bound.
     if mean_count(hi) >= n_target:
         return hi
-    if mean_count(lo) <= n_target:
-        return lo
+    # mean_count(lo=0) is the finest reachable mesh. If n_target meets or exceeds
+    # it, the bracket collapses to tol=0, which is degenerate: ssd <= 0 is only
+    # satisfied by perfectly-constant cells, so every other pixel pins to its max
+    # reachable depth and the oracle becomes a near-constant "refine everything"
+    # map. The scorer then trivially regresses it and the loss collapses to ~0
+    # while learning nothing. Refuse rather than return tol=0.
+    finest_count = mean_count(lo)
+    if finest_count <= n_target:
+        raise ValueError(
+            f"n_target={n_target} >= max reachable mean leaf count "
+            f"({finest_count:.1f}); tolerance would pin to tol=0, producing a "
+            f"degenerate near-constant oracle (every pixel at max depth). "
+            f"Lower n_target below {finest_count:.1f} (e.g. by reducing it or "
+            f"increasing min_cell_size / lowering max_depth)."
+        )
 
     tol = hi
     for _ in range(iters):

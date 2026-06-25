@@ -174,7 +174,7 @@ def _should_subdivide_depth(
         return False
     if depth < min_depth:
         return True
-    cell_max = float(depth_map[r0:r1, c0:c1].max())
+    cell_max = round(float(depth_map[r0:r1, c0:c1].mean()))
     return cell_max > depth + offset
 
 
