@@ -43,10 +43,10 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from model.refinement_net import RefinementNet
 from src.amr.oracle_depth import max_reachable_depth
-from src.model.loss import nmse_loss, scorer_depth_loss
 from src.eval import evaluate
+from src.model.loss import nmse_loss, scorer_depth_loss
+from src.model.refinement_net import RefinementNet
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.utils.train_utils import average_targets_per_token, save_checkpoint
 
@@ -248,6 +248,13 @@ def train_scorer_supervised(
         epoch_loss = 0.0
         n_steps = 0
         t0 = time.time()
+        # Per-depth pixel histograms (predicted vs oracle), accumulated over the
+        # epoch and reset each epoch. Built lazily once ``reachable`` is known.
+        # Vectorised via bincount on the rounded depth maps already in scope — no
+        # mesh build, no signature change. Reveals whether the scorer tracks the
+        # oracle's depth distribution or collapses to a single depth.
+        pred_depth_hist: Optional[torch.Tensor] = None
+        oracle_depth_hist: Optional[torch.Tensor] = None
 
         with tqdm(train_loader, unit=" batch", leave=False, desc=f"Scorer Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for batch in tq_loader:
@@ -278,6 +285,17 @@ def train_scorer_supervised(
                 n_steps += 1
                 tq_loader.set_postfix(loss=f"{comp['total']:.4f}", reg=f"{comp['reg']:.4f}")
 
+                # Accumulate per-depth pixel counts (rounded, clamped to the
+                # reachable range) for both the prediction and the oracle target.
+                with torch.no_grad():
+                    if pred_depth_hist is None:
+                        pred_depth_hist = torch.zeros(reachable + 1, dtype=torch.long, device=device)
+                        oracle_depth_hist = torch.zeros(reachable + 1, dtype=torch.long, device=device)
+                    pr = d_pred.detach().float().round().clamp_(0, reachable).long().reshape(-1)
+                    orc = oracle.detach().float().round().clamp_(0, reachable).long().reshape(-1)
+                    pred_depth_hist += torch.bincount(pr, minlength=reachable + 1)
+                    oracle_depth_hist += torch.bincount(orc, minlength=reachable + 1)
+
         scheduler.step()
         train_loss_history.append(epoch_loss / max(1, n_steps))
 
@@ -296,11 +314,39 @@ def train_scorer_supervised(
             if val_loss is not None:
                 writer.add_scalar("Loss/val", val_loss, epoch)
 
+        # --- Depth-distribution diagnostic (no mesh build, no signature change) ---
+        # tokens-per-depth-per-sample = frac_d * 4^d  (each depth-d leaf tiles
+        # H*W/4^d pixels); summing over depths gives an approximate mean_N. Exact
+        # for the tiling-consistent oracle; a proxy for the raw per-pixel d_pred.
+        depth_str = ""
+        if pred_depth_hist is not None:
+            w4 = (4.0 ** torch.arange(reachable + 1, device=device, dtype=torch.float64))
+            pf = pred_depth_hist.to(torch.float64)
+            of = oracle_depth_hist.to(torch.float64)
+            pred_frac = pf / pf.sum().clamp_(min=1.0)
+            oracle_frac = of / of.sum().clamp_(min=1.0)
+            pred_tokens_d = (pred_frac * w4).cpu()        # tokens at each depth, per sample
+            oracle_tokens_d = (oracle_frac * w4).cpu()
+            pred_mean_N = float(pred_tokens_d.sum())
+            oracle_mean_N = float(oracle_tokens_d.sum())
+
+            tok_str = " ".join(f"{t:.0f}" for t in pred_tokens_d.tolist())
+            depth_str = (f"  [mean_N~{pred_mean_N:.0f} (orc {oracle_mean_N:.0f})"
+                         f"  tokens/depth d0..d{reachable}: {tok_str}]")
+
+            if writer is not None:
+                writer.add_scalar("Tokens/mean_N_pred", pred_mean_N, epoch)
+                writer.add_scalar("Tokens/mean_N_oracle", oracle_mean_N, epoch)
+                for d in range(reachable + 1):
+                    writer.add_scalar(f"TokensPerDepth/pred_d{d}", float(pred_tokens_d[d]), epoch)
+                    writer.add_scalar(f"TokensPerDepth/oracle_d{d}", float(oracle_tokens_d[d]), epoch)
+
         elapsed = time.time() - t0
         print(f"[scorer] epoch {epoch:03d}/{epochs}  "
               f"train={train_loss_history[-1]:.4f}"
               + (f"  val={val_loss:.4f}" if val_loss is not None else "")
-              + f"  time={elapsed:.1f}s")
+              + f"  time={elapsed:.1f}s"
+              + depth_str)
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -403,8 +449,12 @@ def train_on_learned_mesh(
         model.train()
         model.scorer.eval()   # keep the frozen scorer in eval mode
         epoch_pred = 0.0
-        epoch_n = 0
         n_steps = 0
+        # Collect every sample's leaf count so we can report the spread, not just
+        # the mean. A frozen scorer pins mean_N across epochs by design; only the
+        # per-sample distribution reveals whether the scorer produces varied
+        # meshes or has collapsed to a constant.
+        token_counts: List[int] = []
 
         with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for step, batch in enumerate(tq_loader):
@@ -422,7 +472,7 @@ def train_on_learned_mesh(
                 optimizer.step()
 
                 epoch_pred += loss.item()
-                epoch_n    += sum(out["tokens_per_sample"])
+                token_counts.extend(out["tokens_per_sample"])
                 n_steps    += 1
 
         scheduler.step()
@@ -434,17 +484,28 @@ def train_on_learned_mesh(
         val_loss_history.append(val_loss)
 
         # --- Log ---
-        mean_N = epoch_n / max(1, n_steps) / max(1, train_loader.batch_size)
+        # Average over the true sample count (not n_steps * batch_size, which is
+        # biased by a smaller final batch).
+        counts = torch.tensor(token_counts, dtype=torch.float)
+        mean_N = float(counts.mean()) if counts.numel() else 0.0
+        std_N = float(counts.std(unbiased=False)) if counts.numel() else 0.0
+        min_N = int(counts.min()) if counts.numel() else 0
+        max_N = int(counts.max()) if counts.numel() else 0
         print(
             f"[learned-mesh] epoch {epoch:03d}/{epochs}  "
             f"train={train_loss_history[-1]:.4f}  "
-            f"mean_N={mean_N:.1f}"
+            f"mean_N={mean_N:.1f}  std_N={std_N:.1f}  N=[{min_N},{max_N}]"
             + (f"  val={val_loss:.4f}" if val_loss is not None else "")
         )
 
         if writer is not None:
             writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
             writer.add_scalar("Tokens/mean_N", mean_N, epoch)
+            writer.add_scalar("Tokens/std_N", std_N, epoch)
+            writer.add_scalar("Tokens/min_N", min_N, epoch)
+            writer.add_scalar("Tokens/max_N", max_N, epoch)
+            if counts.numel():
+                writer.add_histogram("Tokens/N_per_sample", counts, epoch)
             writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
             if val_loss is not None:
                 writer.add_scalar("Loss/val", val_loss, epoch)
