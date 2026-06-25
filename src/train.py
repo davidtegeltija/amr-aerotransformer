@@ -43,11 +43,12 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+from model.refinement_net import RefinementNet
 from src.amr.oracle_depth import max_reachable_depth
 from src.model.loss import nmse_loss, scorer_depth_loss
 from src.eval import evaluate
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.utils.train_utils import save_checkpoint
+from src.utils.train_utils import average_targets_per_token, save_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +81,7 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
 # Training loop for deterministic mesh (thresholds are set)
 # ---------------------------------------------------------------------------
 
-def train_deterministic_mesh(
+def train_on_deterministic_mesh(
     model: AdaptiveMeshAeroModel,
     train_loader: DataLoader,
     val_loader: Optional[DataLoader],
@@ -188,7 +189,7 @@ def train_deterministic_mesh(
 # ---------------------------------------------------------------------------
 
 def train_scorer_supervised(
-    scorer: nn.Module,
+    scorer: RefinementNet,
     train_loader: DataLoader,
     val_loader: Optional[DataLoader],
     device: torch.device,
@@ -337,73 +338,71 @@ def _validate_scorer_supervised(
 
 
 # ---------------------------------------------------------------------------
-# Train RefinementNet + the whole model together
+# Train the transformer on meshes from an already-trained (frozen) RefinementNet
 # ---------------------------------------------------------------------------
 
-def train_learned_mesh_p2(
+def train_on_learned_mesh(
     model,
     train_loader,
     val_loader,
     device,
     *,
     epochs: int,
-    lambda_budget: float = 0.01,
-    lambda_smooth: float = 0.001,
-    tau_start: float = 0.5,
-    tau_end: float = 0.1,
-    scorer_lr: float = 1e-3,
-    transformer_lr: float = 1e-4,
-    weight_decay: float = 1e-4,
-    n_max: int = 1024,
-    grad_clip: float = 1.0,
-    save_path: str = "outputs/phase3_joint.pt",
+    d_model: int = 256,
+    warmup_steps: int = 1000,
+    save_path: str = "outputs/transformer_on_learned_mesh.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
-    """
-    Joint fine-tuning of scorer and transformer.
+    """Train the transformer on meshes produced by an already-trained scorer.
 
-    - Transformer is unfrozen.
-    - Two param groups: scorer_lr (1e-3) and transformer_lr (1e-4).
-    - Tau anneals tau_start -> tau_end across epochs.
+    The RefinementNet scorer is **frozen** (eval mode, ``requires_grad=False``):
+    it builds the adaptive mesh each step but receives no gradient. Only the
+    transformer is optimised, against the per-token NMSE of its predictions vs.
+    the cell-averaged targets. The mesh build inside ``_forward_learned`` is
+    already detached, so no gradient could reach the scorer regardless; freezing
+    it makes that explicit and keeps its weights fixed.
 
-    Loss is identical to phase2:
-        L = nmse_loss + lambda_budget * budget_loss(soft_N, n_max)
-                      + lambda_smooth * smooth_loss(score_map)
+    Args:
+        model: ``AdaptiveMeshAeroModel`` in ``refinement_mode='learned'`` whose
+            ``scorer`` has been loaded with trained weights.
+        train_loader / val_loader: Loaders built with ``LearnedCollateFn`` (yield
+            ``grids`` and dense ``targets``).
+        device: Torch device.
+        epochs: Number of epochs.
+        d_model: Model width used to scale the inverse-sqrt warmup learning rate.
+        warmup_steps: Number of warmup steps for the learning-rate schedule.
+        save_path: Path to write the best-val full-model checkpoint.
+        writer: Optional TensorBoard writer.
 
-    Writes the best (lowest val_loss) model state_dict to `save_path`.
+    Returns:
+        ``(train_loss_history, val_loss_history)``. val entries are ``None`` when
+        ``val_loader`` is ``None``.
     """
     if getattr(model, "refinement_mode", "learned") != "learned":
-        raise ValueError("train_learned_mesh_p2 requires refinement_mode='learned'.")
+        raise ValueError("train_on_learned_mesh requires refinement_mode='learned'.")
+    if model.scorer is None:
+        raise ValueError("train_on_learned_mesh requires a scorer; none is present on the model.")
 
-    # 1. Unfreeze transformer
+    # Freeze the scorer: it only builds meshes here, it is not trained.
+    model.scorer.requires_grad_(False)
     for p in model.transformer.parameters():
         p.requires_grad = True
 
-    # 2. Two-param-group optimizer
-    optimizer = AdamW([
-        {"params": model.scorer.parameters(),
-         "lr": scorer_lr,       "weight_decay": weight_decay},
-        {"params": model.transformer.parameters(),
-         "lr": transformer_lr,  "weight_decay": weight_decay},
-    ])
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    optimizer = AdamW(model.transformer.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     best_val_loss = float("inf")
-    interactive = sys.stderr.isatty() 
+    interactive = sys.stderr.isatty()
 
-    train_loss_history = []
-    val_loss_history = []
+    train_loss_history: List[float] = []
+    val_loss_history: List[Optional[float]] = []
 
     for epoch in range(epochs):
-        model.tau = tau_schedule(epoch, tau_start, tau_end, epochs)
-
-        model.train()   # scorer + transformer both in train mode
-        epoch_loss = 0.0
+        model.train()
+        model.scorer.eval()   # keep the frozen scorer in eval mode
         epoch_pred = 0.0
-        epoch_budget = 0.0
-        epoch_smooth = 0.0
         epoch_n = 0
         n_steps = 0
 
@@ -415,56 +414,36 @@ def train_learned_mesh_p2(
                 out = model(grids)
                 packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
 
-                L_pred   = nmse_loss(out["token_preds"], packed_targets)
-                L_budget = budget_loss(out["soft_N"], n_max)
-                L_smooth = smooth_loss(out["score_map"])
-
-                loss = L_pred + lambda_budget * L_budget + lambda_smooth * L_smooth
+                loss = nmse_loss(out["token_preds"], packed_targets)
 
                 optimizer.zero_grad()
                 loss.backward()
-                # Clip both groups — transformer gradients too, as the finer tau
-                # can induce sharper updates than in phase2.
-                clip_grad_norm_(
-                    list(model.scorer.parameters()) + list(model.transformer.parameters()),
-                    max_norm=grad_clip,
-                )
+                clip_grad_norm_(model.transformer.parameters(), max_norm=1.0)
                 optimizer.step()
 
-                epoch_loss   += loss.item()
-                epoch_pred   += L_pred.item()
-                epoch_budget += L_budget.item()
-                epoch_smooth += L_smooth.item()
-                epoch_n      += sum(out["tokens_per_sample"])
-                n_steps      += 1
+                epoch_pred += loss.item()
+                epoch_n    += sum(out["tokens_per_sample"])
+                n_steps    += 1
 
-            scheduler.step()
+        scheduler.step()
 
-        train_loss_history.append(epoch_pred / len(train_loader))
+        train_loss_history.append(epoch_pred / max(1, n_steps))
 
         # --- Validate ---
-        val_loss = _validate_phase3(model, val_loader, device) if val_loader else None
+        val_loss = _validate_on_learned_mesh(model, val_loader, device) if val_loader else None
         val_loss_history.append(val_loss)
 
         # --- Log ---
         mean_N = epoch_n / max(1, n_steps) / max(1, train_loader.batch_size)
         print(
-            f"[phase3] epoch {epoch:03d}/{epochs}  "
-            f"tau={model.tau:.3f}  "
-            f"loss={epoch_loss / n_steps:.4f} "
-            f"(pred={epoch_pred / n_steps:.4f} "
-            f"budget={epoch_budget / n_steps:.4f} "
-            f"smooth={epoch_smooth / n_steps:.4f})  "
+            f"[learned-mesh] epoch {epoch:03d}/{epochs}  "
+            f"train={train_loss_history[-1]:.4f}  "
             f"mean_N={mean_N:.1f}"
             + (f"  val={val_loss:.4f}" if val_loss is not None else "")
         )
 
         if writer is not None:
-            writer.add_scalar("Loss/train_total", epoch_loss / n_steps, epoch)
-            writer.add_scalar("Loss/train_pred", epoch_pred / n_steps, epoch)
-            writer.add_scalar("Loss/budget", epoch_budget / n_steps, epoch)
-            writer.add_scalar("Loss/smooth", epoch_smooth / n_steps, epoch)
-            writer.add_scalar("Tau", model.tau, epoch)
+            writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
             writer.add_scalar("Tokens/mean_N", mean_N, epoch)
             writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
             if val_loss is not None:
@@ -472,15 +451,15 @@ def train_learned_mesh_p2(
 
         if val_loss is not None and val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({"model": model.state_dict(), 
+            torch.save({"model": model.state_dict(),
                         "epoch": epoch,
                         "val_loss": val_loss}, save_path)
-    
+
     return train_loss_history, val_loss_history
 
 
 
-def _validate_phase3(model, val_loader, device) -> float:
+def _validate_on_learned_mesh(model, val_loader, device) -> float:
     model.eval()
     total = 0.0
     n = 0

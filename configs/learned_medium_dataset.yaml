@@ -24,7 +24,7 @@ warmup_steps: 1000
 num_workers: 4
 
 # ---- Learned-Scorer Training (refinement_mode: learned) ----
-learned_training_mode: null    # "scorer" or "fine-tune", null for standard training
+learned_training_mode: null    # "scorer" or "transformer", null for standard training
 checkpoint_file: null    # Optional: a trained-transformer checkpoint to warm-start the frozen transformer used by the end-to-end sanity metric.
 end_to_end_every: 0      # If > 0, every N epochs build meshes with the current scorer, run the frozen transformer and report dense painting NMSE + token counts (sanity only, never backpropagated).
 

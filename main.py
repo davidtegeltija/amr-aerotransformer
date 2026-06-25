@@ -18,9 +18,9 @@ from src.data.dataset import AeroDataset
 from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.vit import ViT
-from src.train import train_deterministic_mesh, train_scorer_supervised, train_learned_mesh_p2, train_vit, evaluate_end_to_end
+from src.train import train_on_deterministic_mesh, train_scorer_supervised, train_on_learned_mesh, train_vit
 from src.utils.data_utils import geometry_disjoint_split
-from src.utils.train_utils import plot_loss_curves
+from src.utils.train_utils import evaluate_end_to_end, plot_loss_curves
 
 
 def load_config(path: str) -> Dict:
@@ -182,8 +182,8 @@ def main(args=None):
     if args.get("refinement_mode") == "deterministic" and args.get("learned_training_mode"):
         raise SystemExit("Deterministic mesh is incompatible with --learned_training_mode (no scorer to train)")
     
-    if args.get("learned_training_mode") and args.get("learned_training_mode") not in ["scorer", "fine-tune"]:
-        raise SystemExit("Only 'learned_training' or 'fine-tune' are acceptable learned training modes")
+    if args.get("learned_training_mode") and args.get("learned_training_mode") not in ["scorer", "transformer"]:
+        raise SystemExit("Only 'scorer' or 'transformer' are acceptable learned training modes")
     
     if args.get("refinement_mode") == "deterministic":
         if args.get("refinement_criteria") not in CRITERIA_REGISTRY:
@@ -227,7 +227,7 @@ def main(args=None):
                 tol=tol, min_depth=min_depth, max_depth=max_depth,
                 min_cell_size=min_cell_size,
             )
-        elif args.get("learned_training_mode") == "fine-tune":
+        elif args.get("learned_training_mode") == "transformer":
             collate_fn = LearnedCollateFn() # Collate (tokenization now happens inside the model)
 
     model = AdaptiveMeshAeroModel(
@@ -260,8 +260,8 @@ def main(args=None):
         print(f"Loaded checkpoint {args.get('checkpoint_file')}")
         print(f"  missing keys:    {len(missing)} (expected: scorer.* before scorer training)")
         print(f"  unexpected keys: {len(unexpected)} (should be 0 or near 0)")
-    elif args.get("learned_training_mode") == "fine-tune":
-        raise SystemExit("--learned_training_mode fine-tune requires --checkpoint pointing to a scorer checkpoint")
+    elif args.get("learned_training_mode") == "transformer":
+        raise SystemExit("--learned_training_mode transformer requires --checkpoint pointing to a scorer checkpoint")
 
     # ----------------------------------------------------------------
     # Train
@@ -278,7 +278,7 @@ def main(args=None):
                               pin_memory=device.type == "cuda")
 
     if args.get("refinement_mode") == "deterministic":
-        train_loss_history, val_loss_history = train_deterministic_mesh(
+        train_loss_history, val_loss_history = train_on_deterministic_mesh(
             model, train_loader, val_loader, device,
             epochs=args.get("epochs"),
             d_model=args.get("d_model"),
@@ -315,18 +315,13 @@ def main(args=None):
             else:
                 print("[scorer] skipping end-to-end metric: no transformer checkpoint "
                       "loaded (--checkpoint_file), so the transformer is untrained.")
-        elif args.get("learned_training_mode") == "fine-tune":
-            train_loss_history, val_loss_history = train_learned_mesh_p2(
+        elif args.get("learned_training_mode") == "transformer":
+            train_loss_history, val_loss_history = train_on_learned_mesh(
                 model, train_loader, val_loader, device,
                 epochs=args.get("epochs"),
-                lambda_budget=args.get("lambda_budget"),
-                lambda_smooth=args.get("lambda_smooth"),
-                tau_start=args.get("tau_start_phase2"),
-                tau_end=args.get("tau_end_phase2"),
-                scorer_lr=args.get("scorer_lr"),
-                transformer_lr=args.get("transformer_lr"),
-                n_max=args.get("n_max"),
-                save_path="outputs/checkpoints/phase2_joint.pt",
+                d_model=args.get("d_model"),
+                warmup_steps=args.get("warmup_steps"),
+                save_path="outputs/checkpoints/transformer_on_learned_mesh.pt",
                 writer=writer,
             )
 

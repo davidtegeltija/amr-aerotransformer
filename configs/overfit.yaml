@@ -23,7 +23,7 @@ warmup_steps: 1000
 num_workers: 4
 
 # ---- Learned-Scorer Training (refinement_mode: learned) ----
-learned_training_mode: null   # "scorer" or "fine-tune", null for standard training
+learned_training_mode: null   # "scorer" or "transformer", null for standard training
 checkpoint_file: null         # Path to checkpoint to load before training. For --phase 1 this should be a pretrained-transformer checkpoint. For --phase 2 this should be a trained-scorer checkpoint from phase 2
 end_to_end_every: 0           # If > 0, every N epochs build meshes with the current scorer, run the frozen transformer and report dense painting NMSE + token counts (sanity only, never backpropagated).
 
