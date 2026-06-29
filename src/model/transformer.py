@@ -10,6 +10,10 @@ Architecture:
     encoder:         Stack of pre-norm TransformerBlock layers (default: 6 layers, 4 heads, d_model=256, d_ff=1024).
     final_norm:      LayerNorm before the prediction head.
     prediction_head: MLP(d_model -> output_channels) producing per-token predictions.
+                     With affine_output=True it instead emits output_channels*3
+                     numbers per token, reshaped to [N, C, 3] = (value, gx, gy),
+                     a per-token affine (value + 2D gradient) field decoded into a
+                     linear ramp across each cell by tokens_to_grid_affine_torch.
 
 Batching strategy (sequence packing):
     Instead of padding every sequence to the same length, the token sequences
@@ -167,7 +171,8 @@ class AeroTransformer(nn.Module):
         tokens_per_sample: [N]
 
     Returns:
-        Predictions of shape [total_N, output_channels].
+        Predictions of shape [total_N, output_channels] (constant-per-token), or
+        [total_N, output_channels, 3] = (value, gx, gy) when affine_output=True.
     """
 
     def __init__(
@@ -180,11 +185,14 @@ class AeroTransformer(nn.Module):
         d_ff: int = 1024,
         dropout: float = 0.1,
         n_fourier: int = 64,
+        affine_output: bool = False,
     ):
         super().__init__()
         self.token_dim = token_dim
         self.d_model = d_model
         self.pos_dim = 3
+        self.output_channels = output_channels
+        self.affine_output = affine_output
 
         # --- Token Embedding layer ---
         # Projects raw token features [C] into the latent space [d_model]
@@ -218,11 +226,15 @@ class AeroTransformer(nn.Module):
         self.final_norm = nn.LayerNorm(d_model)
 
         # --- Prediction head ---
+        # In affine mode the head emits (value, gx, gy) per channel; the gradient
+        # components start near 0 under trunc_normal init, so the model begins as
+        # ~constant-per-cell and learns the ramps from the dense per-pixel loss.
+        head_out = output_channels * 3 if affine_output else output_channels
         self.prediction_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, output_channels),
+            nn.Linear(d_model, head_out),
         )
 
         self._init_weights()
@@ -260,7 +272,8 @@ class AeroTransformer(nn.Module):
             tokens_per_sample: Per-sample token counts in the packed sequence.
 
         Returns:
-            Per-token predictions of shape [total_N, output_channels].
+            Per-token predictions of shape [total_N, output_channels], or
+            [total_N, output_channels, 3] = (value, gx, gy) when affine_output.
         """
         assert tokens.shape[-1] == self.token_dim, (
             f"Expected tokens with {self.token_dim} channels "
@@ -288,4 +301,8 @@ class AeroTransformer(nn.Module):
         x = self.final_norm(x)
 
         # Per-token predictions
-        return self.prediction_head(x)  # [total_N, output_channels]
+        out = self.prediction_head(x)                  # [total_N, head_out]
+        if self.affine_output:
+            # [total_N, C, 3] = (value, gx, gy) per channel
+            return out.view(-1, self.output_channels, 3)
+        return out                                     # [total_N, C]  (legacy)

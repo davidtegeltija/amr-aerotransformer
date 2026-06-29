@@ -241,6 +241,8 @@ def main(args=None):
         min_cell_size=args.get("min_cell_size", 4),
         refinement_mode=args.get("refinement_mode"),
         refinement_criteria=criteria,
+        affine_output=args.get("affine_output", False),
+        continuous_output=args.get("continuous_output", False),
     )
 
     print(f"Model parameters: {model.count_parameters():,}")

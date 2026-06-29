@@ -22,36 +22,46 @@ class DeterministicCollateFn:
         packed_tokens     : [total_N, C+3]             concatenated tokenized inputs
         packed_targets    : [total_N, output_channels] per-token averaged ground truth
         tokens_per_sample : List[int]                  token count per sample
+        token_lists       : List[List[QuadNode]]       per-sample leaves (affine/dense loss)
+        targets           : [B, H, W, output_channels] dense ground truth (affine/dense loss)
     """
- 
+
     def __init__(self, tokenizer: QuadtreeTokenizer):
         self.tokenizer = tokenizer
- 
+
     def __call__(self, samples: List[Dict]) -> Dict:
         all_tokens = []
         all_targets = []
         tokens_per_sample = []
- 
+        token_lists = []
+        dense_targets = []
+
         for s in samples:
             input = s["input"]   # [H, W, C]
             target = s["target"]  # [H, W, output_channels]
- 
+
             token_array, leaves = self.tokenizer.tokenize(input)
- 
+
             output_channels = target.shape[-1]
             N = len(leaves)
             token_target = np.zeros((N, output_channels), dtype=np.float32)
             for i, node in enumerate(leaves):
                 token_target[i] = target[node.r0:node.r1, node.c0:node.c1].mean(axis=(0, 1))
- 
+
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
             tokens_per_sample.append(N)
- 
+            token_lists.append(leaves)
+            dense_targets.append(torch.from_numpy(np.asarray(target, dtype=np.float32)))
+
         return {
             "packed_tokens": torch.cat(all_tokens,  dim=0),
             "packed_targets": torch.cat(all_targets, dim=0),
             "tokens_per_sample": tokens_per_sample,
+            # Dense leaves + targets enable the affine per-pixel loss; the legacy
+            # constant path keeps using packed_targets above.
+            "token_lists": token_lists,
+            "targets": torch.stack(dense_targets, dim=0),
         }
 
 class LearnedCollateFn:

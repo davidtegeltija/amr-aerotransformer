@@ -94,16 +94,25 @@ class AdaptiveMeshAeroModel(nn.Module):
         min_cell_size: int = 4,
         refinement_mode: Literal["learned", "deterministic"] = "deterministic",
         refinement_criteria: Optional[RefinementCriteria] = None,
+        affine_output: bool = False,
+        continuous_output: bool = False,
     ):
         super().__init__()
         if refinement_mode not in ("learned", "deterministic"):
             raise ValueError(
                 f"refinement_mode must be 'learned' or 'deterministic', got {refinement_mode!r}"
             )
-        
+
         if refinement_mode == "deterministic" and refinement_criteria is None:
             raise ValueError(
                 "refinement_mode='deterministic' requires a non-None refinement_criteria."
+            )
+
+        # affine_output and the implicit-head continuous_output are mutually
+        # exclusive output representations.
+        if affine_output and continuous_output:
+            raise ValueError(
+                "affine_output and continuous_output are mutually exclusive. Enable at most one."
             )
 
         self.input_channels = input_channels
@@ -113,6 +122,7 @@ class AdaptiveMeshAeroModel(nn.Module):
         self.min_cell_size = min_cell_size
         self.refinement_mode = refinement_mode
         self.refinement_criteria = refinement_criteria
+        self.affine_output = affine_output
 
         # --- CNN scorer (drives score-guided subdivision) ---
         # Only instantiated in learned mode; deterministic mode has no scorer.
@@ -135,6 +145,7 @@ class AdaptiveMeshAeroModel(nn.Module):
             n_heads=n_heads,
             d_ff=d_ff,
             dropout=dropout,
+            affine_output=affine_output,
         )
 
     # ------------------------------------------------------------------
@@ -163,11 +174,15 @@ class AdaptiveMeshAeroModel(nn.Module):
 
         Returns:
             Dict with keys:
-                token_preds:       [total_N, output_channels]
+                token_preds:       [total_N, output_channels], or
+                    [total_N, output_channels, 3] = (value, gx, gy) when
+                    affine_output (decoded into a per-cell ramp by the dense loss).
                 score_map:         None  (no scorer in this mode)
                 soft_N:            None  (no budget loss in this mode)
                 tokens_per_sample: List[int] (len B)
-                token_lists:       None  (targets are pre-averaged by DeterministicCollateFn)
+                token_lists:       None. In affine mode the dense loss reconstructs
+                    from the collate's ``token_lists`` (DeterministicCollateFn),
+                    so the leaves are not threaded through this forward.
         """
         preds = self.transformer(packed_tokens, tokens_per_sample)
 
@@ -194,7 +209,9 @@ class AdaptiveMeshAeroModel(nn.Module):
 
         Returns:
             Dict with keys:
-                token_preds:       [total_N, output_channels] from the transformer
+                token_preds:       [total_N, output_channels] from the transformer,
+                    or [total_N, output_channels, 3] = (value, gx, gy) when
+                    affine_output.
                 score_map:         [B, 1, H, W] predicted depth map d_pred (attached)
                 tokens_per_sample: List[int] (len B), tokens per sample
                 token_lists:       List[List[QuadNode]] (len B)

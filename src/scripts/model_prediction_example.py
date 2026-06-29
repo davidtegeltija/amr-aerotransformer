@@ -12,7 +12,7 @@ from src.amr.quadtree_tokenizer import QuadtreeTokenizer
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.data.dataset import AeroDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.model.reconstruction import tokens_to_grid
+from src.model.reconstruction import tokens_to_grid, tokens_to_grid_affine
 from src.utils.mesh_visualization import plot_mesh
 from src.utils.prediction_visualization import plot_flow_comparison, plot_3d_prediction
 
@@ -49,6 +49,8 @@ def create_model(config_file, checkpoint_file, input_channels=5, output_channels
         max_depth=args.get("max_depth"),
         refinement_mode=refinement_mode,
         refinement_criteria=criteria,
+        affine_output=args.get("affine_output", False),
+        continuous_output=args.get("continuous_output", False),
     )
 
     checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
@@ -72,7 +74,8 @@ def predict_single(model, args, sample):
             input_grid:   [H, W, input_channels] input grid (numpy).
             ground_truth: [H, W, output_channels] target grid (numpy).
             prediction:   [H, W, output_channels] reconstructed flow field (numpy).
-            token_preds:  [N, output_channels] per-token predictions (tensor).
+            token_preds:  [N, output_channels] per-token predictions (tensor), or
+                          [N, output_channels, 3] = (value, gx, gy) when affine_output.
             mesh:         List[QuadNode] leaves of the adaptive mesh.
     """
     input_grid = sample["input"]                  # [H, W, C] numpy
@@ -94,7 +97,11 @@ def predict_single(model, args, sample):
         leaves = out["token_lists"][0]
 
     token_preds = out["token_preds"]
-    grid = tokens_to_grid(token_preds, leaves, H, W, output_channels, mode="fill")
+    if model.affine_output:
+        # token_preds is [N, C, 3] = (value, gx, gy); decode the per-cell ramps.
+        grid = tokens_to_grid_affine(token_preds, leaves, H, W, output_channels)
+    else:
+        grid = tokens_to_grid(token_preds, leaves, H, W, output_channels, mode="fill")
     return {
         "input_grid": input_grid,
         "ground_truth": sample["target"],
@@ -105,8 +112,8 @@ def predict_single(model, args, sample):
 
 
 if __name__ == "__main__":
-    config_file = "configs/train_scorer.yaml"
-    checkpoint_file = "outputs/checkpoints/2026-06-22_scorer_supervised.pt"
+    config_file = "configs/train_learned_transformer.yaml"
+    checkpoint_file = "outputs/checkpoints/transformer_on_learned_mesh.pt"
 
     model, args = create_model(config_file, checkpoint_file)
 
@@ -130,6 +137,6 @@ if __name__ == "__main__":
     plot_mesh(input_grid, mesh, show=False, save_path=f"outputs/plots/amr_mesh_sample={sample_index}.png")
 
     # --- Plotting Flow ---
-    # plot_flow_comparison(ground_truth, prediction, save_path=f"outputs/plots/prediction_test_sample={sample_index}.png")
+    plot_flow_comparison(ground_truth, prediction, save_path=f"outputs/plots/prediction_test_sample={sample_index}.png")
     # plot_3d_prediction(sample["input"], prediction)
 

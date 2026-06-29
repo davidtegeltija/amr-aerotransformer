@@ -17,7 +17,7 @@ Two modes are provided:
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import numpy as np
 import torch
@@ -83,6 +83,156 @@ def tokens_to_grid_torch(
 
 
 # ---------------------------------------------------------------------------
+# Affine (value + gradient) reconstruction
+# ---------------------------------------------------------------------------
+
+def precompute_affine_geometry(
+    token_lists: List[List[QuadNode]],
+    tokens_per_sample: List[int],
+    H: int,
+    W: int,
+) -> tuple:
+    """Precompute the packed owner map and per-pixel scaled offsets for the
+    affine reconstruction.
+
+    Pure geometry (no latents) so the result carries no gradient. Indices are into
+    the PACKED token axis (offset by tokens_per_sample), matching
+    tokens_to_grid_torch's owner convention.
+
+    Args:
+        token_lists: Length-B list of per-sample QuadNode leaf lists. Leaves of one
+            sample must tile the full H x W grid exactly.
+        tokens_per_sample: Per-sample token counts; prefix sums give packed offsets.
+        H: Grid height (rows).
+        W: Grid width (columns).
+
+    Returns:
+        owner: LongTensor [B, H, W] packed token index owning each pixel.
+        dxdy:  FloatTensor [B, H, W, 2] pixel-minus-centre offset (x then y),
+            each divided by the owning leaf's normalised size.
+
+    Note:
+        The learned mesh tiles the grid exactly, so every pixel has an owner. The
+        deterministic tokenizer's ``min_depth`` filter can drop coarse leaves and
+        leave holes; any such unowned pixel is assigned to the nearest leaf centre
+        so the dense grid is fully defined. The fallback is a no-op when the leaves
+        already tile.
+    """
+    B = len(token_lists)
+    owners = np.full((B, H, W), -1, dtype=np.int64)
+    dxdy = np.zeros((B, H, W, 2), dtype=np.float32)
+
+    # Normalised pixel-centre coordinates along each axis (matches the meta
+    # layout in nodes_to_token_array: x=col/W, y=row/H).
+    xs = (np.arange(W, dtype=np.float32) + 0.5) / W      # [W]
+    ys = (np.arange(H, dtype=np.float32) + 0.5) / H      # [H]
+
+    offset = 0
+    for b, leaves in enumerate(token_lists):
+        # Per-leaf normalised centres/sizes (matching nodes_to_token_array),
+        # reused for both the box fill and the nearest-leaf fallback.
+        centres = np.empty((len(leaves), 2), dtype=np.float32)   # (x_c, y_c)
+        sizes = np.empty(len(leaves), dtype=np.float32)
+        for i, leaf in enumerate(leaves):
+            r0, c0, r1, c1 = leaf.r0, leaf.c0, leaf.r1, leaf.c1
+            owners[b, r0:r1, c0:c1] = offset + i
+
+            x_c = ((c0 + c1) / 2.0) / W
+            y_c = ((r0 + r1) / 2.0) / H
+            size = max((r1 - r0) / H, (c1 - c0) / W)
+            centres[i] = (x_c, y_c)
+            sizes[i] = size
+
+            # (dx, dy) order aligned with (gx, gy) from the affine head.
+            dxdy[b, r0:r1, c0:c1, 0] = (xs[c0:c1][None, :] - x_c) / size
+            dxdy[b, r0:r1, c0:c1, 1] = (ys[r0:r1][:, None] - y_c) / size
+
+        # Fallback: assign any unowned pixel (deterministic min_depth holes) to
+        # the nearest leaf centre. No-op when the leaves already tile.
+        holes = np.argwhere(owners[b] < 0)
+        if holes.size:
+            px = xs[holes[:, 1]]                          # [M] normalised x
+            py = ys[holes[:, 0]]                          # [M] normalised y
+            d2 = (px[:, None] - centres[None, :, 0]) ** 2 + \
+                 (py[:, None] - centres[None, :, 1]) ** 2
+            nearest = d2.argmin(axis=1)                   # [M] local leaf index
+            owners[b, holes[:, 0], holes[:, 1]] = offset + nearest
+            dxdy[b, holes[:, 0], holes[:, 1], 0] = (px - centres[nearest, 0]) / sizes[nearest]
+            dxdy[b, holes[:, 0], holes[:, 1], 1] = (py - centres[nearest, 1]) / sizes[nearest]
+        offset += tokens_per_sample[b]
+
+    return torch.from_numpy(owners), torch.from_numpy(dxdy)
+
+
+def tokens_to_grid_affine_torch(
+    affine_params: torch.Tensor,
+    geom: tuple,
+    H: int,
+    W: int,
+    output_channels: int,
+) -> torch.Tensor:
+    """Differentiable affine (value + gradient) reconstruction.
+
+    Paints each leaf's box with a linear ramp decoded from its (value, gx, gy)
+    params. This is the affine, loss-side counterpart of tokens_to_grid_torch.
+
+    Args:
+        affine_params: [total_N, C, 3] packed per-token (value, gx, gy), graph
+            attached.
+        geom: (owner, dxdy) from precompute_affine_geometry; owner [B,H,W] long,
+            dxdy [B,H,W,2] float.
+        H: Grid height (rows).
+        W: Grid width (columns).
+        output_channels: C.
+
+    Returns:
+        [B, H, W, C] dense predictions on affine_params' device.
+    """
+    owner, dxdy = geom
+    owner = owner.to(affine_params.device)
+    dxdy = dxdy.to(affine_params.device)
+    flat = owner.reshape(-1)                          # [B*H*W]
+    p = affine_params[flat]                           # [B*H*W, C, 3] (gather, keeps grad)
+    value = p[..., 0]                                 # [B*H*W, C]
+    gx, gy = p[..., 1], p[..., 2]
+    dx = dxdy[..., 0].reshape(-1, 1)                  # [B*H*W, 1]
+    dy = dxdy[..., 1].reshape(-1, 1)
+    dense = value + gx * dx + gy * dy                 # [B*H*W, C]
+    return dense.view(-1, H, W, output_channels)
+
+
+def tokens_to_grid_affine(
+    affine_params: torch.Tensor,
+    token_list: List[QuadNode],
+    H: int,
+    W: int,
+    output_channels: int,
+) -> torch.Tensor:
+    """Non-differentiable affine reconstruction for a single sample (viz path).
+
+    Thin wrapper over precompute_affine_geometry + tokens_to_grid_affine_torch
+    under no_grad, so the example script and prediction_visualization reuse one
+    code path for the affine head.
+
+    Args:
+        affine_params: [N, C, 3] per-token (value, gx, gy) for one sample.
+        token_list: The sample's QuadNode leaves (tile the full H x W grid).
+        H: Grid height (rows).
+        W: Grid width (columns).
+        output_channels: C.
+
+    Returns:
+        [H, W, C] float32 tensor on CPU.
+    """
+    with torch.no_grad():
+        geom = precompute_affine_geometry([token_list], [len(token_list)], H, W)
+        dense = tokens_to_grid_affine_torch(
+            affine_params, geom, H, W, output_channels
+        )                                            # [1, H, W, C]
+    return dense[0].cpu()
+
+
+# ---------------------------------------------------------------------------
 # Core reconstruction function
 # ---------------------------------------------------------------------------
 
@@ -92,7 +242,7 @@ def tokens_to_grid(
     H: int,
     W: int,
     output_channels: int,
-    mode: str = "fill",
+    mode: Literal["fill", "interp", "smooth"],
 ) -> torch.Tensor:
     """
     Reconstruct the full [H, W, output_channels] prediction grid from token predictions.
@@ -105,17 +255,23 @@ def tokens_to_grid(
     output_channels : number of output channels (e.g. 3 for u, v, p)
     mode            : "fill"   - fast nearest-fill (default)
                       "interp" - bilinear interpolation from token centres
+                      "smooth" - nearest-fill then a Gaussian low-pass blur
+                                 (viz-only cosmetic seam smoothing; see
+                                 _smooth_reconstruction)
 
     Returns
     -------
     grid : [H, W, output_channels] float32 tensor (on CPU)
     """
-    assert mode in ("fill", "interp"), f"Unknown mode: {mode}"
+    assert mode in ("fill", "interp", "smooth"), f"Unknown mode: {mode}"
     preds_np = predictions.detach().cpu().numpy()  # [N, output_channels]
 
     if mode == "fill":
         # Nearest-fill
         return _fill_reconstruction(preds_np, token_list, H, W, output_channels)
+    elif mode == "smooth":
+        # Nearest-fill then cosmetic Gaussian blur
+        return _smooth_reconstruction(preds_np, token_list, H, W, output_channels)
     else:
         # Bilinear interpolation
         return _interp_reconstruction(preds_np, token_list, H, W, output_channels)
@@ -136,6 +292,43 @@ def _fill_reconstruction(
         t = token_list[idx]
         grid[t.r0:t.r1, t.c0:t.c1] = preds[idx]
     return torch.from_numpy(grid)
+
+def _smooth_reconstruction(
+    preds: np.ndarray,
+    token_list: List[QuadNode],
+    H: int,
+    W: int,
+    output_channels: int,
+) -> torch.Tensor:
+    """Nearest-fill, then a cosmetic Gaussian low-pass blur (viz-only).
+
+    A zero-training sanity check (continuous_prediction_borders_2.md, appendix
+    Option 1): paints the blocky nearest-fill grid, then smooths the cell-border
+    steps with a per-channel Gaussian filter whose bandwidth tracks the smallest
+    cell so blocks larger than the finest detail are softened. This is purely
+    cosmetic and inconsistent with the (nearest-fill) training loss, so it does
+    not improve accuracy — it only reveals how much blockiness is reconstruction
+    vs. genuine model error. It also blurs the sharp shear layer, where error is
+    already highest.
+
+    Args:
+        preds: [N, output_channels] per-token predictions (numpy).
+        token_list: The sample's QuadNode leaves.
+        H: Grid height (rows).
+        W: Grid width (columns).
+        output_channels: C.
+
+    Returns:
+        [H, W, output_channels] float32 tensor on CPU.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    grid = _fill_reconstruction(preds, token_list, H, W, output_channels).numpy()
+    # Bandwidth ~ smallest leaf side (in pixels); 0 on the channel axis so
+    # channels are filtered independently.
+    s = min(min(t.height, t.width) for t in token_list)
+    smoothed = gaussian_filter(grid, sigma=(s, s, 0), mode="nearest")
+    return torch.from_numpy(smoothed)
 
 def _interp_reconstruction(
     preds: np.ndarray,

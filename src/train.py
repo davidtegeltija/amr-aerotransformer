@@ -44,6 +44,10 @@ from tqdm import tqdm
 from src.amr.oracle_depth import max_reachable_depth
 from src.eval import evaluate
 from src.model.loss import nmse_loss, scorer_depth_loss
+from src.model.reconstruction import (
+    precompute_affine_geometry,
+    tokens_to_grid_affine_torch,
+)
 from src.model.refinement_net import RefinementNet
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.utils.train_utils import average_targets_per_token, save_checkpoint
@@ -108,6 +112,10 @@ def train_on_deterministic_mesh(
         epoch_loss = 0.0
         epoch_token_total = 0
         epoch_sample_count = 0
+        # Quick probe (affine mode): mean |gx|, |gy| over the epoch. If these
+        # stay ~0 the gradient terms are dead
+        grad_abs_sum = torch.zeros(2)
+        grad_abs_steps = 0
         t0 = time.time()
 
         with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
@@ -123,7 +131,20 @@ def train_on_deterministic_mesh(
 
                 out = model(packed_tokens, tokens_per_sample)
 
-                loss = nmse_loss(out["token_preds"], packed_targets)
+                if model.affine_output:
+                    dense_targets = batch["targets"].to(device)
+                    Hd, Wd = dense_targets.shape[1], dense_targets.shape[2]
+                    geom = precompute_affine_geometry(
+                        batch["token_lists"], tokens_per_sample, Hd, Wd)
+                    dense_pred = tokens_to_grid_affine_torch(
+                        out["token_preds"], geom, Hd, Wd, model.output_channels)
+                    loss = nmse_loss(dense_pred, dense_targets)
+                    with torch.no_grad():
+                        grad_abs_sum += out["token_preds"][..., 1:].abs().mean(
+                            dim=(0, 1)).detach().cpu()
+                        grad_abs_steps += 1
+                else:
+                    loss = nmse_loss(out["token_preds"], packed_targets)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -149,10 +170,17 @@ def train_on_deterministic_mesh(
         epoch_mean = epoch_token_total / max(1, epoch_sample_count)
         elapsed = time.time() - t0
 
+        if grad_abs_steps > 0:
+            mean_gx, mean_gy = (grad_abs_sum / grad_abs_steps).tolist()
+            print(f"  [affine] mean|gx|={mean_gx:.4f}  mean|gy|={mean_gy:.4f}")
+
         if writer is not None:
             writer.add_scalar("Loss/train", avg_loss, epoch)
             writer.add_scalar("Tokens/mean_N", epoch_mean, epoch)
             writer.add_scalar("Time/epoch_s", elapsed, epoch)
+            if grad_abs_steps > 0:
+                writer.add_scalar("Affine/mean_abs_gx", mean_gx, epoch)
+                writer.add_scalar("Affine/mean_abs_gy", mean_gy, epoch)
 
         # Validation
         if val_loader is not None:
@@ -459,6 +487,9 @@ def train_on_learned_mesh(
         # per-sample distribution reveals whether the scorer produces varied
         # meshes or has collapsed to a constant.
         token_counts: List[int] = []
+        # Quick probe (affine mode): mean |gx|, |gy| over the epoch.
+        grad_abs_sum = torch.zeros(2)
+        grad_abs_steps = 0
 
         with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for step, batch in enumerate(tq_loader):
@@ -466,9 +497,21 @@ def train_on_learned_mesh(
                 grid_targets = batch["targets"].to(device)
 
                 out = model(grids)
-                packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
 
-                loss = nmse_loss(out["token_preds"], packed_targets)
+                if model.affine_output:
+                    Hd, Wd = grid_targets.shape[1], grid_targets.shape[2]
+                    geom = precompute_affine_geometry(
+                        out["token_lists"], out["tokens_per_sample"], Hd, Wd)
+                    dense_pred = tokens_to_grid_affine_torch(
+                        out["token_preds"], geom, Hd, Wd, model.output_channels)
+                    loss = nmse_loss(dense_pred, grid_targets)
+                    with torch.no_grad():
+                        grad_abs_sum += out["token_preds"][..., 1:].abs().mean(
+                            dim=(0, 1)).detach().cpu()
+                        grad_abs_steps += 1
+                else:
+                    packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
+                    loss = nmse_loss(out["token_preds"], packed_targets)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -500,11 +543,17 @@ def train_on_learned_mesh(
             f"train={train_loss_history[-1]:.4f}  "
             f"mean_N={mean_N:.1f}  std_N={std_N:.1f}  N=[{min_N},{max_N}]"
             + (f"  val={val_loss:.4f}" if val_loss is not None else "")
+            + (f"  mean|gx|={grad_abs_sum[0] / grad_abs_steps:.4f}"
+               f"  mean|gy|={grad_abs_sum[1] / grad_abs_steps:.4f}"
+               if grad_abs_steps > 0 else "")
         )
 
         if writer is not None:
             writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
             writer.add_scalar("Tokens/mean_N", mean_N, epoch)
+            if grad_abs_steps > 0:
+                writer.add_scalar("Affine/mean_abs_gx", float(grad_abs_sum[0] / grad_abs_steps), epoch)
+                writer.add_scalar("Affine/mean_abs_gy", float(grad_abs_sum[1] / grad_abs_steps), epoch)
             writer.add_scalar("Tokens/std_N", std_N, epoch)
             writer.add_scalar("Tokens/min_N", min_N, epoch)
             writer.add_scalar("Tokens/max_N", max_N, epoch)
@@ -540,8 +589,16 @@ def _validate_on_learned_mesh(model, val_loader, device) -> float:
             grids = batch["grids"].to(device)
             targets = batch["targets"].to(device)
             out = model(grids)
-            packed_targets = average_targets_per_token(targets, out["token_lists"])
-            total += nmse_loss(out["token_preds"], packed_targets).item()
+            if model.affine_output:
+                Hd, Wd = targets.shape[1], targets.shape[2]
+                geom = precompute_affine_geometry(
+                    out["token_lists"], out["tokens_per_sample"], Hd, Wd)
+                dense_pred = tokens_to_grid_affine_torch(
+                    out["token_preds"], geom, Hd, Wd, model.output_channels)
+                total += nmse_loss(dense_pred, targets).item()
+            else:
+                packed_targets = average_targets_per_token(targets, out["token_lists"])
+                total += nmse_loss(out["token_preds"], packed_targets).item()
             n += 1
     model.train()
     return total / max(1, n)

@@ -6,7 +6,11 @@ from matplotlib import pyplot as plt
 import torch
 
 from src.model.loss import nmse_loss
-from src.model.reconstruction import tokens_to_grid_torch
+from src.model.reconstruction import (
+    precompute_affine_geometry,
+    tokens_to_grid_affine_torch,
+    tokens_to_grid_torch,
+)
 from src.amr.quadtree import QuadNode
 from src.utils.visualization_utils import save_plot
 
@@ -163,10 +167,18 @@ def evaluate_end_to_end(model, loader, device) -> Tuple[float, float]:
         grids = batch["grids"].to(device)
         targets = batch["targets"].to(device)
         out = model(grids)
-        dense = tokens_to_grid_torch(
-            out["token_preds"], out["token_lists"],
-            out["tokens_per_sample"], grids.shape[1], grids.shape[2],
-        )
+        if getattr(model, "affine_output", False):
+            geom = precompute_affine_geometry(
+                out["token_lists"], out["tokens_per_sample"],
+                grids.shape[1], grids.shape[2])
+            dense = tokens_to_grid_affine_torch(
+                out["token_preds"], geom, grids.shape[1], grids.shape[2],
+                model.output_channels)
+        else:
+            dense = tokens_to_grid_torch(
+                out["token_preds"], out["token_lists"],
+                out["tokens_per_sample"], grids.shape[1], grids.shape[2],
+            )
         total_nmse += nmse_loss(dense, targets).item()
         n += 1
         tokens += sum(out["tokens_per_sample"])
