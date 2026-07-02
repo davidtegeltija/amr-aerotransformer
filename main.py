@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
-from src.amr.oracle_depth import calibrate_global_tolerance, max_reachable_depth
+from src.amr.oracle_depth import calibrate_global_tolerance
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn
 from src.data.dataset import AeroDataset
 from src.data.synthetic_dataset import SyntheticDataset
@@ -21,6 +21,7 @@ from src.model.vit import ViT
 from src.train import train_on_deterministic_mesh, train_scorer_supervised, train_on_learned_mesh, train_vit
 from src.utils.data_utils import geometry_disjoint_split
 from src.utils.train_utils import evaluate_end_to_end, plot_loss_curves
+from src.utils.geometry_utils import patch_sizes_to_depth_bounds
 
 
 def load_config(path: str) -> Dict:
@@ -74,8 +75,6 @@ def main(args=None):
     run_name = f"{config_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     log_dir = Path("runs") / run_name
     writer = SummaryWriter(log_dir=str(log_dir))
-    # Persist the resolved config so each run is self-documenting in TensorBoard's
-    # TEXT tab (markdown code block renders the dict readably).
     writer.add_text("config", f"```yaml\n{yaml.safe_dump(args, sort_keys=False)}```", 0)
     print(f"TensorBoard logging to {log_dir}  (view: tensorboard --logdir runs)")
 
@@ -182,7 +181,18 @@ def main(args=None):
     
     if args.get("learned_training_mode") and args.get("learned_training_mode") not in ["scorer", "transformer"]:
         raise SystemExit("Only 'scorer' or 'transformer' are acceptable learned training modes")
-    
+
+    # Patch-size bounds -> Quadtree depth bounds 
+    H, W = dataset.H, dataset.W
+    min_patch_size = args.get("min_patch_size")
+    max_patch_size = args.get("max_patch_size")
+    min_depth, max_depth = patch_sizes_to_depth_bounds(H, W, min_patch_size, max_patch_size)
+    args["min_depth"] = min_depth
+    args["max_depth"] = max_depth
+    print(f"Patch-size bounds -> depth bounds:\nmin_patch_size={min_patch_size}, "
+          f"max_patch_size={max_patch_size} -> min_depth={min_depth}, max_depth={max_depth} "
+          f"(grid {H}x{W})")
+
     if args.get("refinement_mode") == "deterministic":
         if args.get("refinement_criteria") not in CRITERIA_REGISTRY:
             valid = ", ".join(sorted(CRITERIA_REGISTRY))
@@ -206,24 +216,20 @@ def main(args=None):
             # counts vary with geometry complexity.
             min_depth = args.get("min_depth")
             max_depth = args.get("max_depth")
-            min_cell_size = args.get("min_cell_size", 4)
             n_target = args.get("n_target", 256)
             n_calib = min(args.get("calib_samples", 64), len(train_dataset))
             calib_targets = [np.asarray(train_dataset[i]["target"], dtype=np.float32)
                             for i in range(n_calib)]
             tol = calibrate_global_tolerance(
                 calib_targets, n_target=n_target,
-                min_depth=min_depth, max_depth=max_depth, min_cell_size=min_cell_size,
+                min_depth=min_depth, max_depth=max_depth,
             )
-            reachable = max_reachable_depth(
-                calib_targets[0].shape[0], calib_targets[0].shape[1],
-                min_cell_size, max_depth,
-            )
+            # max_depth is already the reachable depth (derived from min_patch_size
+            # by patch_sizes_to_depth_bounds), so it is the reachable cap directly.
             print(f"Oracle target: global tol={tol:.4g} (n_target={n_target}, "
-                f"calib n={n_calib}, reachable_depth={reachable})")
+                f"calib n={n_calib}, reachable_depth={max_depth})")
             collate_fn = ScorerCollateFn(
                 tol=tol, min_depth=min_depth, max_depth=max_depth,
-                min_cell_size=min_cell_size,
             )
         elif args.get("learned_training_mode") == "transformer":
             collate_fn = LearnedCollateFn() # Collate (tokenization now happens inside the model)
@@ -238,7 +244,6 @@ def main(args=None):
         dropout=args.get("dropout"),
         min_depth=args.get("min_depth"),
         max_depth=args.get("max_depth"),
-        min_cell_size=args.get("min_cell_size", 4),
         refinement_mode=args.get("refinement_mode"),
         refinement_criteria=criteria,
         affine_output=args.get("affine_output", False),
@@ -256,6 +261,16 @@ def main(args=None):
 
         # Allow partial loads: a transformer-only checkpoint can warm-start the
         # frozen transformer used by the optional end-to-end sanity metric.
+        # Drop shape-mismatched params (strict=False ignores missing/extra keys
+        # but still errors on shape clashes) so e.g. an affine_output model can
+        # warm-start its encoder from a constant-head checkpoint while the wider
+        # prediction head re-inits.
+        model_sd = model.state_dict()
+        dropped = [k for k, v in state.items()
+                   if k in model_sd and v.shape != model_sd[k].shape]
+        if dropped:
+            state = {k: v for k, v in state.items() if k not in dropped}
+            print(f"  re-initialising {len(dropped)} shape-mismatched param(s): {dropped}")
         missing, unexpected = model.load_state_dict(state, strict=False)
         print(f"Loaded checkpoint {args.get('checkpoint_file')}")
         print(f"  missing keys:    {len(missing)} (expected: scorer.* before scorer training)")
@@ -292,7 +307,6 @@ def main(args=None):
                 epochs=args.get("epochs"),
                 min_depth=args.get("min_depth"),
                 max_depth=args.get("max_depth"),
-                min_cell_size=args.get("min_cell_size", 4),
                 tv_weight=args.get("tv_weight", 0.0),
                 decision_weight=args.get("decision_weight", 0.0),
                 decision_margin=args.get("decision_margin", 0.0),

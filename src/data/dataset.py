@@ -122,6 +122,8 @@ class AeroDataset(Dataset):
         self._inputs = np.concatenate([self._inputs, aoa_channel, mach_channel], axis=-1)    # (N, H, W, C+2)
 
         # Expose dataset metadata
+        self.H = H
+        self.W = W
         self.input_channels = self._inputs.shape[3]
         self.output_channels = self._targets.shape[3]
 

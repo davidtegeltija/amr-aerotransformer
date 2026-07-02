@@ -41,7 +41,6 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.amr.oracle_depth import max_reachable_depth
 from src.eval import evaluate
 from src.model.loss import nmse_loss, scorer_depth_loss
 from src.model.reconstruction import (
@@ -50,7 +49,7 @@ from src.model.reconstruction import (
 )
 from src.model.refinement_net import RefinementNet
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.utils.train_utils import average_targets_per_token, save_checkpoint
+from src.utils.train_utils import save_checkpoint, average_targets_per_token
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +220,6 @@ def train_scorer_supervised(
     epochs: int,
     min_depth: int,
     max_depth: int,
-    min_cell_size: int,
     tv_weight: float = 0.0,
     decision_weight: float = 0.0,
     decision_margin: float = 0.0,
@@ -242,9 +240,9 @@ def train_scorer_supervised(
         train_loader / val_loader: Loaders built with ``ScorerCollateFn`` (yield
             ``grids``, ``targets`` and ``oracle_depth``).
         epochs: Number of epochs.
-        min_depth, max_depth, min_cell_size: Quadtree geometry; must match the
-            oracle and the mesh builder. The reachable depth is derived from
-            ``min_cell_size`` and used as the loss's ``max_depth``.
+        min_depth, max_depth: Quadtree depth bounds; must match the oracle and the
+            mesh builder. ``max_depth`` is the reachable depth (derived from the
+            patch sizes) and is used directly as the loss's ``max_depth``.
         tv_weight: Small TV regulariser weight on ``d_pred`` (0 = off).
         decision_weight: Decision-consistency term weight (0 = off, default).
         decision_margin, decision_temp: Decision-term margin / smooth-max temp.
@@ -287,8 +285,9 @@ def train_scorer_supervised(
                 oracle = batch["oracle_depth"].to(device)
 
                 if reachable is None:
-                    H, W = grids.shape[1], grids.shape[2]
-                    reachable = max_reachable_depth(H, W, min_cell_size, max_depth)
+                    # max_depth is already the reachable depth (derived from the
+                    # patch sizes by patch_sizes_to_depth_bounds).
+                    reachable = max_depth
 
                 d_pred = scorer(grids)                           # [B, 1, H, W]
                 loss, comp = scorer_depth_loss(

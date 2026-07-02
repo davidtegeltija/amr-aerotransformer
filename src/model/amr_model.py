@@ -75,9 +75,12 @@ class AdaptiveMeshAeroModel(nn.Module):
     dropout             : dropout probability
     min_depth           : quadtree minimum depth
     max_depth           : quadtree maximum depth
-    min_cell_size       : minimum cell size in pixels
     refinement_mode     : "learned" or "deterministic"
     refinement_criteria : optional custom RefinementCriterion (refinement_mode == 'deterministic')
+
+    Configs express these bounds as ``min_patch_size`` / ``max_patch_size`` (pixels),
+    converted to the integer ``min_depth`` / ``max_depth`` at config load by
+    ``patch_sizes_to_depth_bounds``; this constructor takes the integer depths.
     """
 
     def __init__(
@@ -91,7 +94,6 @@ class AdaptiveMeshAeroModel(nn.Module):
         dropout: float = 0.1,
         min_depth: int = 2,
         max_depth: int = 6,
-        min_cell_size: int = 4,
         refinement_mode: Literal["learned", "deterministic"] = "deterministic",
         refinement_criteria: Optional[RefinementCriteria] = None,
         affine_output: bool = False,
@@ -119,7 +121,6 @@ class AdaptiveMeshAeroModel(nn.Module):
         self.output_channels = output_channels
         self.min_depth = min_depth
         self.max_depth = max_depth
-        self.min_cell_size = min_cell_size
         self.refinement_mode = refinement_mode
         self.refinement_criteria = refinement_criteria
         self.affine_output = affine_output
@@ -238,7 +239,6 @@ class AdaptiveMeshAeroModel(nn.Module):
                 depth_map=depth_np[b],
                 max_depth=self.max_depth,
                 min_depth=self.min_depth,
-                min_cell_size=self.min_cell_size,
                 offset=self.offset,
             )
             all_tokens.append(torch.from_numpy(nodes_to_token_array(leaves, H, W, C)))

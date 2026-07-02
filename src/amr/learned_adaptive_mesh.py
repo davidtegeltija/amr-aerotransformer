@@ -48,7 +48,6 @@ def build_depth_guided_mesh(
     *,
     max_depth: int = 5,
     min_depth: int = 2,
-    min_cell_size: int = 4,
     offset: float = 0.0,
 ) -> List[QuadNode]:
     """Build a quadtree by comparing a predicted depth map against running depth.
@@ -59,10 +58,10 @@ def build_depth_guided_mesh(
         depth_map: ``[H, W]`` predicted depth ``d_pred`` (any real values). A
             ``torch.Tensor`` is accepted and detached to numpy — the builder is
             inference-only and carries no gradient.
-        max_depth: Hard depth cap (cells at this depth never subdivide).
+        max_depth: Hard depth cap (cells at this depth never subdivide). Derived
+            at config load from the patch sizes; on an evenly-halving grid a
+            depth-``max_depth`` cell is exactly the finest allowed patch.
         min_depth: Depth floor (cells shallower than this always subdivide).
-        min_cell_size: A cell is a forced leaf once the next split would drop
-            either axis below this size.
         offset: Global budget offset added to the running depth in the
             comparison. Positive -> coarser mesh, negative -> finer.
 
@@ -91,7 +90,6 @@ def build_depth_guided_mesh(
         depth_map=depth_map,
         max_depth=max_depth,
         min_depth=min_depth,
-        min_cell_size=min_cell_size,
         offset=offset,
     )
     return collect_leaves(root)
@@ -109,7 +107,6 @@ def _build_node_depth(
     depth_map: np.ndarray,
     max_depth: int,
     min_depth: int,
-    min_cell_size: int,
     offset: float,
 ) -> None:
     """Populate ``node`` (features + children) in-place by depth-guided recursion."""
@@ -130,9 +127,6 @@ def _build_node_depth(
         depth=node.depth,
         min_depth=min_depth,
         max_depth=max_depth,
-        min_cell_size=min_cell_size,
-        cell_h=node.height,
-        cell_w=node.width,
         offset=offset,
     ):
         for child in node.subdivide(depth=node.depth + 1):
@@ -142,7 +136,6 @@ def _build_node_depth(
                 depth_map=depth_map,
                 max_depth=max_depth,
                 min_depth=min_depth,
-                min_cell_size=min_cell_size,
                 offset=offset,
             )
     else:
@@ -155,21 +148,15 @@ def _should_subdivide_depth(
     depth: int,
     min_depth: int,
     max_depth: int,
-    min_cell_size: int,
-    cell_h: int,
-    cell_w: int,
     offset: float,
 ) -> bool:
     """Running-depth subdivision test for a single cell.
 
     Returns True iff the cell should subdivide:
-      * forced stop when the next split would violate ``min_cell_size`` or the
-        cell is at ``max_depth``;
+      * forced stop when the cell is at ``max_depth``;
       * forced split below ``min_depth``;
       * otherwise subdivide iff ``max(d_pred over cell) > depth + offset``.
     """
-    if cell_h // 2 < min_cell_size or cell_w // 2 < min_cell_size:
-        return False
     if depth >= max_depth:
         return False
     if depth < min_depth:
@@ -184,23 +171,23 @@ def _should_subdivide_depth(
 
 if __name__ == "__main__":
     import numpy as np
-    from src.utils.train_utils import mesh_token_bounds
+    from src.utils.geometry_utils import mesh_token_bounds
 
     H, W = 256, 128
-    floor, cap = mesh_token_bounds(H, W, min_depth=2, max_depth=5, min_cell_size=4)
+    floor, cap = mesh_token_bounds(H, W, min_depth=2, max_depth=5)
     assert (floor, cap) == (16, 1024), f"unexpected bounds: {(floor, cap)}"
 
     data = np.random.default_rng(0).standard_normal((H, W, 3)).astype(np.float32)
 
     # Uniform depth map at the floor -> floor leaves.
     leaves = build_depth_guided_mesh(
-        data, np.full((H, W), 2.0), max_depth=5, min_depth=2, min_cell_size=4
+        data, np.full((H, W), 2.0), max_depth=5, min_depth=2
     )
     assert len(leaves) == floor, f"expected {floor} leaves, got {len(leaves)}"
 
     # Uniform depth map above the cap -> cap leaves.
     leaves = build_depth_guided_mesh(
-        data, np.full((H, W), 99.0), max_depth=5, min_depth=2, min_cell_size=4
+        data, np.full((H, W), 99.0), max_depth=5, min_depth=2
     )
     assert len(leaves) == cap, f"expected {cap} leaves, got {len(leaves)}"
     print(f"Smoke OK: bounds=({floor},{cap}); uniform floor/cap reproduce them.")

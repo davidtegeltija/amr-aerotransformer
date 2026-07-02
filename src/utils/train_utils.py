@@ -103,50 +103,6 @@ def average_targets_per_token(targets: torch.Tensor, token_lists: List[List[Quad
 
     return torch.stack(rows, dim=0)
 
-
-def mesh_token_bounds(
-    H: int,
-    W: int,
-    min_depth: int,
-    max_depth: int,
-    min_cell_size: int,
-) -> Tuple[int, int]:
-    """
-    Reachable leaf-count bounds for the depth-guided builder.
-
-    The floor is the leaf count when every non-forced decision says "stop"
-    (collapse to the ``min_depth`` floor); the cap is the leaf count when every
-    non-forced decision says "subdivide" (max refinement under ``min_cell_size``
-    / ``max_depth``). Used to annotate the end-to-end sanity log with the token
-    range the mesh can occupy.
-
-    Args:
-        H, W: Grid dimensions in pixels.
-        min_depth: Depth below which subdivision is forced.
-        max_depth: Depth at which subdivision stops unconditionally.
-        min_cell_size: Cells whose next split would drop either axis below
-            this size are forced leaves.
-
-    Returns:
-        (floor_tokens, max_tokens) leaf counts.
-    """
-    def count(h: int, w: int, depth: int, always_subdivide: bool) -> int:
-        if h // 2 < min_cell_size or w // 2 < min_cell_size:
-            return 1
-        if depth >= max_depth:
-            return 1
-        if depth >= min_depth and not always_subdivide:
-            return 1
-        # Child sizes follow QuadNode.compute_child_bboxes (h//2 and h - h//2).
-        return sum(
-            count(hh, ww, depth + 1, always_subdivide)
-            for hh in (h // 2, h - h // 2)
-            for ww in (w // 2, w - w // 2)
-        )
-
-    return count(H, W, 0, False), count(H, W, 0, True)
-
-
 @torch.no_grad()
 def evaluate_end_to_end(model, loader, device) -> Tuple[float, float]:
     """End-to-end sanity metric: scorer mesh -> frozen transformer -> dense NMSE.

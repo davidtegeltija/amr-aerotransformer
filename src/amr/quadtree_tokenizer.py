@@ -54,22 +54,21 @@ class QuadtreeTokenizer:
     Args
     ----
     min_depth               : minimum quadtree depth (cells always subdivided to here)
-    max_depth               : maximum quadtree depth (hard upper limit)
-    min_cell_size           : minimum pixel side-length; cells below this are not split.
+    max_depth               : maximum quadtree depth (hard upper limit, and sole leaf
+                              floor; derived from the configured patch sizes by
+                              patch_sizes_to_depth_bounds)
     refinement_criteria     : RefinementCriteria instance controlling physics thresholds.
-                              Defaults to AERODYNAMIC_CONFIG from physics_metrics.py. 
+                              Defaults to AERODYNAMIC_CONFIG from physics_metrics.py.
     """
 
     def __init__(
         self,
         min_depth:           int = 2,
         max_depth:           int = 6,
-        min_cell_size:       int = 4,
         refinement_criteria: Optional[RefinementCriteria] = None,
     ):
         self.min_depth           = min_depth
         self.max_depth           = max_depth
-        self.min_cell_size       = min_cell_size
         self.refinement_criteria = refinement_criteria or AERODYNAMIC_CRITERIA
 
     def tokenize(self, grid: np.ndarray) -> Tuple[np.ndarray, List[QuadNode]]:
@@ -92,7 +91,6 @@ class QuadtreeTokenizer:
         node_list: List[QuadNode] = build_adaptive_mesh(
             grid,
             max_depth=self.max_depth,
-            min_cell_size=self.min_cell_size,
             refinement_criteria=self.refinement_criteria,
         )
 

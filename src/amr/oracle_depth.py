@@ -28,8 +28,9 @@ Key correctness properties:
 * Error is measured on per-channel scale-normalised target channels so no
   single field dominates through its units.
 
-* ``max_depth_reachable`` is computed from ``min_cell_size`` (and any configured
-  ``max_depth`` cap), never assumed equal to the configured ``max_depth``.
+* ``max_depth`` is the reachable depth derived once at config load from
+  ``min_patch_size`` by ``patch_sizes_to_depth_bounds``, never assumed equal to
+  any raw configured depth.
 
 The output is a small deterministic integer array ``[H, W]`` and is cheap to
 cache per sample.
@@ -38,49 +39,9 @@ cache per sample.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional
 
 import numpy as np
-
-
-# ---------------------------------------------------------------------------
-# Geometry: reachable depth (mirrors the builder's forced-stop logic)
-# ---------------------------------------------------------------------------
-
-def max_reachable_depth(H: int, W: int, min_cell_size: int, max_depth: int) -> int:
-    """Deepest quadtree depth any cell reaches under the builder's stop rules.
-
-    Mirrors ``_should_subdivide`` in the mesh builders: a cell is a forced leaf
-    once the next split would drop either axis below ``min_cell_size``, or once
-    it hits ``max_depth``. The reachable depth is the maximum leaf depth when
-    *every* cell subdivides as far as allowed.
-
-    This is the value the oracle, the loss, and the mesh builder must all share.
-    It can be strictly smaller than the configured ``max_depth``
-    (e.g. width 128, ``min_cell_size`` 4 -> depth 5, not 6).
-
-    Args:
-        H, W: Grid dimensions in pixels.
-        min_cell_size: A cell whose next split would drop either axis below this
-            size is a forced leaf.
-        max_depth: Configured hard depth cap.
-
-    Returns:
-        The deepest reachable depth (an int in ``[0, max_depth]``).
-    """
-    def deepest(h: int, w: int, depth: int) -> int:
-        if depth >= max_depth:
-            return depth
-        if h // 2 < min_cell_size or w // 2 < min_cell_size:
-            return depth
-        # Child sizes follow QuadNode.compute_child_bboxes (size//2 and size - size//2).
-        return max(
-            deepest(hh, ww, depth + 1)
-            for hh in (h // 2, h - h // 2)
-            for ww in (w // 2, w - w // 2)
-        )
-
-    return deepest(H, W, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +107,6 @@ def build_error_pyramid(
     target: np.ndarray,
     *,
     max_depth: int,
-    min_cell_size: int,
     valid_mask: Optional[np.ndarray] = None,
     channel_scale: Optional[np.ndarray] = None,
 ) -> ErrorPyramid:
@@ -154,9 +114,9 @@ def build_error_pyramid(
 
     Args:
         target: ``[H, W, C]`` ground-truth field.
-        max_depth: Configured hard depth cap (the true reachable depth is
-            computed from ``min_cell_size`` and may be smaller).
-        min_cell_size: Forced-leaf threshold (see ``max_reachable_depth``).
+        max_depth: Reachable depth cap (derived once at config load from
+            ``min_patch_size`` by ``patch_sizes_to_depth_bounds``). Every cell
+            subdivides uniformly to this depth on an evenly-halving grid.
         valid_mask: Optional ``[H, W]`` bool mask of valid pixels. Invalid
             pixels are excluded from cell means and SSD; a cell with no valid
             pixels gets SSD 0 (it never demands refinement).
@@ -168,7 +128,7 @@ def build_error_pyramid(
     """
     assert target.ndim == 3, f"expected [H, W, C], got {target.shape}"
     H, W, C = target.shape
-    reachable = max_reachable_depth(H, W, min_cell_size, max_depth)
+    reachable = max_depth
 
     if channel_scale is None:
         channel_scale = per_channel_scale(target, valid_mask)
@@ -197,12 +157,7 @@ def build_error_pyramid(
         ssd[depth, r0:r1, c0:c1] = cell_ssd
         area[depth, r0:r1, c0:c1] = float(h * w)
 
-        can_split = (
-            depth < max_depth
-            and depth < reachable
-            and h // 2 >= min_cell_size
-            and w // 2 >= min_cell_size
-        )
+        can_split = depth < max_depth
         if not can_split:
             pixel_max_depth[r0:r1, c0:c1] = depth
             return
@@ -295,7 +250,6 @@ def compute_oracle_depth(
     tol: float,
     min_depth: int,
     max_depth: int,
-    min_cell_size: int,
     valid_mask: Optional[np.ndarray] = None,
     channel_scale: Optional[np.ndarray] = None,
 ) -> np.ndarray:
@@ -305,8 +259,8 @@ def compute_oracle_depth(
         target: ``[H, W, C]`` ground-truth field.
         tol: Error tolerance on scaled channels (use a single global value
             calibrated by :func:`calibrate_global_tolerance`).
-        min_depth, max_depth, min_cell_size: Quadtree geometry; ``max_depth`` is
-            a cap, the real reachable depth is derived from ``min_cell_size``.
+        min_depth, max_depth: Quadtree depth bounds (derived at config load from
+            the patch sizes by ``patch_sizes_to_depth_bounds``).
         valid_mask: Optional ``[H, W]`` bool mask of valid pixels.
         channel_scale: Optional ``[C]`` per-channel scale (defaults to per-sample
             std).
@@ -317,7 +271,6 @@ def compute_oracle_depth(
     pyr = build_error_pyramid(
         target,
         max_depth=max_depth,
-        min_cell_size=min_cell_size,
         valid_mask=valid_mask,
         channel_scale=channel_scale,
     )
@@ -334,7 +287,6 @@ def calibrate_global_tolerance(
     n_target: int,
     min_depth: int,
     max_depth: int,
-    min_cell_size: int,
     valid_masks: Optional[Iterable[Optional[np.ndarray]]] = None,
     iters: int = 40,
     rel_tol: float = 1e-3,
@@ -353,7 +305,7 @@ def calibrate_global_tolerance(
         targets: Iterable of ``[H, W, C]`` target fields (a calibration subset
             of the train split).
         n_target: Desired mean leaf (token) count.
-        min_depth, max_depth, min_cell_size: Quadtree geometry.
+        min_depth, max_depth: Quadtree depth bounds.
         valid_masks: Optional iterable of per-sample ``[H, W]`` bool masks,
             aligned with ``targets``.
         iters: Max bisection iterations.
@@ -371,9 +323,7 @@ def calibrate_global_tolerance(
         masks = list(valid_masks)
 
     pyramids = [
-        build_error_pyramid(
-            t, max_depth=max_depth, min_cell_size=min_cell_size, valid_mask=m
-        )
+        build_error_pyramid(t, max_depth=max_depth, valid_mask=m)
         for t, m in zip(targets, masks)
     ]
 
@@ -406,7 +356,7 @@ def calibrate_global_tolerance(
             f"({finest_count:.1f}); tolerance would pin to tol=0, producing a "
             f"degenerate near-constant oracle (every pixel at max depth). "
             f"Lower n_target below {finest_count:.1f} (e.g. by reducing it or "
-            f"increasing min_cell_size / lowering max_depth)."
+            f"increasing min_patch_size / max_patch_size to lower max_depth)."
         )
 
     tol = hi

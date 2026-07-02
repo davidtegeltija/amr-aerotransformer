@@ -8,6 +8,7 @@ import yaml
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.utils.geometry_utils import patch_sizes_to_depth_bounds
 from src.amr.quadtree_tokenizer import QuadtreeTokenizer
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.data.dataset import AeroDataset
@@ -17,11 +18,11 @@ from src.utils.mesh_visualization import plot_mesh
 from src.utils.prediction_visualization import plot_flow_comparison, plot_3d_prediction
 
 
-def create_model(config_file, checkpoint_file, input_channels=5, output_channels=3):
+def create_model(args, checkpoint_file, dataset, input_channels=5, output_channels=3):
     """Instantiate the model from a config file and load weights from a checkpoint.
 
     Args:
-        config_file: Path to a YAML config (see configs/overfit.yaml).
+        args: Arguments from a read YAML config (see configs/overfit.yaml).
         checkpoint_file: Path to a .pt checkpoint produced during training.
         input_channels: Number of input channels (including AoA/Mach added by the dataset).
         output_channels: Number of predicted channels.
@@ -29,13 +30,18 @@ def create_model(config_file, checkpoint_file, input_channels=5, output_channels
     Returns:
         Tuple of (model, args) where args is the parsed YAML config dict.
     """
-    with open(config_file, "r") as f:
-        args = yaml.safe_load(f)
 
     refinement_mode = args.get("refinement_mode")
     criteria = None
     if refinement_mode == "deterministic":
         criteria = CRITERIA_REGISTRY[args.get("refinement_criteria")]
+
+    # Configs express bounds as patch sizes; convert once to integer depths (mirrors
+    # main.py) and inject back into args so predict_single reuses the same values.
+    H, W = dataset.H, dataset.W
+    min_depth, max_depth = patch_sizes_to_depth_bounds(H, W, args.get("min_patch_size"), args.get("max_patch_size"))
+    args["min_depth"] = min_depth
+    args["max_depth"] = max_depth
 
     model = AdaptiveMeshAeroModel(
         input_channels=input_channels,
@@ -45,8 +51,8 @@ def create_model(config_file, checkpoint_file, input_channels=5, output_channels
         n_heads=args.get("n_heads"),
         d_ff=args.get("d_ff"),
         dropout=args.get("dropout"),
-        min_depth=args.get("min_depth"),
-        max_depth=args.get("max_depth"),
+        min_depth=min_depth,
+        max_depth=max_depth,
         refinement_mode=refinement_mode,
         refinement_criteria=criteria,
         affine_output=args.get("affine_output", False),
@@ -55,6 +61,11 @@ def create_model(config_file, checkpoint_file, input_channels=5, output_channels
 
     checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
     state = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
+    # Drop shape-mismatched params (strict=False still errors on shape clashes)
+    # so a constant-head checkpoint can warm-start an affine_output model.
+    model_sd = model.state_dict()
+    state = {k: v for k, v in state.items()
+             if not (k in model_sd and v.shape != model_sd[k].shape)}
     model.load_state_dict(state, strict=False)
     model.eval()
     return model, args
@@ -115,13 +126,17 @@ if __name__ == "__main__":
     config_file = "configs/train_learned_transformer.yaml"
     checkpoint_file = "outputs/checkpoints/transformer_on_learned_mesh.pt"
 
-    model, args = create_model(config_file, checkpoint_file)
+    with open(config_file, "r") as f:
+        args = yaml.safe_load(f)
 
     dataset = AeroDataset(
         input_path=args.get("input_file"),
         target_path=args.get("target_file"),
         index_path=args.get("index_file"),
     )
+
+    model = create_model(args, checkpoint_file, dataset)
+
     sample_index = random.randint(0, dataset.__len__())
     # sample_index = dataset.__len__() - 1
     sample = dataset[sample_index]

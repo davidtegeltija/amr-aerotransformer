@@ -11,8 +11,8 @@ n_layers: 5
 n_heads: 8
 d_ff: 512
 dropout: 0.0
-min_depth: 2                                  # Quadtree minimum subdivision depth
-max_depth: 6                                  # Quadtree maximum subdivision depth
+min_patch_size: 4                                   # Smallest allowed leaf patch (pixels). Fine cap — sole limit on the deepest refinement.
+max_patch_size: 64                                  # Largest allowed leaf patch (pixels). Coarse floor — every region is refined at least this far.
 refinement_mode: deterministic                      # "learned" or "deterministic"
 refinement_criteria: GEOMETRY_ONLY_COMBINED_CONFIG   # Name of RefinementCriteria (see CRITERIA_REGISTRY). Used only when --refinement_mode deterministic."
 

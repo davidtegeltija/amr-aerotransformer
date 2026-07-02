@@ -38,7 +38,6 @@ from src.amr.quadtree import QuadNode, collect_leaves
 def build_adaptive_mesh(
     data: np.ndarray,
     max_depth: int = 6,
-    min_cell_size: int = 4,
     refinement_criteria: Optional[RefinementCriteria] = None,
     uniform_cell_size: Optional[int] = None,
 ) -> List[QuadNode]:
@@ -50,9 +49,9 @@ def build_adaptive_mesh(
     data : np.ndarray, shape (C, H, W) or (H, W, C)
         Physical field.  Channel-first layout is auto-detected.
     max_depth : int
-        Maximum subdivision depth (root = depth 0).
-    min_cell_size : int
-        Cells smaller than this (in either dimension) are never subdivided.
+        Maximum subdivision depth (root = depth 0). The sole leaf floor;
+        derived from the configured patch sizes by patch_sizes_to_depth_bounds
+        so a depth-max_depth cell is exactly the finest allowed patch.
     refinement_criteria : RefinementCriteria, optional
         Thresholds controlling subdivision.  Defaults to AERODYNAMIC_CONFIG.
         Use config.scale(factor) to uniformly loosen or tighten the mesh.
@@ -89,7 +88,7 @@ def build_adaptive_mesh(
 
     # Build the quadtree starting with the whole field
     root = QuadNode(bbox=(0, 0, H, W), depth=0)
-    _build_node(data=data, node=root, max_depth=max_depth, min_cell_size=min_cell_size, refinement_criteria=refinement_criteria)
+    _build_node(data=data, node=root, max_depth=max_depth, refinement_criteria=refinement_criteria)
 
     return collect_leaves(root)
 
@@ -145,7 +144,6 @@ def _build_node(
     data: np.ndarray,
     node: QuadNode,
     max_depth: int,
-    min_cell_size: int,
     refinement_criteria: RefinementCriteria,
 ) -> None:
     """
@@ -173,14 +171,8 @@ def _build_node(
     metrics = refinement_criteria.compute_enabled_metrics(region[:, :, :3])
     node.metrics = metrics
 
-    # 4. Check stop conditions
-    cell_too_small = (
-        node.height // 2 < min_cell_size  or
-        node.width  // 2 < min_cell_size
-    )
-    at_max_depth = node.depth >= max_depth
-
-    if at_max_depth or cell_too_small:
+    # 4. Check stop condition (depth cap is the sole leaf floor)
+    if node.depth >= max_depth:
         node.is_leaf = True
         return
 
@@ -191,7 +183,7 @@ def _build_node(
 
     # 6. Subdivide into four children and recurse
     for child in node.subdivide(depth=node.depth + 1):
-        _build_node(data=data, node=child, max_depth=max_depth, min_cell_size=min_cell_size, refinement_criteria=refinement_criteria)
+        _build_node(data=data, node=child, max_depth=max_depth, refinement_criteria=refinement_criteria)
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +241,6 @@ def _extract_region(data: np.ndarray, bbox: Tuple[int, int, int, int]) -> np.nda
 def process_batch(
     data: np.ndarray,
     max_depth: int = 6,
-    min_cell_size: int = 4,
     refinement_criteria: Optional[RefinementCriteria] = None,
 ) -> List[List[QuadNode]]:
     """
@@ -259,7 +250,6 @@ def process_batch(
     ----------
     data : (B, C, H, W)
     max_depth : int
-    min_cell_size : int
     config : RefinementCriteria, optional
 
     Returns
@@ -270,7 +260,7 @@ def process_batch(
         raise ValueError(f"Expected 4-D input [B, C, H, W], got shape {data.shape}")
 
     return [
-        build_adaptive_mesh(data[b], max_depth=max_depth, min_cell_size=min_cell_size, refinement_criteria=refinement_criteria)
+        build_adaptive_mesh(data[b], max_depth=max_depth, refinement_criteria=refinement_criteria)
         for b in range(data.shape[0])
     ]
 

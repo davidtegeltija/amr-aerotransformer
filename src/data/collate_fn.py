@@ -97,13 +97,11 @@ class ScorerCollateFn:
         tol: float,
         min_depth: int,
         max_depth: int,
-        min_cell_size: int = 4,
         channel_scale: Optional[np.ndarray] = None,
     ):
         self.tol = tol
         self.min_depth = min_depth
         self.max_depth = max_depth
-        self.min_cell_size = min_cell_size
         # Optional fixed per-channel scale shared across samples; None -> each
         # sample is normalised by its own per-channel std (the default).
         self.channel_scale = channel_scale
@@ -120,7 +118,6 @@ class ScorerCollateFn:
                 tol=self.tol,
                 min_depth=self.min_depth,
                 max_depth=self.max_depth,
-                min_cell_size=self.min_cell_size,
                 channel_scale=self.channel_scale,
             )
             oracle_maps.append(torch.from_numpy(oracle))
