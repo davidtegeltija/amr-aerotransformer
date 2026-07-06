@@ -138,6 +138,7 @@ class AeroDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict:
         return {
+            "index":  index,
             "input":  self._inputs[index],
             "target": self._targets[index],
         }

@@ -138,7 +138,8 @@ class SyntheticDataset(Dataset):
 
     def __getitem__(self, index: int) -> Dict:
         return {
-            "input": self._inputs[index], 
+            "index": index,
+            "input": self._inputs[index],
             "target": self._targets[index]
         }
     

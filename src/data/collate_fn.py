@@ -28,6 +28,11 @@ class DeterministicCollateFn:
 
     def __init__(self, tokenizer: QuadtreeTokenizer):
         self.tokenizer = tokenizer
+        # Per-sample cache keyed by dataset index. The quadtree build and target
+        # averaging are deterministic, so the first epoch fills this and every
+        # later epoch is a lookup. Only persists with num_workers=0 (workers get
+        # their own copy that is discarded after each batch).
+        self._cache: Dict[int, tuple] = {}
 
     def __call__(self, samples: List[Dict]) -> Dict:
         all_tokens = []
@@ -40,14 +45,20 @@ class DeterministicCollateFn:
             input = s["input"]   # [H, W, C]
             target = s["target"]  # [H, W, output_channels]
 
-            token_array, leaves = self.tokenizer.tokenize(input)
+            cached = self._cache.get(s["index"])
+            if cached is None:
+                token_array, leaves = self.tokenizer.tokenize(input)
 
-            output_channels = target.shape[-1]
+                output_channels = target.shape[-1]
+                N = len(leaves)
+                token_target = np.zeros((N, output_channels), dtype=np.float32)
+                for i, node in enumerate(leaves):
+                    token_target[i] = target[node.r0:node.r1, node.c0:node.c1].mean(axis=(0, 1))
+                self._cache[s["index"]] = (token_array, leaves, token_target)
+            else:
+                token_array, leaves, token_target = cached
+
             N = len(leaves)
-            token_target = np.zeros((N, output_channels), dtype=np.float32)
-            for i, node in enumerate(leaves):
-                token_target[i] = target[node.r0:node.r1, node.c0:node.c1].mean(axis=(0, 1))
-
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
             tokens_per_sample.append(N)
@@ -67,13 +78,15 @@ class DeterministicCollateFn:
 class LearnedCollateFn:
     """Stacks per-sample input/target grids into a batch. No tokenization."""
 
-    def __call__(self, samples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, samples: List[Dict[str, Any]]) -> Dict[str, Any]:
         grids = torch.stack([torch.from_numpy(np.asarray(s["input"], dtype=np.float32)) for s in samples])    # [B, H, W, C]
         targets = torch.stack([torch.from_numpy(np.asarray(s["target"], dtype=np.float32)) for s in samples]) # [B, H, W, output_channels]
 
         return {
             "grids": grids,
-            "targets": targets
+            "targets": targets,
+            # Dataset indices let the model cache the frozen-scorer mesh per sample.
+            "indices": [s["index"] for s in samples],
         }
 
 
@@ -105,6 +118,11 @@ class ScorerCollateFn:
         # Optional fixed per-channel scale shared across samples; None -> each
         # sample is normalised by its own per-channel std (the default).
         self.channel_scale = channel_scale
+        # Per-sample oracle cache keyed by dataset index. The oracle is a
+        # deterministic function of (target, tol, depths), so the first epoch
+        # fills this and every later epoch is a lookup. Only persists with
+        # num_workers=0 (workers get their own copy, discarded after each batch).
+        self._cache: Dict[int, np.ndarray] = {}
 
     def __call__(self, samples: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         grids = torch.stack([torch.from_numpy(np.asarray(s["input"], dtype=np.float32)) for s in samples])
@@ -112,14 +130,17 @@ class ScorerCollateFn:
 
         oracle_maps = []
         for s in samples:
-            target = np.asarray(s["target"], dtype=np.float32)
-            oracle = compute_oracle_depth(
-                target,
-                tol=self.tol,
-                min_depth=self.min_depth,
-                max_depth=self.max_depth,
-                channel_scale=self.channel_scale,
-            )
+            oracle = self._cache.get(s["index"])
+            if oracle is None:
+                target = np.asarray(s["target"], dtype=np.float32)
+                oracle = compute_oracle_depth(
+                    target,
+                    tol=self.tol,
+                    min_depth=self.min_depth,
+                    max_depth=self.max_depth,
+                    channel_scale=self.channel_scale,
+                )
+                self._cache[s["index"]] = oracle
             oracle_maps.append(torch.from_numpy(oracle))
 
         oracle_depth = torch.stack(oracle_maps).unsqueeze(1).long()   # [B, 1, H, W]

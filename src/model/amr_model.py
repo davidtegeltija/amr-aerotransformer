@@ -133,6 +133,12 @@ class AdaptiveMeshAeroModel(nn.Module):
             # test (positive -> coarser mesh, negative -> finer). Solve per sample
             # at eval if an exact token count is required; default 0.
             self.offset = 0.0
+            # Per-sample mesh cache keyed by dataset index. During learned-mesh
+            # training the scorer is frozen, so the mesh (token array + leaves) is
+            # constant across epochs: the first epoch fills this, every later epoch
+            # (and validation) is a lookup that skips the scorer and the CPU tree
+            # build entirely. Only used when forward() is given sample indices.
+            self._mesh_cache: Dict[int, tuple] = {}
         else:
             self.scorer = None
 
@@ -195,7 +201,7 @@ class AdaptiveMeshAeroModel(nn.Module):
             "token_lists": None,
         }
 
-    def _forward_learned(self, grids):
+    def _forward_learned(self, grids, indices=None):
         """
         Scorer → depth-guided tree → transformer in one forward pass.
 
@@ -205,43 +211,63 @@ class AdaptiveMeshAeroModel(nn.Module):
         supervised regression to the variance oracle, so no gradient needs to
         flow back through the discrete tree here.
 
+        When ``indices`` is given (the dataset index of each sample) and the
+        scorer is frozen, the per-sample mesh never changes across epochs, so the
+        token array + leaves are cached in ``self._mesh_cache``: cached samples
+        skip the scorer and the CPU tree build entirely. Pass ``indices=None`` to
+        always recompute (e.g. while the scorer is still being trained).
+
         Args:
             grids: [B, H, W, C] float32 input geometry, channel-last.
+            indices: Optional[List[int]] dataset index per sample, for mesh caching.
 
         Returns:
             Dict with keys:
                 token_preds:       [total_N, output_channels] from the transformer,
                     or [total_N, output_channels, 3] = (value, gx, gy) when
                     affine_output.
-                score_map:         [B, 1, H, W] predicted depth map d_pred (attached)
+                score_map:         [B, 1, H, W] predicted depth map d_pred, or
+                    ``None`` for samples served entirely from the mesh cache.
                 tokens_per_sample: List[int] (len B), tokens per sample
                 token_lists:       List[List[QuadNode]] (len B)
         """
         B, H, W, C = grids.shape
         device = grids.device
 
-        # 1. Predicted depth map d_pred (GPU). The scorer takes channel-last
-        #    grids and permutes internally.
-        score_map = self.scorer(grids)                   # [B, 1, H, W]
+        # keys[b] is the sample's dataset index, or None to force recompute.
+        # A sample needs the scorer + tree build if it has no index or is a miss.
+        keys = indices if indices is not None else [None] * B
+        todo = [b for b in range(B) if keys[b] is None or keys[b] not in self._mesh_cache]
 
-        # 2. Build trees deterministically (CPU, per-sample). Detached: the
-        #    discrete build carries no gradient by design.
-        depth_np = score_map.squeeze(1).detach().cpu().numpy()
-        grids_np = grids.detach().cpu().numpy()
+        # 1. Predicted depth map d_pred (GPU), only for the uncached samples. The
+        #    scorer takes channel-last grids and permutes internally.
+        score_map = None
+        computed: Dict[int, tuple] = {}   # batch-position -> mesh, this call only
+        if todo:
+            score_map = self.scorer(grids[todo])              # [len(todo), 1, H, W]
+            depth_np = score_map.squeeze(1).detach().cpu().numpy()
+            grids_np = grids[todo].detach().cpu().numpy()
+            # 2. Build trees deterministically (CPU, per-sample); cache index-keyed
+            #    meshes. Detached: the discrete build carries no gradient by design.
+            for j, b in enumerate(todo):
+                leaves = build_depth_guided_mesh(
+                    data=grids_np[j],
+                    depth_map=depth_np[j],
+                    max_depth=self.max_depth,
+                    min_depth=self.min_depth,
+                    offset=self.offset,
+                )
+                mesh = (torch.from_numpy(nodes_to_token_array(leaves, H, W, C)), leaves)
+                computed[b] = mesh
+                if keys[b] is not None:
+                    self._mesh_cache[keys[b]] = mesh
 
         all_tokens: List[torch.Tensor] = []
         tokens_per_sample: List[int] = []
         token_lists: List[List] = []
-
         for b in range(B):
-            leaves = build_depth_guided_mesh(
-                data=grids_np[b],
-                depth_map=depth_np[b],
-                max_depth=self.max_depth,
-                min_depth=self.min_depth,
-                offset=self.offset,
-            )
-            all_tokens.append(torch.from_numpy(nodes_to_token_array(leaves, H, W, C)))
+            token_array, leaves = computed[b] if b in computed else self._mesh_cache[keys[b]]
+            all_tokens.append(token_array)
             tokens_per_sample.append(len(leaves))
             token_lists.append(leaves)
 

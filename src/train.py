@@ -495,7 +495,7 @@ def train_on_learned_mesh(
                 grids        = batch["grids"].to(device)
                 grid_targets = batch["targets"].to(device)
 
-                out = model(grids)
+                out = model(grids, indices=batch["indices"])
 
                 if model.affine_output:
                     Hd, Wd = grid_targets.shape[1], grid_targets.shape[2]
@@ -587,7 +587,7 @@ def _validate_on_learned_mesh(model, val_loader, device) -> float:
         for batch in val_loader:
             grids = batch["grids"].to(device)
             targets = batch["targets"].to(device)
-            out = model(grids)
+            out = model(grids, indices=batch["indices"])
             if model.affine_output:
                 Hd, Wd = targets.shape[1], targets.shape[2]
                 geom = precompute_affine_geometry(

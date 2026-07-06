@@ -260,6 +260,7 @@ class CavityDataset(Dataset):
             x = np.concatenate([x, param_channels], axis=-1)
 
         return {
+            "index": index,
             "input": np.ascontiguousarray(x, dtype=np.float32),
             "target": np.ascontiguousarray(y, dtype=np.float32),
         }
