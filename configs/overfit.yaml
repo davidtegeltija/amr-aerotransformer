@@ -1,4 +1,5 @@
 # ---- Data ----
+dataset: aero_dataset               # Which dataset to build: aero_dataset | cavity_dataset
 input_file: "data/crmmgeom.npy"     # Path to .npz/.npy [N, H, W, C] representing the geometry of the problem
 target_file: "data/crmmdata.npy"    # Path to .npz/.npy [M, H, W, C] representing the steady flow state
 index_file: "data/crmmindex.npy"

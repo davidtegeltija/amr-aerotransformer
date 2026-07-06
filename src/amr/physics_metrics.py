@@ -229,6 +229,13 @@ def _gradient_xy(field_2d: np.ndarray):
     dfdx : (H, W)   gradient along columns (x direction)
     dfdy : (H, W)   gradient along rows    (y direction)
     """
+    # np.gradient needs >= 2 samples along an axis. A cell this small (e.g. a
+    # single-pixel leaf reached at max depth on a fine grid) has no computable
+    # gradient, so report it as gradient-free instead of raising.
+    if field_2d.shape[0] < 2 or field_2d.shape[1] < 2:
+        zeros = np.zeros_like(field_2d)
+        return zeros, zeros
+
     dfdx = np.gradient(field_2d, axis=1)   # ∂f/∂x  (column axis)
     dfdy = np.gradient(field_2d, axis=0)   # ∂f/∂y  (row    axis)
     return dfdx, dfdy

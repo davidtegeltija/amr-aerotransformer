@@ -15,6 +15,7 @@ from src.amr.quadtree_tokenizer import QuadtreeTokenizer
 from src.amr.oracle_depth import calibrate_global_tolerance
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn
 from src.data.dataset import AeroDataset
+from src.data.cavity_dataset import CavityDataset
 from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.vit import ViT
@@ -82,7 +83,8 @@ def main(args=None):
     # Build Dataset
     # ----------------------------------------------------------------
     print("\n======== Building Dataset ========")
-    if args.get("input_file") is not None: 
+    dataset_type = args.get("dataset")
+    if dataset_type == "aero_dataset" and args.get("input_file") is not None:
         print(f"Using data from {args.get('input_file')}")
         dataset = AeroDataset(input_path=args.get("input_file"), target_path=args.get("target_file"), index_path=args.get("index_file"))
         input_channels = dataset.input_channels
@@ -104,6 +106,28 @@ def main(args=None):
             print("Falling back to validating on the full training set. "
                   "This is an overfit sanity check only — val_loss is NOT a "
                   "generalization metric when train and val share geometries.")
+            train_dataset = val_dataset = dataset
+    elif dataset_type == "cavity_dataset" and args.get("input_file") is not None:
+        print(f"Using cavity next-step data from {args.get('input_file')}")
+        dataset = CavityDataset(input_path=args.get("input_file"))
+        input_channels = dataset.input_channels
+        output_channels = dataset.output_channels
+
+        # Split by case, not by pair. Consecutive frames of one simulation are
+        # highly correlated; a pair-level split leaks a case into both train and
+        # val, so val_loss would measure interpolation, not generalization.
+        seed = args.get("seed", 42)
+        try:
+            train_idx, val_idx = geometry_disjoint_split(
+                dataset.case_ids(), args.get("val_split"), seed
+            )
+            train_dataset, val_dataset = Subset(dataset, train_idx), Subset(dataset, val_idx)
+            print(f"Case-disjoint split (seed={seed}): "
+                  f"{len(train_idx)} train pairs / {len(val_idx)} val pairs")
+        except ValueError as e:
+            print(f"WARNING: {e}")
+            print("Falling back to validating on the full training set (overfit "
+                  "sanity check only — val_loss is NOT a generalization metric).")
             train_dataset = val_dataset = dataset
     else:
         print("No input and target data provided -> using synthetic dataset.")
