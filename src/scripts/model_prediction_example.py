@@ -2,6 +2,7 @@ import os
 import random
 import sys
 
+import numpy as np
 import torch
 import yaml
 
@@ -9,33 +10,51 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.utils.geometry_utils import patch_sizes_to_depth_bounds
-from src.amr.quadtree_tokenizer import QuadtreeTokenizer
+from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
+from src.amr.quadtree_tokenizer import QuadtreeTokenizer, nodes_to_token_array
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.data.dataset import AeroDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
+from src.model.refinement_net import RefinementNet
 from src.model.reconstruction import tokens_to_grid, tokens_to_grid_affine
 from src.utils.mesh_visualization import plot_mesh
 from src.utils.prediction_visualization import plot_flow_comparison, plot_3d_prediction
 
 
+def _load_weights(module, checkpoint_file, strip_prefix=None):
+    """Tolerant checkpoint load (strict=False), optionally stripping a key prefix."""
+    checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
+    state = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
+    if strip_prefix:
+        state = {(k[len(strip_prefix):] if k.startswith(strip_prefix) else k): v
+                 for k, v in state.items()}
+    # Drop shape-mismatched params (strict=False still errors on shape clashes)
+    # so a constant-head checkpoint can warm-start an affine_output model.
+    module_sd = module.state_dict()
+    state = {k: v for k, v in state.items()
+             if not (k in module_sd and v.shape != module_sd[k].shape)}
+    module.load_state_dict(state, strict=False)
+    module.eval()
+    return module
+
+
 def create_model(args, checkpoint_file, dataset, input_channels=5, output_channels=3):
-    """Instantiate the model from a config file and load weights from a checkpoint.
+    """Instantiate the transformer model and load weights from a checkpoint.
+
+    The scorer is no longer part of the model. For learned-mesh inference load a
+    scorer separately via ``create_scorer`` and pass it to ``predict_single``.
 
     Args:
         args: Arguments from a read YAML config (see configs/overfit.yaml).
-        checkpoint_file: Path to a .pt checkpoint produced during training.
+        checkpoint_file: Path to a transformer .pt checkpoint produced during training.
+        dataset: Dataset instance (used for the grid H, W to derive depth bounds).
         input_channels: Number of input channels (including AoA/Mach added by the dataset).
         output_channels: Number of predicted channels.
 
     Returns:
-        Tuple of (model, args) where args is the parsed YAML config dict.
+        Tuple of (model, args) where args is the parsed YAML config dict, with
+        ``min_depth`` / ``max_depth`` injected.
     """
-
-    refinement_mode = args.get("refinement_mode")
-    criteria = None
-    if refinement_mode == "deterministic":
-        criteria = CRITERIA_REGISTRY[args.get("refinement_criteria")]
-
     # Configs express bounds as patch sizes; convert once to integer depths (mirrors
     # main.py) and inject back into args so predict_single reuses the same values.
     H, W = dataset.H, dataset.W
@@ -51,33 +70,34 @@ def create_model(args, checkpoint_file, dataset, input_channels=5, output_channe
         n_heads=args.get("n_heads"),
         d_ff=args.get("d_ff"),
         dropout=args.get("dropout"),
-        min_depth=min_depth,
-        max_depth=max_depth,
-        refinement_mode=refinement_mode,
-        refinement_criteria=criteria,
         affine_output=args.get("affine_output", False),
-        continuous_output=args.get("continuous_output", False),
     )
-
-    checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
-    state = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
-    # Drop shape-mismatched params (strict=False still errors on shape clashes)
-    # so a constant-head checkpoint can warm-start an affine_output model.
-    model_sd = model.state_dict()
-    state = {k: v for k, v in state.items()
-             if not (k in model_sd and v.shape != model_sd[k].shape)}
-    model.load_state_dict(state, strict=False)
-    model.eval()
+    _load_weights(model, checkpoint_file)
     return model, args
+
+
+def create_scorer(scorer_checkpoint, input_channels=5):
+    """Load a standalone frozen ``RefinementNet`` for learned-mesh inference."""
+    if not scorer_checkpoint:
+        raise ValueError(
+            "learned-mesh inference needs a scorer checkpoint; set 'scorer_checkpoint_file' "
+            "in the config to a trained RefinementNet checkpoint.")
+    scorer = RefinementNet(input_channels=input_channels)
+    return _load_weights(scorer, scorer_checkpoint, strip_prefix="scorer.")
 
 
 @torch.no_grad()
 def predict_single(model, args, sample):
     """Run one forward pass on a single sample and reconstruct the full-grid prediction.
 
+    The mesh is built here (mirroring the collate functions) and the transformer
+    only consumes packed tokens:
+      * deterministic -> QuadtreeTokenizer (physics AMR criterion)
+      * learned       -> ``scorer`` depth map -> build_depth_guided_mesh
+
     Args:
-        model: A loaded AdaptiveMeshAeroModel in eval mode.
-        args: Parsed YAML config dict (needed for the deterministic tokenizer settings).
+        model: A loaded transformer ``AdaptiveMeshAeroModel`` in eval mode.
+        args: Parsed YAML config dict (refinement_mode + tokenizer/mesh settings).
         sample: Dataset sample dict with keys 'input' [H, W, C] and 'target' [H, W, output_channels].
 
     Returns:
@@ -90,22 +110,31 @@ def predict_single(model, args, sample):
             mesh:         List[QuadNode] leaves of the adaptive mesh.
     """
     input_grid = sample["input"]                  # [H, W, C] numpy
-    H, W, _ = input_grid.shape
+    H, W, C = input_grid.shape
+    input_channels = model.input_channels
     output_channels = model.output_channels
 
-    if model.refinement_mode == "deterministic":
+    if args.get("refinement_mode") == "deterministic":
         tokenizer = QuadtreeTokenizer(
             min_depth=args.get("min_depth"),
             max_depth=args.get("max_depth"),
             refinement_criteria=CRITERIA_REGISTRY[args.get("refinement_criteria")],
         )
         token_array, leaves = tokenizer.tokenize(input_grid)
-        packed_tokens = torch.from_numpy(token_array).float()
-        out = model(packed_tokens, [len(leaves)])
     else:
-        grids = torch.from_numpy(input_grid).float().unsqueeze(0)   # [1, H, W, C]
-        out = model(grids)
-        leaves = out["token_lists"][0]
+        # Learned mesh needs a frozen scorer to build the mesh at inference time.
+        scorer = create_scorer(args.get("checkpoint_file"),
+                               input_channels=input_channels)
+        grid = torch.from_numpy(np.asarray(input_grid, dtype=np.float32)).unsqueeze(0)  # [1, H, W, C]
+        depth_map = scorer(grid).squeeze(1)[0].numpy()                                  # [H, W]
+        leaves = build_depth_guided_mesh(
+            data=np.asarray(input_grid, dtype=np.float32), depth_map=depth_map,
+            max_depth=args.get("max_depth"), min_depth=args.get("min_depth"),
+            offset=args.get("offset", 0.0))
+        token_array = nodes_to_token_array(leaves, H, W, C)
+
+    packed_tokens = torch.from_numpy(token_array).float()
+    out = model(packed_tokens, [len(leaves)])
 
     token_preds = out["token_preds"]
     if model.affine_output:
@@ -135,7 +164,9 @@ if __name__ == "__main__":
         index_path=args.get("index_file"),
     )
 
-    model = create_model(args, checkpoint_file, dataset)
+    model, args = create_model(args, checkpoint_file, dataset,
+                               input_channels=dataset.input_channels,
+                               output_channels=dataset.output_channels)
 
     sample_index = random.randint(0, dataset.__len__())
     # sample_index = dataset.__len__() - 1

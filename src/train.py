@@ -49,7 +49,7 @@ from src.model.reconstruction import (
 )
 from src.model.refinement_net import RefinementNet
 from src.model.amr_model import AdaptiveMeshAeroModel
-from src.utils.train_utils import save_checkpoint, average_targets_per_token
+from src.utils.train_utils import save_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -79,10 +79,11 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
 
 
 # ---------------------------------------------------------------------------
-# Training loop for deterministic mesh (thresholds are set)
+# Transformer training loop (mesh + per-token targets come pre-built from the
+# collate, so this is identical for deterministic and learned-mesh modes)
 # ---------------------------------------------------------------------------
 
-def train_on_deterministic_mesh(
+def train_transformer(
     model: AdaptiveMeshAeroModel,
     train_loader: DataLoader,
     val_loader: Optional[DataLoader],
@@ -91,9 +92,15 @@ def train_on_deterministic_mesh(
     epochs: int,
     d_model: int = 256,
     warmup_steps: int = 4000,
-    save_path: Optional[str] = "outputs/checkpoints/deterministic_mesh.pt",
+    save_path: Optional[str] = "outputs/checkpoints/transformer.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[Optional[float]]]:
+    """Train the transformer on packed AMR tokens.
+
+    The adaptive mesh, packed tokens and per-token targets are built upstream in
+    the collate function (``DeterministicCollateFn`` or ``LearnedCollateFn``),
+    which emit the same batch dict — so this loop is shared by both mesh sources.
+    """
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
@@ -235,7 +242,7 @@ def train_scorer_supervised(
     packing and the quadtree build never appear here.
 
     Args:
-        scorer: The ``RefinementNet`` to train (e.g. ``model.scorer``). It takes
+        scorer: The standalone ``RefinementNet`` to train. It takes
             channel-last grids ``[B, H, W, C]`` and returns ``d_pred [B, 1, H, W]``.
         train_loader / val_loader: Loaders built with ``ScorerCollateFn`` (yield
             ``grids``, ``targets`` and ``oracle_depth``).
@@ -409,197 +416,6 @@ def _validate_scorer_supervised(
         total += comp["total"]
         n += 1
     scorer.train()
-    return total / max(1, n)
-
-
-# ---------------------------------------------------------------------------
-# Train the transformer on meshes from an already-trained (frozen) RefinementNet
-# ---------------------------------------------------------------------------
-
-def train_on_learned_mesh(
-    model,
-    train_loader,
-    val_loader,
-    device,
-    *,
-    epochs: int,
-    d_model: int = 256,
-    warmup_steps: int = 1000,
-    save_path: Optional[str] = "outputs/checkpoints/learned_mesh.pt",
-    writer: Optional[SummaryWriter] = None,
-) -> Tuple[List[float], List[Optional[float]]]:
-    """Train the transformer on meshes produced by an already-trained scorer.
-
-    The RefinementNet scorer is **frozen** (eval mode, ``requires_grad=False``):
-    it builds the adaptive mesh each step but receives no gradient. Only the
-    transformer is optimised, against the per-token NMSE of its predictions vs.
-    the cell-averaged targets. The mesh build inside ``_forward_learned`` is
-    already detached, so no gradient could reach the scorer regardless; freezing
-    it makes that explicit and keeps its weights fixed.
-
-    Args:
-        model: ``AdaptiveMeshAeroModel`` in ``refinement_mode='learned'`` whose
-            ``scorer`` has been loaded with trained weights.
-        train_loader / val_loader: Loaders built with ``LearnedCollateFn`` (yield
-            ``grids`` and dense ``targets``).
-        device: Torch device.
-        epochs: Number of epochs.
-        d_model: Model width used to scale the inverse-sqrt warmup learning rate.
-        warmup_steps: Number of warmup steps for the learning-rate schedule.
-        save_path: Full checkpoint path (e.g. ``outputs/checkpoints/learned_mesh.pt``).
-            ``save_checkpoint`` prepends the date to the filename. The best-val
-            full-model checkpoint reuses this name; a periodic checkpoint (with
-            optimizer/scheduler) is written every 50 epochs. ``None`` disables
-            checkpointing.
-        writer: Optional TensorBoard writer.
-
-    Returns:
-        ``(train_loss_history, val_loss_history)``. val entries are ``None`` when
-        ``val_loader`` is ``None``.
-    """
-    if getattr(model, "refinement_mode", "learned") != "learned":
-        raise ValueError("train_on_learned_mesh requires refinement_mode='learned'.")
-    if model.scorer is None:
-        raise ValueError("train_on_learned_mesh requires a scorer; none is present on the model.")
-
-    # Freeze the scorer: it only builds meshes here, it is not trained.
-    model.scorer.requires_grad_(False)
-    for p in model.transformer.parameters():
-        p.requires_grad = True
-
-    optimizer = AdamW(model.transformer.parameters(), lr=1e-3, weight_decay=1e-4)
-    scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
-
-    best_val_loss = float("inf")
-    interactive = sys.stderr.isatty()
-
-    train_loss_history: List[float] = []
-    val_loss_history: List[Optional[float]] = []
-
-    for epoch in range(epochs):
-        model.train()
-        model.scorer.eval()   # keep the frozen scorer in eval mode
-        epoch_pred = 0.0
-        n_steps = 0
-        # Collect every sample's leaf count so we can report the spread, not just
-        # the mean. A frozen scorer pins mean_N across epochs by design; only the
-        # per-sample distribution reveals whether the scorer produces varied
-        # meshes or has collapsed to a constant.
-        token_counts: List[int] = []
-        # Quick probe (affine mode): mean |gx|, |gy| over the epoch.
-        grad_abs_sum = torch.zeros(2)
-        grad_abs_steps = 0
-
-        with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
-            for step, batch in enumerate(tq_loader):
-                grids        = batch["grids"].to(device)
-                grid_targets = batch["targets"].to(device)
-
-                out = model(grids, indices=batch["indices"])
-
-                if model.affine_output:
-                    Hd, Wd = grid_targets.shape[1], grid_targets.shape[2]
-                    geom = precompute_affine_geometry(
-                        out["token_lists"], out["tokens_per_sample"], Hd, Wd)
-                    dense_pred = tokens_to_grid_affine_torch(
-                        out["token_preds"], geom, Hd, Wd, model.output_channels)
-                    loss = nmse_loss(dense_pred, grid_targets)
-                    with torch.no_grad():
-                        grad_abs_sum += out["token_preds"][..., 1:].abs().mean(
-                            dim=(0, 1)).detach().cpu()
-                        grad_abs_steps += 1
-                else:
-                    packed_targets = average_targets_per_token(grid_targets, out["token_lists"])
-                    loss = nmse_loss(out["token_preds"], packed_targets)
-
-                optimizer.zero_grad()
-                loss.backward()
-                clip_grad_norm_(model.transformer.parameters(), max_norm=1.0)
-                optimizer.step()
-
-                epoch_pred += loss.item()
-                token_counts.extend(out["tokens_per_sample"])
-                n_steps    += 1
-
-        scheduler.step()
-
-        train_loss_history.append(epoch_pred / max(1, n_steps))
-
-        # --- Validate ---
-        val_loss = _validate_on_learned_mesh(model, val_loader, device) if val_loader else None
-        val_loss_history.append(val_loss)
-
-        # --- Log ---
-        # Average over the true sample count (not n_steps * batch_size, which is
-        # biased by a smaller final batch).
-        counts = torch.tensor(token_counts, dtype=torch.float)
-        mean_N = float(counts.mean()) if counts.numel() else 0.0
-        std_N = float(counts.std(unbiased=False)) if counts.numel() else 0.0
-        min_N = int(counts.min()) if counts.numel() else 0
-        max_N = int(counts.max()) if counts.numel() else 0
-        print(
-            f"[learned-mesh] epoch {epoch:03d}/{epochs}  "
-            f"train={train_loss_history[-1]:.4f}  "
-            f"mean_N={mean_N:.1f}  std_N={std_N:.1f}  N=[{min_N},{max_N}]"
-            + (f"  val={val_loss:.4f}" if val_loss is not None else "")
-            + (f"  mean|gx|={grad_abs_sum[0] / grad_abs_steps:.4f}"
-               f"  mean|gy|={grad_abs_sum[1] / grad_abs_steps:.4f}"
-               if grad_abs_steps > 0 else "")
-        )
-
-        if writer is not None:
-            writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
-            writer.add_scalar("Tokens/mean_N", mean_N, epoch)
-            if grad_abs_steps > 0:
-                writer.add_scalar("Affine/mean_abs_gx", float(grad_abs_sum[0] / grad_abs_steps), epoch)
-                writer.add_scalar("Affine/mean_abs_gy", float(grad_abs_sum[1] / grad_abs_steps), epoch)
-            writer.add_scalar("Tokens/std_N", std_N, epoch)
-            writer.add_scalar("Tokens/min_N", min_N, epoch)
-            writer.add_scalar("Tokens/max_N", max_N, epoch)
-            if counts.numel():
-                writer.add_histogram("Tokens/N_per_sample", counts, epoch)
-            writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
-            if val_loss is not None:
-                writer.add_scalar("Loss/val", val_loss, epoch)
-
-        if val_loss is not None and val_loss < best_val_loss:
-            best_val_loss = val_loss
-            if save_path:
-                saved = save_checkpoint(save_path, model, epoch=epoch, val_loss=val_loss)
-                print(f"  OK Saved best model to {saved.name}")
-
-        # Periodic checkpoint
-        if save_path and (epoch + 1) % 50 == 0:
-            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
-            save_checkpoint(save_path, model, optimizer, scheduler, epoch=epoch, checkpoint_name=checkpoint_name)
-
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
-
-    return train_loss_history, val_loss_history
-
-
-
-def _validate_on_learned_mesh(model, val_loader, device) -> float:
-    model.eval()
-    total = 0.0
-    n = 0
-    with torch.no_grad():
-        for batch in val_loader:
-            grids = batch["grids"].to(device)
-            targets = batch["targets"].to(device)
-            out = model(grids, indices=batch["indices"])
-            if model.affine_output:
-                Hd, Wd = targets.shape[1], targets.shape[2]
-                geom = precompute_affine_geometry(
-                    out["token_lists"], out["tokens_per_sample"], Hd, Wd)
-                dense_pred = tokens_to_grid_affine_torch(
-                    out["token_preds"], geom, Hd, Wd, model.output_channels)
-                total += nmse_loss(dense_pred, targets).item()
-            else:
-                packed_targets = average_targets_per_token(targets, out["token_lists"])
-                total += nmse_loss(out["token_preds"], packed_targets).item()
-            n += 1
-    model.train()
     return total / max(1, n)
 
 

@@ -104,41 +104,64 @@ def average_targets_per_token(targets: torch.Tensor, token_lists: List[List[Quad
     return torch.stack(rows, dim=0)
 
 @torch.no_grad()
-def evaluate_end_to_end(model, loader, device) -> Tuple[float, float]:
+def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, offset=0.0) -> Tuple[float, float]:
     """End-to-end sanity metric: scorer mesh -> frozen transformer -> dense NMSE.
 
-    Builds meshes with the current scorer, runs the full model, paints the token
-    predictions back to the dense grid and reports ``(dense_nmse, mean_N)``. This
-    is the one path that genuinely needs the whole model, so it lives outside the
-    scorer trainer and is called by the caller that owns the model.
+    Builds meshes with the scorer, packs the tokens, runs the transformer, paints
+    the token predictions back to the dense grid and reports ``(dense_nmse,
+    mean_N)``. This is the one path that needs both the scorer and the transformer
+    together, so it lives outside both trainers and is called by the caller that
+    owns them.
 
-    It is a diagnostic only — never backpropagated. Sets the model to ``eval``
-    and leaves it there; the scorer trainer re-asserts ``scorer.train()`` each
+    It is a diagnostic only — never backpropagated. Sets both modules to ``eval``
+    and leaves them there; the scorer trainer re-asserts ``scorer.train()`` each
     epoch.
+
+    Args:
+        scorer: Trained ``RefinementNet`` (produces the predicted depth map).
+        model: Transformer ``AdaptiveMeshAeroModel`` (consumes packed tokens).
+        loader: DataLoader yielding ``grids`` and dense ``targets``.
+        min_depth, max_depth, offset: Depth-guided mesh-builder parameters (must
+            match the scorer's training bounds).
     """
+    from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
+    from src.amr.quadtree_tokenizer import nodes_to_token_array
+
+    scorer.eval()
     model.eval()
     total_nmse, n = 0.0, 0
     tokens, samples = 0, 0
     for batch in loader:
         grids = batch["grids"].to(device)
         targets = batch["targets"].to(device)
-        out = model(grids)
+        H, W, C = grids.shape[1], grids.shape[2], grids.shape[3]
+
+        # Scorer depth map -> per-sample leaves -> packed tokens.
+        depth_maps = scorer(grids).squeeze(1).cpu().numpy()      # [B, H, W]
+        grids_np = grids.cpu().numpy()
+        token_lists, all_tokens, tokens_per_sample = [], [], []
+        for b in range(grids.shape[0]):
+            leaves = build_depth_guided_mesh(
+                data=grids_np[b], depth_map=depth_maps[b],
+                max_depth=max_depth, min_depth=min_depth, offset=offset)
+            token_lists.append(leaves)
+            all_tokens.append(torch.from_numpy(nodes_to_token_array(leaves, H, W, C)))
+            tokens_per_sample.append(len(leaves))
+
+        packed = torch.cat(all_tokens, dim=0).to(device)
+        out = model(packed, tokens_per_sample)
+
         if getattr(model, "affine_output", False):
-            geom = precompute_affine_geometry(
-                out["token_lists"], out["tokens_per_sample"],
-                grids.shape[1], grids.shape[2])
+            geom = precompute_affine_geometry(token_lists, tokens_per_sample, H, W)
             dense = tokens_to_grid_affine_torch(
-                out["token_preds"], geom, grids.shape[1], grids.shape[2],
-                model.output_channels)
+                out["token_preds"], geom, H, W, model.output_channels)
         else:
             dense = tokens_to_grid_torch(
-                out["token_preds"], out["token_lists"],
-                out["tokens_per_sample"], grids.shape[1], grids.shape[2],
-            )
+                out["token_preds"], token_lists, tokens_per_sample, H, W)
         total_nmse += nmse_loss(dense, targets).item()
         n += 1
-        tokens += sum(out["tokens_per_sample"])
-        samples += len(out["tokens_per_sample"])
+        tokens += sum(tokens_per_sample)
+        samples += len(tokens_per_sample)
     return total_nmse / max(1, n), tokens / max(1, samples)
 
 
