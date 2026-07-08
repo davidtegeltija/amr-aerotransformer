@@ -89,6 +89,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
         if refinement_criteria not in CRITERIA_REGISTRY:
             valid = ", ".join(sorted(CRITERIA_REGISTRY))
             raise KeyError(f"Unknown refinement_criteria {refinement_criteria!r}.\nAvailable options are: {valid}")
+        
         tokenizer = QuadtreeTokenizer(
             min_depth=min_depth,
             max_depth=max_depth,
@@ -221,8 +222,11 @@ def main(args=None):
     # Build Dataset
     # ----------------------------------------------------------------
     print("\n======== Building Dataset ========")
-    dataset_type = args.get("dataset")
     seed = args.get("seed", 42)
+    dataset_type = args.get("dataset")
+
+    if dataset_type not in ("aero_dataset", "cavity_dataset"):
+            raise SystemExit("Only 'aero_dataset' or 'cavity_dataset' are acceptable dataset types")
 
     if dataset_type == "aero_dataset" and args.get("input_file") is not None:
         print(f"Using data from {args.get('input_file')}")

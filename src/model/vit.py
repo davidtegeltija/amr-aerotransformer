@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.model.transformer import TransformerBlock, _make_block_diagonal_mask
+from src.model.transformer import TransformerBlock
 
 
 def pair(t):
@@ -56,7 +56,8 @@ class ViT(nn.Module):
         if pos_embedding == 'trainable':
             self.pos_embedding = nn.Parameter((1 / n_hidden) * torch.rand((1, self.nh * self.nw, n_hidden), dtype=torch.float))
         elif pos_embedding == 'sincos':
-            self.pos_embedding = posemb_sincos_2d(h=self.nh, w=self.nw, dim=n_hidden)
+            # Fixed, so a (non-persistent) buffer: moves with .to(device), stays out of checkpoints.
+            self.register_buffer("pos_embedding", posemb_sincos_2d(h=self.nh, w=self.nw, dim=n_hidden), persistent=False)
         else:
             raise KeyError(f"Unknown pos_embedding: {pos_embedding}")
 
@@ -66,7 +67,6 @@ class ViT(nn.Module):
                 n_heads=n_head,
                 d_ff=n_hidden * mlp_ratio,
                 dropout=dropout,
-                norm_first=True,
             )
             for _ in range(n_layers)
         ])
@@ -80,16 +80,14 @@ class ViT(nn.Module):
         img = img.reshape(B, C, self.nh, self.ph, self.nw, self.pw).permute(0, 2, 4, 3, 5, 1).reshape(B, self.nh * self.nw, self.ph * self.pw * C)
 
         fx = self.to_patch_embedding(img)                            # [B, N, D]
-        fx = fx + self.pos_embedding.to(fx.device, dtype=fx.dtype)   # [B, N, D]
+        fx = fx + self.pos_embedding                                 # [B, N, D]
 
-        N = self.nh * self.nw
-        fx = fx.reshape(B * N, -1)                                   # [B*N, D]
-        attn_mask = _make_block_diagonal_mask([N] * B, fx.device)    # [B*N, B*N]
-
+        # All sequences share the same length N, so plain batched attention
+        # (no mask) replaces the packed layout the AMR transformer needs for
+        # its variable-length sequences.
         for block in self.blocks:
-            fx = block(fx, attn_mask=attn_mask)                      # [B*N, D]
+            fx = block(fx)                                           # [B, N, D]
 
-        fx = fx.reshape(B, N, -1)
         fx = self.last_layer(fx)                                     # [B, N, ph*pw*out_dim]
         return fx.reshape(B, self.nh, self.nw, self.ph, self.pw, self.out_dim) \
                  .permute(0, 5, 1, 3, 2, 4) \

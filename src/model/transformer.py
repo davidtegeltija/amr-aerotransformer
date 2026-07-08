@@ -112,26 +112,25 @@ class TransformerBlock(nn.Module):
     def _attention_standard(
         self,
         x: torch.Tensor,
-        attn_mask: torch.Tensor,
+        attn_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Multi-head self-attention over the packed sequence."""
-        total, d = x.shape
-        qkv = self.qkv(x)  # [total, 3*d]
+        """Multi-head self-attention over a packed [total, d] or batched [B, N, d] sequence."""
+        qkv = self.qkv(x)  # [..., 3*d]
         q, k, v = qkv.chunk(3, dim=-1)
 
-        # Reshape to [h, total, hd] for SDPA
-        q = q.reshape(total, self.n_heads, self.head_dim).transpose(0, 1)
-        k = k.reshape(total, self.n_heads, self.head_dim).transpose(0, 1)
-        v = v.reshape(total, self.n_heads, self.head_dim).transpose(0, 1)
+        # Reshape to [..., h, N, hd] for SDPA (Scaled Dot-Product Attention)
+        q = q.reshape(*q.shape[:-1], self.n_heads, self.head_dim).transpose(-3, -2)
+        k = k.reshape(*k.shape[:-1], self.n_heads, self.head_dim).transpose(-3, -2)
+        v = v.reshape(*v.shape[:-1], self.n_heads, self.head_dim).transpose(-3, -2)
 
-        # torch SDPA broadcasts the mask across heads
-        attn_mask_3d = attn_mask.unsqueeze(0)  # [1, total, total]
+        # torch SDPA broadcasts the mask across heads; None means full attention
+        attn_mask_3d = attn_mask.unsqueeze(0) if attn_mask is not None else None
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask_3d,
             dropout_p=self.attn_dropout if self.training else 0.0,
-        )  # [h, total, hd]
-        out = out.transpose(0, 1).reshape(total, d)
+        )  # [..., h, N, hd]
+        out = out.transpose(-3, -2).reshape(x.shape)
         return self.out_proj(out)
 
     def forward(
@@ -139,9 +138,14 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Apply one pre-norm attention + FFN sublayer pair."""
-        assert attn_mask is not None, "Must provide attn_mask"
+        """Apply one pre-norm attention + FFN sublayer pair.
 
+        Args:
+            x:         Packed [total, d] sequence (with a block-diagonal mask) or
+                       batched [B, N, d] equal-length sequences (ViT baseline).
+            attn_mask: Additive attention mask; None means full attention within
+                       each sequence (only valid for the batched layout).
+        """
         x = x + self._attention_standard(self.norm1(x), attn_mask)
         x = x + self.ff(self.norm2(x))
 
