@@ -39,22 +39,7 @@ def _load_weights(module, checkpoint_file, strip_prefix=None):
 
 
 def create_model(args, checkpoint_file, dataset, input_channels=5, output_channels=3):
-    """Instantiate the transformer model and load weights from a checkpoint.
-
-    The scorer is no longer part of the model. For learned-mesh inference load a
-    scorer separately via ``create_scorer`` and pass it to ``predict_single``.
-
-    Args:
-        args: Arguments from a read YAML config (see configs/overfit.yaml).
-        checkpoint_file: Path to a transformer .pt checkpoint produced during training.
-        dataset: Dataset instance (used for the grid H, W to derive depth bounds).
-        input_channels: Number of input channels (including AoA/Mach added by the dataset).
-        output_channels: Number of predicted channels.
-
-    Returns:
-        Tuple of (model, args) where args is the parsed YAML config dict, with
-        ``min_depth`` / ``max_depth`` injected.
-    """
+    """Instantiate the transformer model and load weights from a checkpoint."""
     # Configs express bounds as patch sizes; convert once to integer depths (mirrors
     # main.py) and inject back into args so predict_single reuses the same values.
     H, W = dataset.H, dataset.W
@@ -94,20 +79,6 @@ def predict_single(model, args, sample):
     only consumes packed tokens:
       * deterministic -> QuadtreeTokenizer (physics AMR criterion)
       * learned       -> ``scorer`` depth map -> build_depth_guided_mesh
-
-    Args:
-        model: A loaded transformer ``AdaptiveMeshAeroModel`` in eval mode.
-        args: Parsed YAML config dict (refinement_mode + tokenizer/mesh settings).
-        sample: Dataset sample dict with keys 'input' [H, W, C] and 'target' [H, W, output_channels].
-
-    Returns:
-        Dict with keys:
-            input_grid:   [H, W, input_channels] input grid (numpy).
-            ground_truth: [H, W, output_channels] target grid (numpy).
-            prediction:   [H, W, output_channels] reconstructed flow field (numpy).
-            token_preds:  [N, output_channels] per-token predictions (tensor), or
-                          [N, output_channels, 3] = (value, gx, gy) when affine_output.
-            mesh:         List[QuadNode] leaves of the adaptive mesh.
     """
     input_grid = sample["input"]                  # [H, W, C] numpy
     H, W, C = input_grid.shape
