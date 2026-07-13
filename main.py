@@ -133,9 +133,6 @@ def train_model(args, model, train_loader, val_loader, device, writer):
         return train_vit(
             model, train_loader, val_loader, device,
             epochs=args.get("epochs"),
-            lr=args.get("lr"),
-            weight_decay=args.get("weight_decay"),
-            grad_clip=args.get("grad_clip"),
             writer=writer,
         )
 

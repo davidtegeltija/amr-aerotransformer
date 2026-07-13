@@ -30,25 +30,25 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
-import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.nn.utils import clip_grad_norm_
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.eval import evaluate
+from src.model.amr_model import AdaptiveMeshAeroModel
+from src.model.refinement_net import RefinementNet
+from src.model.vit import ViT
 from src.model.loss import nmse_loss, scorer_depth_loss
 from src.model.reconstruction import (
     precompute_affine_geometry,
     tokens_to_grid_affine_torch,
 )
-from src.model.refinement_net import RefinementNet
-from src.model.amr_model import AdaptiveMeshAeroModel
+from src.eval import evaluate_transformer, evaluate_scorer, evaluate_vit
 from src.utils.train_utils import save_checkpoint
 
 
@@ -86,7 +86,7 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
 def train_transformer(
     model: AdaptiveMeshAeroModel,
     train_loader: DataLoader,
-    val_loader: Optional[DataLoader],
+    val_loader: DataLoader,
     device: torch.device,
     *,
     epochs: int,
@@ -94,7 +94,7 @@ def train_transformer(
     warmup_steps: int = 4000,
     save_path: Optional[str] = "outputs/checkpoints/transformer.pt",
     writer: Optional[SummaryWriter] = None,
-) -> Tuple[List[float], List[Optional[float]]]:
+) -> Tuple[List[float], List[float]]:
     """Train the transformer on packed AMR tokens.
 
     The adaptive mesh, packed tokens and per-token targets are built upstream in
@@ -125,7 +125,7 @@ def train_transformer(
         t0 = time.time()
 
         with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
-            for step, batch in enumerate(tq_loader):
+            for batch in tq_loader:
                 packed_tokens  = batch["packed_tokens"].to(device)
                 packed_targets = batch["packed_targets"].to(device)
                 tokens_per_sample = batch["tokens_per_sample"]
@@ -140,21 +140,18 @@ def train_transformer(
                 if model.affine_output:
                     dense_targets = batch["targets"].to(device)
                     Hd, Wd = dense_targets.shape[1], dense_targets.shape[2]
-                    geom = precompute_affine_geometry(
-                        batch["token_lists"], tokens_per_sample, Hd, Wd)
-                    dense_pred = tokens_to_grid_affine_torch(
-                        out["token_preds"], geom, Hd, Wd, model.output_channels)
+                    geom = precompute_affine_geometry(batch["token_lists"], tokens_per_sample, Hd, Wd)
+                    dense_pred = tokens_to_grid_affine_torch(out["token_preds"], geom, Hd, Wd, model.output_channels)
                     loss = nmse_loss(dense_pred, dense_targets)
                     with torch.no_grad():
-                        grad_abs_sum += out["token_preds"][..., 1:].abs().mean(
-                            dim=(0, 1)).detach().cpu()
+                        grad_abs_sum += out["token_preds"][..., 1:].abs().mean(dim=(0, 1)).detach().cpu()
                         grad_abs_steps += 1
                 else:
                     loss = nmse_loss(out["token_preds"], packed_targets)
 
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
 
@@ -167,49 +164,51 @@ def train_transformer(
                 # Per-step scalars recover the signal tqdm drops under nohup.
                 if writer is not None:
                     writer.add_scalar("Loss/train_step", loss.item(), global_step)
-                    writer.add_scalar("LR", lr, global_step)
                     writer.add_scalar("Tokens/mean_N_step", batch_mean_tokens, global_step)
                 global_step += 1
 
-        avg_loss = epoch_loss / len(train_loader)
-        train_loss_history.append(avg_loss)
+        train_loss_history.append(epoch_loss / len(train_loader))
         epoch_mean = epoch_token_total / max(1, epoch_sample_count)
         elapsed = time.time() - t0
+            
+        # Validation
+        val_loss = evaluate_transformer(model, val_loader, device)
+        val_loss_history.append(val_loss)
 
+        # Affine probe: mean |gx|, |gy| over the epoch (empty in non-affine mode)
+        grad_str = ""
         if grad_abs_steps > 0:
             mean_gx, mean_gy = (grad_abs_sum / grad_abs_steps).tolist()
-            print(f"  [affine] mean|gx|={mean_gx:.4f}  mean|gy|={mean_gy:.4f}")
+            grad_str = f"  mean_gx={mean_gx:.4f}  mean_gy={mean_gy:.4f}"
 
+        # Log the metrics
+        tag = "transformer - affine" if model.affine_output else "transformer"
+        print(f"[{tag}] epoch {epoch:03d}/{epochs}"
+            f"  train_loss={train_loss_history[-1]:.6f}"
+            f"  val_loss={val_loss:.6f}"
+            f"  time={elapsed:.1f}s{grad_str}"
+        )
+
+        # Log the metrics for TensorBoard
         if writer is not None:
-            writer.add_scalar("Loss/train", avg_loss, epoch)
+            writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
+            writer.add_scalar("Loss/val", val_loss, epoch)
+            writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
             writer.add_scalar("Tokens/mean_N", epoch_mean, epoch)
             writer.add_scalar("Time/epoch_s", elapsed, epoch)
             if grad_abs_steps > 0:
                 writer.add_scalar("Affine/mean_abs_gx", mean_gx, epoch)
                 writer.add_scalar("Affine/mean_abs_gy", mean_gy, epoch)
 
-        # Validation
-        if val_loader is not None:
-            val_loss = evaluate(model, val_loader, device)
-            val_loss_history.append(val_loss)
-            print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  val_loss={val_loss:.6f}  mean_N={epoch_mean:.1f}  time={elapsed:.1f}s")
-            if writer is not None:
-                writer.add_scalar("Loss/val", val_loss, epoch)
+        # Save the best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            if save_path:
+                saved = save_checkpoint(save_path, model, epoch=epoch, val_loss=val_loss)
+                pad = " " * len(f"[{tag}] ")
+                print(f"{pad}Saved best model to {saved.name}")
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                if save_path:
-                    saved = save_checkpoint(save_path, model, val_loss=val_loss)
-                    print(f"  OK Saved best model to {saved.name}")
-        else:
-            print(f"Epoch {epoch:3d}/{epochs}  train_loss={avg_loss:.6f}  mean_N={epoch_mean:.1f}  time={elapsed:.1f}s")
-
-        # Periodic checkpoint
-        if save_path and epoch % 50 == 0:
-            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
-            save_checkpoint(save_path, model, optimizer, scheduler, checkpoint_name=checkpoint_name)
-
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.6f}")
+    print(f"\nTransformer training complete. Best val loss: {best_val_loss:.6f}")
 
     return train_loss_history, val_loss_history
 
@@ -221,7 +220,7 @@ def train_transformer(
 def train_scorer_supervised(
     scorer: RefinementNet,
     train_loader: DataLoader,
-    val_loader: Optional[DataLoader],
+    val_loader: DataLoader,
     device: torch.device,
     *,
     epochs: int,
@@ -233,7 +232,7 @@ def train_scorer_supervised(
     decision_temp: Optional[float] = None,
     save_path: Optional[str] = "outputs/checkpoints/scorer_supervised.pt",
     writer: Optional[SummaryWriter] = None,
-) -> Tuple[List[float], List[Optional[float]]]:
+) -> Tuple[List[float], List[float]]:
     """Train the RefinementNet scorer by supervised regression to the oracle.
 
     Forward is ``grid -> scorer -> d_pred``; the loss is ``scorer_depth_loss`` against
@@ -254,9 +253,8 @@ def train_scorer_supervised(
         decision_weight: Decision-consistency term weight (0 = off, default).
         decision_margin, decision_temp: Decision-term margin / smooth-max temp.
         save_path: Full checkpoint path (e.g. ``outputs/checkpoints/scorer_supervised.pt``).
-            ``save_checkpoint`` prepends the date to the filename. The best-val
-            checkpoint reuses this name; a periodic checkpoint (with optimizer/
-            scheduler) is written every 50 epochs. ``None`` disables checkpointing.
+            ``save_checkpoint`` prepends the date to the filename and is used for
+            the best-val checkpoint. ``None`` disables checkpointing.
 
     Returns:
         ``(train_loss_history, val_loss_history)``.
@@ -269,32 +267,24 @@ def train_scorer_supervised(
     best_val_loss = float("inf")
     interactive = sys.stderr.isatty()
     train_loss_history: List[float] = []
-    val_loss_history: List[Optional[float]] = []
+    val_loss_history: List[float] = []
 
-    reachable: Optional[int] = None
-
-    for epoch in range(epochs):
+    for epoch in range(1, epochs + 1):
         scorer.train()
         epoch_loss = 0.0
-        n_steps = 0
         t0 = time.time()
         # Per-depth pixel histograms (predicted vs oracle), accumulated over the
-        # epoch and reset each epoch. Built lazily once ``reachable`` is known.
-        # Vectorised via bincount on the rounded depth maps already in scope — no
-        # mesh build, no signature change. Reveals whether the scorer tracks the
-        # oracle's depth distribution or collapses to a single depth.
-        pred_depth_hist: Optional[torch.Tensor] = None
-        oracle_depth_hist: Optional[torch.Tensor] = None
+        # epoch and reset each epoch. Vectorised via bincount on the rounded depth
+        # maps already in scope — no mesh build, no signature change. Reveals
+        # whether the scorer tracks the oracle's depth distribution or collapses
+        # to a single depth.
+        pred_depth_hist = torch.zeros(max_depth + 1, dtype=torch.long, device=device)
+        oracle_depth_hist = torch.zeros(max_depth + 1, dtype=torch.long, device=device)
 
         with tqdm(train_loader, unit=" batch", leave=False, desc=f"Scorer Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for batch in tq_loader:
                 grids = batch["grids"].to(device)
                 oracle = batch["oracle_depth"].to(device)
-
-                if reachable is None:
-                    # max_depth is already the reachable depth (derived from the
-                    # patch sizes by patch_sizes_to_depth_bounds).
-                    reachable = max_depth
 
                 d_pred = scorer(grids)                           # [B, 1, H, W]
                 loss, comp = scorer_depth_loss(
@@ -302,7 +292,7 @@ def train_scorer_supervised(
                     tv_weight=tv_weight,
                     decision_weight=decision_weight,
                     min_depth=min_depth,
-                    max_depth=reachable,
+                    max_depth=max_depth,
                     margin=decision_margin,
                     decision_temp=decision_temp,
                 )
@@ -313,167 +303,117 @@ def train_scorer_supervised(
                 optimizer.step()
 
                 epoch_loss += comp["total"]
-                n_steps += 1
                 tq_loader.set_postfix(loss=f"{comp['total']:.4f}", reg=f"{comp['reg']:.4f}")
 
                 # Accumulate per-depth pixel counts (rounded, clamped to the
                 # reachable range) for both the prediction and the oracle target.
                 with torch.no_grad():
-                    if pred_depth_hist is None:
-                        pred_depth_hist = torch.zeros(reachable + 1, dtype=torch.long, device=device)
-                        oracle_depth_hist = torch.zeros(reachable + 1, dtype=torch.long, device=device)
-                    pr = d_pred.detach().float().round().clamp_(0, reachable).long().reshape(-1)
-                    orc = oracle.detach().float().round().clamp_(0, reachable).long().reshape(-1)
-                    pred_depth_hist += torch.bincount(pr, minlength=reachable + 1)
-                    oracle_depth_hist += torch.bincount(orc, minlength=reachable + 1)
+                    pr = d_pred.detach().float().round().clamp_(0, max_depth).long().reshape(-1)
+                    orc = oracle.detach().float().round().clamp_(0, max_depth).long().reshape(-1)
+                    pred_depth_hist += torch.bincount(pr, minlength=max_depth + 1)
+                    oracle_depth_hist += torch.bincount(orc, minlength=max_depth + 1)
 
         scheduler.step()
-        train_loss_history.append(epoch_loss / max(1, n_steps))
+        train_loss_history.append(epoch_loss / len(train_loader))
+        elapsed = time.time() - t0
 
-        # --- Supervised validation (cheap model selection) ---
-        val_loss = _validate_scorer_supervised(
+        # Validation
+        val_loss = evaluate_scorer(
             scorer, val_loader, device,
-            reachable=reachable, min_depth=min_depth, tv_weight=tv_weight,
+            max_depth=max_depth, min_depth=min_depth, tv_weight=tv_weight,
             decision_weight=decision_weight, decision_margin=decision_margin,
             decision_temp=decision_temp,
-        ) if val_loader else None
+        )
         val_loss_history.append(val_loss)
 
+        # Depth-distribution diagnostic (no mesh build, no signature change)
+        # tokens-per-depth-per-sample = frac_d * 4^d  (each depth-d leaf tiles
+        # H*W/4^d pixels); summing over depths gives an approximate mean_N
+        w4 = (4.0 ** torch.arange(max_depth + 1, device=device, dtype=torch.float64))
+        pf = pred_depth_hist.to(torch.float64)
+        of = oracle_depth_hist.to(torch.float64)
+        pred_frac = pf / pf.sum().clamp_(min=1.0)
+        oracle_frac = of / of.sum().clamp_(min=1.0)
+        pred_tokens_d = (pred_frac * w4).cpu()        # tokens at each depth, per sample
+        oracle_tokens_d = (oracle_frac * w4).cpu()
+        pred_mean_N = float(pred_tokens_d.sum())
+        oracle_mean_N = float(oracle_tokens_d.sum())
+
+        tok_str = " ".join(f"{t:.0f}" for t in pred_tokens_d.tolist())
+        depth_str = (f"  mean_N~{pred_mean_N:.0f} (oracle {oracle_mean_N:.0f})"
+                     f"  tokens/depth d0..d{max_depth}: {tok_str}")
+
+        # Log the metrics
+        tag = "scorer"
+        print(f"[{tag}] epoch {epoch:03d}/{epochs}"
+            f"  train_loss={train_loss_history[-1]:.6f}"
+            f"  val_loss={val_loss:.6f}"
+            f"  time={elapsed:.1f}s{depth_str}"
+        )
+
+        # Log the metrics for TensorBoard
         if writer is not None:
             writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
+            writer.add_scalar("Loss/val", val_loss, epoch)
             writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
-            if val_loss is not None:
-                writer.add_scalar("Loss/val", val_loss, epoch)
+            writer.add_scalar("Time/epoch_s", elapsed, epoch)
+            writer.add_scalar("Tokens/mean_N_pred", pred_mean_N, epoch)
+            writer.add_scalar("Tokens/mean_N_oracle", oracle_mean_N, epoch)
+            for d in range(max_depth + 1):
+                writer.add_scalar(f"TokensPerDepth/pred_d{d}", float(pred_tokens_d[d]), epoch)
+                writer.add_scalar(f"TokensPerDepth/oracle_d{d}", float(oracle_tokens_d[d]), epoch)
 
-        # --- Depth-distribution diagnostic (no mesh build, no signature change) ---
-        # tokens-per-depth-per-sample = frac_d * 4^d  (each depth-d leaf tiles
-        # H*W/4^d pixels); summing over depths gives an approximate mean_N. Exact
-        # for the tiling-consistent oracle; a proxy for the raw per-pixel d_pred.
-        depth_str = ""
-        if pred_depth_hist is not None:
-            w4 = (4.0 ** torch.arange(reachable + 1, device=device, dtype=torch.float64))
-            pf = pred_depth_hist.to(torch.float64)
-            of = oracle_depth_hist.to(torch.float64)
-            pred_frac = pf / pf.sum().clamp_(min=1.0)
-            oracle_frac = of / of.sum().clamp_(min=1.0)
-            pred_tokens_d = (pred_frac * w4).cpu()        # tokens at each depth, per sample
-            oracle_tokens_d = (oracle_frac * w4).cpu()
-            pred_mean_N = float(pred_tokens_d.sum())
-            oracle_mean_N = float(oracle_tokens_d.sum())
-
-            tok_str = " ".join(f"{t:.0f}" for t in pred_tokens_d.tolist())
-            depth_str = (f"  [mean_N~{pred_mean_N:.0f} (orc {oracle_mean_N:.0f})"
-                         f"  tokens/depth d0..d{reachable}: {tok_str}]")
-
-            if writer is not None:
-                writer.add_scalar("Tokens/mean_N_pred", pred_mean_N, epoch)
-                writer.add_scalar("Tokens/mean_N_oracle", oracle_mean_N, epoch)
-                for d in range(reachable + 1):
-                    writer.add_scalar(f"TokensPerDepth/pred_d{d}", float(pred_tokens_d[d]), epoch)
-                    writer.add_scalar(f"TokensPerDepth/oracle_d{d}", float(oracle_tokens_d[d]), epoch)
-
-        elapsed = time.time() - t0
-        print(f"[scorer] epoch {epoch:03d}/{epochs}  "
-              f"train={train_loss_history[-1]:.4f}"
-              + (f"  val={val_loss:.4f}" if val_loss is not None else "")
-              + f"  time={elapsed:.1f}s"
-              + depth_str)
-
-        if val_loss is not None and val_loss < best_val_loss:
+        # Save the best model
+        if val_loss < best_val_loss:
             best_val_loss = val_loss
             if save_path:
                 saved = save_checkpoint(save_path, scorer, epoch=epoch, val_loss=val_loss, prefix="scorer")
-                print(f"  OK Saved best scorer to {saved.name}")
-
-        # Periodic checkpoint
-        if save_path and (epoch + 1) % 50 == 0:
-            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
-            save_checkpoint(save_path, scorer, optimizer, scheduler, epoch=epoch, prefix="scorer", checkpoint_name=checkpoint_name)
+                pad = " " * len(f"[{tag}] ")
+                print(f"{pad}Saved best model to {saved.name}")
 
     print(f"\nScorer training complete. Best val loss: {best_val_loss:.6f}")
 
     return train_loss_history, val_loss_history
 
 
-@torch.no_grad()
-def _validate_scorer_supervised(
-    scorer, val_loader, device, *, reachable, min_depth, tv_weight,
-    decision_weight, decision_margin, decision_temp,
-) -> float:
-    """Mean supervised scorer loss over the val split."""
-    scorer.eval()
-    total, n = 0.0, 0
-    for batch in val_loader:
-        grids = batch["grids"].to(device)
-        oracle = batch["oracle_depth"].to(device)
-        d_pred = scorer(grids)
-        _, comp = scorer_depth_loss(
-            d_pred, oracle,
-            tv_weight=tv_weight, decision_weight=decision_weight,
-            min_depth=min_depth, max_depth=reachable,
-            margin=decision_margin, decision_temp=decision_temp,
-        )
-        total += comp["total"]
-        n += 1
-    scorer.train()
-    return total / max(1, n)
-
-
 # ---------------------------------------------------------------------------
 # ViT baseline training (dense prediction, NMSE only)
 # ---------------------------------------------------------------------------
-if TYPE_CHECKING:
-    from src.model.vit import ViT
 
 def train_vit(
-    model: "ViT",
+    model: ViT,
     train_loader: DataLoader,
-    val_loader: Optional[DataLoader],
+    val_loader: DataLoader,
     device: torch.device,
     *,
     epochs: int,
-    lr: float = 1e-4,
-    weight_decay: float = 1e-4,
-    grad_clip: float = 1.0,
     save_path: Optional[str] = "outputs/checkpoints/vit.pt",
     writer: Optional[SummaryWriter] = None,
-) -> Tuple[List[float], List[Optional[float]]]:
+) -> Tuple[List[float], List[float]]:
     """Train a ViT on dense [B, H, W, C] grids with NMSE loss only.
 
-    Args:
-        model: ViT instance (src.model.vit.ViT).
-        train_loader: DataLoader yielding {"grids": [B,H,W,C], "targets": [B,H,W,OC]}.
-        val_loader: Optional validation DataLoader (same batch dict shape).
-        device: torch device.
-        epochs: Number of training epochs.
-        lr: AdamW learning rate.
-        weight_decay: AdamW weight decay.
-        grad_clip: Max grad-norm for clipping.
-        save_path: Full checkpoint path (e.g. ``outputs/checkpoints/vit.pt``).
-            ``save_checkpoint`` prepends the date to the filename. The best-val
-            checkpoint reuses this name; a periodic checkpoint (with optimizer/
-            scheduler) is written every 50 epochs. ``None`` disables checkpointing.
-
-    Returns:
-        (train_loss_history, val_loss_history). val entries are None when
-        val_loader is None.
+    This is the non-adaptive baseline: batches come from the dense collate, so
+    there is no mesh, no packed tokens and no per-token weighting — the model
+    sees the full uniform grid and is scored on the dense field directly.
     """
     model = model.to(device)
-    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
-    best_val = float("inf")
-    train_hist: List[float] = []
-    val_hist: List[Optional[float]] = []
+    best_val_loss = float("inf")
     interactive = sys.stderr.isatty()
 
-    for epoch in range(epochs):
+    # Track loss history to see how the network behaves during training
+    train_loss_history = []
+    val_loss_history = []
+
+    for epoch in range(1, epochs + 1):
         model.train()
-        epoch_loss, n_steps = 0.0, 0
-        with tqdm(train_loader, leave=False,
-                  desc=f"ViT epoch {epoch}/{epochs}",
-                  disable=not interactive) as tq:
-            for batch in tq:
+        epoch_loss = 0.0
+        t0 = time.time()
+
+        with tqdm(train_loader, leave=False, desc=f"ViT epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
+            for batch in tq_loader:
                 grids   = batch["grids"].to(device).permute(0, 3, 1, 2).float()
                 targets = batch["targets"].to(device).permute(0, 3, 1, 2).float()
 
@@ -482,52 +422,43 @@ def train_vit(
 
                 optimizer.zero_grad()
                 loss.backward()
-                clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 epoch_loss += loss.item()
-                n_steps    += 1
         scheduler.step()
 
-        train_hist.append(epoch_loss / max(1, n_steps))
+        train_loss_history.append(epoch_loss / len(train_loader))
+        elapsed = time.time() - t0
 
-        val_loss = _validate_vit(model, val_loader, device) if val_loader else None
-        val_hist.append(val_loss)
+        # Validation
+        val_loss = evaluate_vit(model, val_loader, device)
+        val_loss_history.append(val_loss)
 
-        print(f"[vit] epoch {epoch:03d}/{epochs}  "
-              f"train={train_hist[-1]:.4f}"
-              + (f"  val={val_loss:.4f}" if val_loss is not None else ""))
+        # Log the metrics
+        tag = "vit"
+        print(f"[{tag}] epoch {epoch:03d}/{epochs}"
+            f"  train_loss={train_loss_history[-1]:.6f}"
+            f"  val_loss={val_loss:.6f}"
+            f"  time={elapsed:.1f}s"
+        )
 
+        # Log the metrics for TensorBoard
         if writer is not None:
-            writer.add_scalar("Loss/train", train_hist[-1], epoch)
+            writer.add_scalar("Loss/train", train_loss_history[-1], epoch)
+            writer.add_scalar("Loss/val", val_loss, epoch)
             writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
-            if val_loss is not None:
-                writer.add_scalar("Loss/val", val_loss, epoch)
+            writer.add_scalar("Time/epoch_s", elapsed, epoch)
 
-        if val_loss is not None and val_loss < best_val:
-            best_val = val_loss
+        # Save the best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             if save_path:
                 saved = save_checkpoint(save_path, model, epoch=epoch, val_loss=val_loss)
-                print(f"  OK Saved best model to {saved.name}")
+                pad = " " * len(f"[{tag}] ")
+                print(f"{pad}Saved best model to {saved.name}")
 
-        # Periodic checkpoint
-        if save_path and (epoch + 1) % 50 == 0:
-            checkpoint_name = f"checkpoint_epoch{epoch:04d}.pt"
-            save_checkpoint(save_path, model, optimizer, scheduler, epoch=epoch, checkpoint_name=checkpoint_name)
+    print(f"\nViT training complete. Best val loss: {best_val_loss:.6f}")
 
-    print(f"\nViT training complete. Best val loss: {best_val:.6f}")
+    return train_loss_history, val_loss_history
 
-    return train_hist, val_hist
-
-
-def _validate_vit(model, val_loader, device) -> float:
-    model.eval()
-    total, n = 0.0, 0
-    with torch.no_grad():
-        for batch in val_loader:
-            grids   = batch["grids"].to(device).permute(0, 3, 1, 2).float()
-            targets = batch["targets"].to(device).permute(0, 3, 1, 2).float()
-            total += nmse_loss(model(grids), targets, channel_dim=1).item()
-            n += 1
-    model.train()
-    return total / max(1, n)

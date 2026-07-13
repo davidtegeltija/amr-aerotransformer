@@ -15,14 +15,11 @@ from src.amr.quadtree import QuadNode
 from src.utils.visualization_utils import save_plot
 
 
-def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None, val_loss=None, prefix="", checkpoint_name=None):
+def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None, val_loss=None, prefix=""):
     """Save model, optimizer, and scheduler at their current state.
 
     Args:
         save_path: Full checkpoint path (outputs/checkpoints/vit.pt)
-        checkpoint_name: Optional filename (checkpoint_epoch0050.pt)
-            that overrides the filename in ``save_path`` while keeping its parent
-            directory. Used for periodic checkpoints.
         prefix: Optional string prepended to every key of ``model.state_dict()``.
             Use ``"scorer."`` to save a bare submodule (e.g. ``RefinementNet``)
             so its keys namespace into the parent ``AdaptiveMeshAeroModel`` and
@@ -33,8 +30,7 @@ def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None
     """
     timestamp = datetime.now().strftime("%Y-%m-%d")
     save_path = Path(save_path)
-    name = checkpoint_name if checkpoint_name is not None else save_path.name
-    save_path = save_path.with_name(f"{timestamp}_{name}")
+    save_path = save_path.with_name(f"{timestamp}_{save_path.name}")
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     state = model.state_dict() if model else None
