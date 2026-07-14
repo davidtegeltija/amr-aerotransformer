@@ -1,5 +1,4 @@
 import os
-import random
 import sys
 
 import numpy as np
@@ -9,8 +8,10 @@ import yaml
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.data.cavity_dataset import CavityDataset
 from src.data.dataset import AeroDataset
 from src.model.vit import ViT
+from src.utils.data_utils import test_row_indices
 from src.utils.prediction_visualization import plot_flow_comparison
 
 
@@ -64,17 +65,28 @@ if __name__ == "__main__":
     with open(config_file, "r") as f:
         args = yaml.safe_load(f)
 
-    dataset = AeroDataset(
-        input_path=args.get("input_file"),
-        target_path=args.get("target_file"),
-        index_path=args.get("index_file"),
-    )
+    # The config's 'dataset' key picks the task: steady-state flow from geometry
+    # (aero) or the next frame from the current one (cavity). Both emit the same
+    # sample contract, so everything downstream is unchanged.
+    if args.get("dataset") == "cavity_dataset":
+        dataset = CavityDataset(input_path=args.get("input_file"))
+    else:
+        dataset = AeroDataset(
+            input_path=args.get("input_file"),
+            target_path=args.get("target_file"),
+            index_path=args.get("index_file"),
+        )
 
     model = create_model(args, checkpoint_file, dataset,
                          input_channels=dataset.input_channels,
                          output_channels=dataset.output_channels)
 
-    sample_index = random.randint(0, dataset.__len__() - 1)
+    # Predict on the held-out test split, replayed from the config, so the plots
+    # show a geometry (or cavity case) the model never trained on. The last test
+    # row is the final frame of its case, where the flow has fully developed.
+    # Early frames are near rest and nearly featureless.
+    test_idx = test_row_indices(dataset, args.get("dataset"), args.get("val_split"), args.get("seed", 42))
+    sample_index = test_idx[-1]
     sample = dataset[sample_index]
 
     result = predict_single(model, sample)

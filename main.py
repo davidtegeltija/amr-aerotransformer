@@ -59,19 +59,21 @@ def load_state_dict_partial(module, path, device, strip_prefix=None):
 
 
 def split_by_group_id(dataset: Dataset, group_ids, val_split: float, seed: int, group_name: str):
-    """Split a dataset into disjoint train/val subsets by group id (geometry or case)."""
+    """Split a dataset into disjoint train/val/test subsets by group id (geometry or case)."""
     try:
-        train_idx, val_idx = geometry_disjoint_split(group_ids, val_split, seed)
-        train_dataset, val_dataset = Subset(dataset, train_idx), Subset(dataset, val_idx)
+        train_idx, val_idx, test_idx = geometry_disjoint_split(group_ids, val_split, seed)
+        train_dataset = Subset(dataset, train_idx)
+        val_dataset = Subset(dataset, val_idx)
+        test_dataset = Subset(dataset, test_idx)
         print(f"{group_name}-disjoint split (seed={seed}): "
-              f"{len(train_idx)} train / {len(val_idx)} val")
-        return train_dataset, val_dataset
+              f"{len(train_idx)} train / {len(val_idx)} val / {len(test_idx)} test")
+        return train_dataset, val_dataset, test_dataset
     except ValueError as e:
         print(f"WARNING: {e}")
         print("Falling back to validating on the full training set. This is an "
               "overfit sanity check only — val_loss is NOT a generalization metric "
               f"when train and val share a {group_name.lower()}.")
-        return dataset, dataset
+        return dataset, dataset, dataset
 
 
 def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, device: torch.device):
@@ -231,7 +233,7 @@ def main(args=None):
         # Split by geometry, not by row. Each geometry spans many rows (one per
         # operating condition); a row-level split leaks the same wing into both
         # train and val, so val_loss measures interpolation, not generalization.
-        train_dataset, val_dataset = split_by_group_id(dataset, dataset.geometry_ids(), args.get("val_split"), seed, "Geometry")
+        train_dataset, val_dataset, _ = split_by_group_id(dataset, dataset.geometry_ids(), args.get("val_split"), seed, "Geometry")
 
     elif dataset_type == "cavity_dataset" and args.get("input_file") is not None:
         print(f"Using cavity next-step data from {args.get('input_file')}")
@@ -239,7 +241,7 @@ def main(args=None):
         # Split by case, not by pair. Consecutive frames of one simulation are
         # highly correlated; a pair-level split leaks a case into both train and
         # val, so val_loss would measure interpolation, not generalization.
-        train_dataset, val_dataset = split_by_group_id(dataset, dataset.case_ids(), args.get("val_split"), seed, "Case")
+        train_dataset, val_dataset, _ = split_by_group_id(dataset, dataset.case_ids(), args.get("val_split"), seed, "Case")
 
     else:
         print("No input and target data provided -> using synthetic dataset.")
