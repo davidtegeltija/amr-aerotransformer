@@ -64,7 +64,7 @@ Checkpoints are written under `outputs/checkpoints/` (`phase1_scorer.pt`, `phase
 
 ## Monitoring with TensorBoard
 
-Every run writes scalar metrics (per-epoch train/val loss, learning rate, mean token count `mean_N`) plus the resolved config under `runs/<config-name>_<timestamp>/`. The deterministic loop also logs per-step loss/LR, recovering the step-level signal that `tqdm` drops under `nohup`.
+Every run writes scalar metrics (per-epoch train/val loss, learning rate, mean token count `mean_N`) plus the resolved config under `outputs/logs/<timestamp>_<config-name>/`. The deterministic loop also logs per-step loss/LR, recovering the step-level signal that `tqdm` drops under `nohup`.
 
 `tensorboard` is included in `requirements.txt`. Note the `setuptools<81` pin there:
 TensorBoard 2.20 imports `pkg_resources`, which newer setuptools removes — without the
@@ -75,7 +75,7 @@ pin TensorBoard fails to launch.
 From the project root, with the virtual environment active:
 
 ```console
-tensorboard --logdir runs
+tensorboard --logdir outputs/logs
 ```
 
 then open <http://localhost:6006> in a browser.

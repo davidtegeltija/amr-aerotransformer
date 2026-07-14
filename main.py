@@ -211,11 +211,11 @@ def main(args=None):
     # TensorBoard writer (one run dir per config + timestamp)
     # ----------------------------------------------------------------
     config_name = Path(cli.config).stem
-    run_name = f"{config_name}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    log_dir = Path("runs") / run_name
+    run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}_{config_name}"
+    log_dir = Path("outputs/logs") / run_name
     writer = SummaryWriter(log_dir=str(log_dir))
     writer.add_text("config", f"```yaml\n{yaml.safe_dump(args, sort_keys=False)}```", 0)
-    print(f"TensorBoard logging to {log_dir}  (view: tensorboard --logdir runs)")
+    print(f"TensorBoard logging to {log_dir}  (view: tensorboard --logdir outputs/logs)")
 
     # ----------------------------------------------------------------
     # Build Dataset

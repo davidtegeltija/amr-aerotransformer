@@ -22,7 +22,7 @@ def save_plot(save_path: str | Path, figure: Figure, dpi: int = 150, use_date_su
 
     # Add a current date subfolder for better organization
     if use_date_subfolder:
-        subfolder = datetime.now().strftime("%d-%m-%Y")
+        subfolder = datetime.now().strftime("%Y-%m-%d")
         save_path = save_path.parent / subfolder / save_path.name
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
