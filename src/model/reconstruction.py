@@ -112,11 +112,9 @@ def precompute_affine_geometry(
             each divided by the owning leaf's normalised size.
 
     Note:
-        The learned mesh tiles the grid exactly, so every pixel has an owner. The
-        deterministic tokenizer's ``min_depth`` filter can drop coarse leaves and
-        leave holes; any such unowned pixel is assigned to the nearest leaf centre
-        so the dense grid is fully defined. The fallback is a no-op when the leaves
-        already tile.
+        Both mesh builders tile the grid exactly, so every pixel has an owner and
+        the nearest-leaf-centre fallback below is a no-op. It is kept as a safety
+        net so the dense grid stays fully defined if a leaf list ever has holes.
     """
     B = len(token_lists)
     owners = np.full((B, H, W), -1, dtype=np.int64)
@@ -147,8 +145,8 @@ def precompute_affine_geometry(
             dxdy[b, r0:r1, c0:c1, 0] = (xs[c0:c1][None, :] - x_c) / size
             dxdy[b, r0:r1, c0:c1, 1] = (ys[r0:r1][:, None] - y_c) / size
 
-        # Fallback: assign any unowned pixel (deterministic min_depth holes) to
-        # the nearest leaf centre. No-op when the leaves already tile.
+        # Safety net: assign any unowned pixel to the nearest leaf centre.
+        # No-op when the leaves tile the grid (both builders guarantee this).
         holes = np.argwhere(owners[b] < 0)
         if holes.size:
             px = xs[holes[:, 1]]                          # [M] normalised x

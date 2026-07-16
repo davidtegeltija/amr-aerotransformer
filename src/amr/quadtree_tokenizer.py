@@ -91,14 +91,9 @@ class QuadtreeTokenizer:
         node_list: List[QuadNode] = build_adaptive_mesh(
             grid,
             max_depth=self.max_depth,
+            min_depth=self.min_depth,
             refinement_criteria=self.refinement_criteria,
         )
-
-        # Discard patches from shallower levels
-        if self.min_depth > 0:
-            filtered = [t for t in node_list if t.depth >= self.min_depth]
-            # Guard against empty result on very small grids
-            node_list = filtered if filtered else node_list
 
         token_array = nodes_to_token_array(node_list, H, W, C)
         return token_array, node_list

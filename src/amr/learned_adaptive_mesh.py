@@ -114,8 +114,9 @@ def _build_node_depth(
     region = data[r0:r1, c0:c1, :]
 
     if region.size == 0:
+        # Zero-area cell: not marked as leaf, so collect_leaves drops it
+        # (a degenerate token would yield NaN per-token targets downstream).
         node.features = np.zeros(data.shape[2], dtype=data.dtype)
-        node.is_leaf = True
         return
 
     node.features = region.mean(axis=(0, 1))
