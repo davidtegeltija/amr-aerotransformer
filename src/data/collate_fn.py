@@ -27,8 +27,8 @@ class DeterministicCollateFn:
     Picklable collate callable for DataLoader with num_workers > 0.
  
     For each sample in the batch, tokenizes the input grid on the CPU worker,
-    then concatenates all token sequences into a single packed tensor
-    (sequence packing strategy - no padding, no wasted compute).
+    then concatenates all token sequences into a single packed tensor (the
+    transformer pads to the per-batch max internally, around its encoder only).
  
     Must be a top-level class (not a closure) to be picklable by
     Python's multiprocessing.

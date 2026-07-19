@@ -15,16 +15,23 @@ Architecture:
                      a per-token affine (value + 2D gradient) field decoded into a
                      linear ramp across each cell by tokens_to_grid_affine_torch.
 
-Batching strategy (sequence packing):
-    Instead of padding every sequence to the same length, the token sequences
-    of all samples in a batch are concatenated into a single long sequence:
+Batching strategy (pad to per-batch max around the encoder):
+    The model boundary stays packed: all samples' token sequences arrive
+    concatenated into a single long sequence
 
         packed = [sample_0_tokens | sample_1_tokens | ... | sample_B_tokens]
 
-    A block-diagonal additive attention mask (0 / -inf) prevents cross-sample
-    attention. This follows the strategy used in NaViT (Dehghani et al., 2023)
-    and APT (Choudhury et al., 2025). Attention is computed with
-    torch.nn.functional.scaled_dot_product_attention.
+    and the embeddings and prediction head run on this packed [total_N, ...]
+    layout. Only around the encoder stack are the per-sample embedding
+    sequences padded to [B, N_max, d_model] and attended with a boolean
+    key-padding mask
+    (True = real token), computed by torch.nn.functional.
+    scaled_dot_product_attention; pad rows are dropped again before the head.
+    This replaces the earlier NaViT/APT-style packed layout with a dense
+    block-diagonal additive mask, whose [total_N, total_N] float mask cost
+    (sum of all lengths, squared) dominated compute and memory and forced the
+    slow SDPA math backend on Pascal-era GPUs; a boolean broadcast key-padding
+    mask costs B*N_max bytes and computes the same function.
 """
 
 from __future__ import annotations
@@ -34,49 +41,46 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 
 
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
 
-def _make_block_diagonal_mask(tokens_per_sample: List[int], device: torch.device) -> torch.Tensor:
-    """Build an additive block-diagonal attention mask for a packed sequence.
+def _make_key_padding_mask(tokens_per_sample: List[int], n_max: int, device: torch.device) -> torch.Tensor:
+    """Build a boolean validity mask for a padded [B, n_max, d] batch.
 
-    Within-sample positions get 0.0 (attend); cross-sample positions get -inf
-    (masked out), matching the additive mask convention of
-    torch.nn.functional.scaled_dot_product_attention.
+    True marks real tokens, False marks padding, matching the boolean mask
+    convention of torch.nn.functional.scaled_dot_product_attention (True =
+    take part in attention).
 
     Args:
-        tokens_per_sample: Per-sample token counts in the packed sequence.
-        device:      Device on which to allocate the mask.
+        tokens_per_sample: Per-sample token counts.
+        n_max: Padded sequence length (max of tokens_per_sample).
+        device: Device on which to allocate the mask.
 
     Returns:
-        Float tensor of shape [total_len, total_len] with values in {0.0, -inf}.
+        Bool tensor of shape [B, n_max]; True = real token, False = pad.
     """
-    total = sum(tokens_per_sample)
-    mask = torch.full((total, total), float('-inf'), device=device)
-    offset = 0
-    for N in tokens_per_sample:
-        mask[offset:offset + N, offset:offset + N] = 0.0
-        offset += N
-    return mask
+    lengths = torch.tensor(tokens_per_sample, device=device)
+    return torch.arange(n_max, device=device)[None, :] < lengths[:, None]
 
 
 # ---------------------------------------------------------------------------
-# Packed-sequence Transformer Block
+# Transformer Block
 # ---------------------------------------------------------------------------
 
 class TransformerBlock(nn.Module):
-    """Pre-norm Transformer encoder layer for a packed token sequence.
+    """Pre-norm Transformer encoder layer for a batched [B, N, d] sequence.
 
     The forward pass is the standard pre-norm formulation:
         x = x + Attn(LayerNorm(x))
         x = x + FFN(LayerNorm(x))
 
     Attention is computed via torch.nn.functional.scaled_dot_product_attention
-    with a block-diagonal additive mask that prevents cross-sample attention
-    in the packed batch.
+    with an optional boolean key-padding mask that keeps real tokens from
+    attending to pad slots in a ragged batch.
     """
 
     def __init__(
@@ -114,7 +118,11 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Multi-head self-attention over a packed [total, d] or batched [B, N, d] sequence."""
+        """Multi-head self-attention over a batched [B, N, d] sequence.
+
+        attn_mask is a boolean key-padding mask broadcastable to [B, h, N, N]
+        (True = attend); None means full attention.
+        """
         qkv = self.qkv(x)  # [..., 3*d]
         q, k, v = qkv.chunk(3, dim=-1)
 
@@ -123,11 +131,11 @@ class TransformerBlock(nn.Module):
         k = k.reshape(*k.shape[:-1], self.n_heads, self.head_dim).transpose(-3, -2)
         v = v.reshape(*v.shape[:-1], self.n_heads, self.head_dim).transpose(-3, -2)
 
-        # torch SDPA broadcasts the mask across heads; None means full attention
-        attn_mask_3d = attn_mask.unsqueeze(0) if attn_mask is not None else None
+        # Boolean [B, 1, 1, N] key-padding mask (True = attend), broadcast over
+        # heads and query positions by SDPA; None means full attention.
         out = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attn_mask_3d,
+            attn_mask=attn_mask,
             dropout_p=self.attn_dropout if self.training else 0.0,
         )  # [..., h, N, hd]
         out = out.transpose(-3, -2).reshape(x.shape)
@@ -141,10 +149,11 @@ class TransformerBlock(nn.Module):
         """Apply one pre-norm attention + FFN sublayer pair.
 
         Args:
-            x:         Packed [total, d] sequence (with a block-diagonal mask) or
-                       batched [B, N, d] equal-length sequences (ViT baseline).
-            attn_mask: Additive attention mask; None means full attention within
-                       each sequence (only valid for the batched layout).
+            x:         Batched [B, N, d] sequences (padded AMR batch or ViT
+                       baseline).
+            attn_mask: Boolean key-padding mask broadcastable to [B, h, N, N]
+                       (True = attend); None means full attention within each
+                       sequence.
         """
         x = x + self._attention_standard(self.norm1(x), attn_mask)
         x = x + self.ff(self.norm2(x))
@@ -296,12 +305,30 @@ class AeroTransformer(nn.Module):
         pos_emb = self.pos_embedding(self.embedd_position(positional_channels, self.pos_freqs)) # [total_N, d_model]
         x = self.input_norm(tok_emb + pos_emb)   # [total_N, d_model]
 
-        # Prepare attention infrastructure
-        attn_mask  = _make_block_diagonal_mask(tokens_per_sample, device)
+        # Pad the per-sample embeddings to [B, N_max, d_model] and attend with a
+        # boolean key-padding mask: real tokens never see pad keys, so this is
+        # mathematically identical to per-sample (block-diagonal) attention at
+        # B*N_max^2 instead of (sum N)^2 cost. Embeddings above and the head
+        # below stay on the packed layout, so pad slots never touch them.
+        # Split packed [total_N, d_model] into B tensors of shape [N_b, d_model],
+        # one per sample (N_b = tokens_per_sample[b]).
+        per_sample_embeddings = list(torch.split(x, tokens_per_sample, dim=0))
+        x = pad_sequence(per_sample_embeddings, batch_first=True)  # [B, N_max, d_model]
+        n_max = x.shape[1]
+        valid = _make_key_padding_mask(tokens_per_sample, n_max, device)   # [B, N_max]
+        # Equal-length batches (incl. single-sample inference) need no mask at
+        # all, which keeps them eligible for the fastest SDPA path.
+        ragged = min(tokens_per_sample) < n_max
+        attn_mask = valid[:, None, None, :] if ragged else None            # [B, 1, 1, N_max]
 
         # Transformer encoder
         for layer in self.layers:
             x = layer(x, attn_mask=attn_mask)
+
+        # Drop pad rows -> back to packed [total_N, d_model]; row order is
+        # sample 0's tokens, then sample 1's, ..., identical to the input
+        # packing, so downstream packed indexing (losses, owner maps) is unchanged.
+        x = x[valid] if ragged else x.reshape(-1, self.d_model)
         x = self.final_norm(x)
 
         # Per-token predictions

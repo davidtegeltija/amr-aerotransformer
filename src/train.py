@@ -5,9 +5,11 @@ Training pipeline for the Adaptive Mesh CFD model.
 
 Key design decisions
 --------------------
-1. **Sequence packing** (APT / NaViT style): instead of padding variable-
-   length token sequences with zeros, we concatenate all tokens in a batch
-   into a single packed tensor and use a block-diagonal attention mask.
+1. **Packed batch boundary, padded attention**: the collate concatenates all
+   tokens in a batch into a single packed tensor; inside the transformer the
+   per-sample embedding sequences are padded to the per-batch max length and attended
+   with a boolean key-padding mask (cost B*N_max^2 instead of the dense
+   block-diagonal mask's (sum N)^2), then unpadded back to the packed layout.
 
 2. **Warmup LR schedule** (AMR-Transformer style):
        lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t * warmup^{-1.5})
