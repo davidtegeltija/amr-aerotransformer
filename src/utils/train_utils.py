@@ -121,7 +121,7 @@ def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, 
             match the scorer's training bounds).
     """
     from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
-    from src.amr.quadtree_tokenizer import nodes_to_token_array
+    from src.amr.quadtree import nodes_to_token_array
 
     scorer.eval()
     model.eval()

@@ -23,12 +23,13 @@ mesh_statistics(mesh) -> dict
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from functools import partial
+from typing import Dict, List, Optional
 
 import numpy as np
 
 from src.amr.refinement_criteria import GEOMETRY_ONLY_COMBINED_CONFIG, RefinementCriteria
-from src.amr.quadtree import QuadNode, collect_leaves
+from src.amr.quadtree import QuadNode, build_tree, collect_leaves
 
 
 # ---------------------------------------------------------------------------
@@ -37,9 +38,10 @@ from src.amr.quadtree import QuadNode, collect_leaves
 
 def build_adaptive_mesh(
     data: np.ndarray,
+    refinement_criteria: RefinementCriteria,
+    *,
     max_depth: int = 6,
-    min_depth: int = 0,
-    refinement_criteria: Optional[RefinementCriteria] = None,
+    min_depth: int = 1,
     uniform_cell_size: Optional[int] = None,
 ) -> List[QuadNode]:
     """
@@ -71,8 +73,6 @@ def build_adaptive_mesh(
     List[QuadNode]
         Flat list of leaf nodes representing the adaptive mesh.
     """
-    if refinement_criteria is None:
-        refinement_criteria = GEOMETRY_ONLY_COMBINED_CONFIG
 
     # Input validation and layout normalisation
     if data.ndim == 2:
@@ -91,11 +91,17 @@ def build_adaptive_mesh(
     if uniform_cell_size is not None:
         return _build_uniform_mesh(data, uniform_cell_size)
 
-    # Build the quadtree starting with the whole field
+    # Build the quadtree starting with the whole field. partial binds the
+    # per-build config, leaving the (node) predicate build_tree expects.
     root = QuadNode(bbox=(0, 0, H, W), depth=0)
-    _build_node(data=data, node=root, max_depth=max_depth, min_depth=min_depth,
-                refinement_criteria=refinement_criteria)
-
+    should_subdivide = partial(
+        _should_subdivide,
+        data=data,
+        refinement_criteria=refinement_criteria,
+        min_depth=min_depth,
+        max_depth=max_depth,
+    )
+    build_tree(data, root, should_subdivide)
     return collect_leaves(root)
 
 
@@ -143,73 +149,24 @@ def _build_uniform_mesh(data: np.ndarray, cell_size: int) -> List[QuadNode]:
 
 
 # ---------------------------------------------------------------------------
-# Core recursive builder
-# ---------------------------------------------------------------------------
-
-def _build_node(
-    data: np.ndarray,
-    node: QuadNode,
-    max_depth: int,
-    min_depth: int,
-    refinement_criteria: RefinementCriteria,
-) -> None:
-    """
-    Recursively process a single QuadNode.
-
-    Steps
-    -----
-    1. Extract the data region for this cell.
-    2. Compute mean features for storage.
-    3. Compute geometry and physics metrics.
-    4. Decide whether to subdivide.
-    5. If subdividing: create children and recurse.
-    """
-    # 1. Extract region data
-    region = _extract_region(data, node.bbox)
-
-    if region.size == 0:
-        # Zero-area cell: not marked as leaf, so collect_leaves drops it
-        # (a degenerate token would yield NaN per-token targets downstream).
-        node.features = np.zeros(data.shape[2])
-        return
-
-    # 2. Compute per-channel mean features (Storage AVG step, Fig. 2 of AMR-Transformer)
-    node.features = region.mean(axis=(0, 1))  # (C,)
-
-    # 3. Compute only the metrics whose thresholds are enabled for the x, y, z channels
-    metrics = refinement_criteria.compute_enabled_metrics(region[:, :, :3])
-    node.metrics = metrics
-
-    # 4. Subdivide into four children and recurse, or mark as leaf
-    if _should_subdivide(
-        refinement_criteria=refinement_criteria,
-        metrics=metrics,
-        depth=node.depth,
-        min_depth=min_depth,
-        max_depth=max_depth,
-    ):
-        for child in node.subdivide(depth=node.depth + 1):
-            _build_node(data=data, node=child, max_depth=max_depth, min_depth=min_depth,
-                        refinement_criteria=refinement_criteria)
-    else:
-        node.is_leaf = True
-
-
-# ---------------------------------------------------------------------------
 # Subdivision decision
 # ---------------------------------------------------------------------------
 
 def _should_subdivide(
+    node: QuadNode,
+    *,
+    data: np.ndarray,
     refinement_criteria: RefinementCriteria,
-    metrics: Dict[str, float],
-    depth: int,
     min_depth: int,
     max_depth: int,
 ) -> bool:
     """
-    Criteria-based subdivision test for a single cell.
+    Criteria-based subdivision test for a single cell (the ``build_tree``
+    predicate; ``functools.partial`` binds the field, criteria and depth bounds).
 
-    Returns True iff the cell should subdivide:
+    Computes only the metrics whose thresholds are enabled, for the x, y, z
+    channels (Storage AVG step, Fig. 2 of AMR-Transformer), stores them on the
+    node for inspection, then returns True iff the cell should subdivide:
       * forced stop when the cell is at ``max_depth``;
       * forced split below ``min_depth``;
       * otherwise OR-logic: subdivide iff any enabled metric exceeds its
@@ -218,9 +175,9 @@ def _should_subdivide(
 
     Parameters
     ----------
+    node : QuadNode  candidate cell (``node.metrics`` is populated here)
+    data : np.ndarray  (H, W, C) field; the cell region is sliced by node.bbox
     refinement_criteria  : RefinementCriteria thresholds and scaling flags
-    metrics : dict  pre-computed metrics for the candidate cell
-    depth : int  current depth of the candidate cell
     min_depth : int  depth floor (cells shallower than this always subdivide)
     max_depth : int  hard depth cap (cells at this depth never subdivide)
 
@@ -228,6 +185,11 @@ def _should_subdivide(
     -------
     bool  True -> subdivide this cell.
     """
+    region = data[node.r0:node.r1, node.c0:node.c1, :]
+    metrics = refinement_criteria.compute_enabled_metrics(region[:, :, :3])
+    node.metrics = metrics
+
+    depth = node.depth
     if depth >= max_depth:
         return False
     if depth < min_depth:
@@ -236,23 +198,6 @@ def _should_subdivide(
         if metrics.get(metric_name, 0.0) > threshold:
             return True
     return False
-
-
-def _extract_region(data: np.ndarray, bbox: Tuple[int, int, int, int]) -> np.ndarray:
-    """
-    Crop a bounding box from a [H, W, C] array.
-
-    Parameters
-    ----------
-    data : (H, W, C)
-    bbox : (r0, c0, r1, c1)
-
-    Returns
-    -------
-    np.ndarray  shape (r1-r0, c1-c0, C)
-    """
-    r0, c0, r1, c1 = bbox
-    return data[r0:r1, c0:c1, :]
 
 
 # ---------------------------------------------------------------------------

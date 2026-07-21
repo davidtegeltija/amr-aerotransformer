@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
-from src.amr.quadtree_tokenizer import QuadtreeTokenizer
 from src.amr.oracle_depth import calibrate_global_tolerance
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn, VitCollateFn
 from src.data.dataset import AeroDataset
@@ -92,12 +91,11 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
             valid = ", ".join(sorted(CRITERIA_REGISTRY))
             raise KeyError(f"Unknown refinement_criteria {refinement_criteria!r}.\nAvailable options are: {valid}")
         
-        tokenizer = QuadtreeTokenizer(
+        return DeterministicCollateFn(
+            refinement_criteria=CRITERIA_REGISTRY[refinement_criteria],
             min_depth=min_depth,
             max_depth=max_depth,
-            refinement_criteria=CRITERIA_REGISTRY[refinement_criteria],
         )
-        return DeterministicCollateFn(tokenizer)
 
     # Learned-scorer training: oracle depth targets from a calibrated tolerance.
     if args.get("refinement_mode") == "learned" and args.get("learned_training_mode") == "scorer":

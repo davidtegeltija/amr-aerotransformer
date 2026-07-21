@@ -15,13 +15,9 @@ Coordinate convention (row-major, matching numpy/image layout):
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 import numpy as np
 
-
-# ---------------------------------------------------------------------------
-# Node
-# ---------------------------------------------------------------------------
 
 @dataclass
 class QuadNode:
@@ -51,10 +47,6 @@ class QuadNode:
     features: Optional[np.ndarray] = None
     metrics: dict = field(default_factory=dict)
     is_leaf: bool = False
-
-    # ------------------------------------------------------------------
-    # Geometry helpers
-    # ------------------------------------------------------------------
 
     @property
     def r0(self) -> int:
@@ -87,10 +79,6 @@ class QuadNode:
 
     def area(self) -> int:
         return self.height * self.width
-
-    # ------------------------------------------------------------------
-    # Child generation
-    # ------------------------------------------------------------------
 
     def compute_child_bboxes(self) -> List[Tuple[int, int, int, int]]:
         """
@@ -125,10 +113,6 @@ class QuadNode:
         child_bboxes = self.compute_child_bboxes()
         self.children = [QuadNode(bbox=bb, depth=depth) for bb in child_bboxes]
         return self.children
-
-    # ------------------------------------------------------------------
-    # Patch dict export
-    # ------------------------------------------------------------------
 
     def to_patch_dict(self) -> dict:
         """
@@ -202,3 +186,95 @@ def collect_nodes_at_depth(root: QuadNode, target_depth: int) -> List[QuadNode]:
         elif node.depth < target_depth:
             stack.extend(node.children)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Shared recursive builder
+# ---------------------------------------------------------------------------
+
+def build_tree(
+    data: np.ndarray,
+    node: QuadNode,
+    should_subdivide: Callable[[QuadNode], bool],
+) -> None:
+    """Recursively build the quadtree rooted at ``node``, in place.
+
+    The skeleton shared by the deterministic (criteria) and learned (depth-map)
+    builders: extract the cell region, guard zero-area cells, store the mean
+    features, then delegate the split/stop decision to ``should_subdivide`` and
+    recurse. The predicate owns everything mode-specific — metric computation,
+    storing ``node.metrics``, and the actual threshold/depth test; it reads the
+    cell extent from ``node.bbox``.
+
+    Populates the tree in place: each final cell is flagged ``is_leaf`` so that
+    ``collect_leaves(root)`` afterwards returns the mesh patches.
+
+    Steps
+    -----
+    1. Extract the data region for this cell.
+    2. Compute mean features for storage.
+    3. Decide whether to subdivide (delegated to ``should_subdivide``, which
+       also computes and stores any mode-specific metrics).
+    4. If subdividing: create children and recurse; else mark as leaf.
+
+    Args:
+        data: ``[H, W, C]`` field. Each cell's per-channel mean over its bbox
+            becomes ``node.features``.
+        node: Cell to process; call with the seeded root (bbox covering the
+            whole grid, depth 0) to build the full tree.
+        should_subdivide: Callable ``(node) -> bool`` invoked on each
+            non-degenerate cell after its features are set. Returns True to
+            split the cell into four children and recurse.
+    """
+    # 1. Extract region data
+    r0, c0, r1, c1 = node.bbox
+    region = data[r0:r1, c0:c1, :]
+
+    if region.size == 0:
+        # Zero-area cell: not marked as leaf, so collect_leaves drops it
+        # (a degenerate token would yield NaN per-token targets downstream).
+        node.features = np.zeros(data.shape[2], dtype=data.dtype)
+        return
+
+    # 2. Compute per-channel mean features (Storage AVG step, Fig. 2 of AMR-Transformer)
+    node.features = region.mean(axis=(0, 1))  # (C,)
+
+    # 3. and 4. Subdivide into four children and recurse, or mark as leaf
+    if should_subdivide(node):
+        for child in node.subdivide(depth=node.depth + 1):
+            build_tree(data, child, should_subdivide)
+    else:
+        node.is_leaf = True
+
+
+# ---------------------------------------------------------------------------
+# Quadtree leaves -> token array
+# ---------------------------------------------------------------------------
+
+def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int) -> np.ndarray:
+    """Stack leaf QuadNodes into a ``[N, C+3]`` float32 token array.
+
+    Columns:
+        0..C-1  : per-channel mean features (from node.features)
+        C       : x_center  -- normalised column centre  = x_center / W
+        C+1     : y_center  -- normalised row centre     = y_center / H
+        C+2     : cell_size -- normalised max dimension  = max(width/W, height/H)
+
+    Args:
+        nodes: Leaf ``QuadNode`` s to tokenize.
+        H: Grid height (rows), used to normalise the row centre.
+        W: Grid width (columns), used to normalise the column centre.
+        C: Number of feature channels.
+
+    Returns:
+        ``[N, C+3]`` float32 array, one row per node.
+    """
+    N = len(nodes)
+    arr = np.empty((N, C + 3), dtype=np.float32)
+    for i, node in enumerate(nodes):
+        y_center, x_center = node.center
+        arr[i, :C] = node.features if node.features is not None else 0.0
+        arr[i, C] = x_center / W
+        arr[i, C + 1] = y_center / H
+        arr[i, C + 2] = max(node.width / W, node.height / H)
+    return arr

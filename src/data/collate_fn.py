@@ -3,10 +3,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
+from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
 from src.amr.oracle_depth import compute_oracle_depth
-from src.amr.quadtree import QuadNode
-from src.amr.quadtree_tokenizer import QuadtreeTokenizer, nodes_to_token_array
+from src.amr.quadtree import QuadNode, nodes_to_token_array
+from src.amr.refinement_criteria import RefinementCriteria
 
 
 def _per_token_targets(target: np.ndarray, leaves: List[QuadNode]) -> np.ndarray:
@@ -26,13 +27,14 @@ class DeterministicCollateFn:
     """
     Picklable collate callable for DataLoader with num_workers > 0.
  
-    For each sample in the batch, tokenizes the input grid on the CPU worker,
-    then concatenates all token sequences into a single packed tensor (the
-    transformer pads to the per-batch max internally, around its encoder only).
- 
+    For each sample in the batch, builds the physics-based adaptive mesh on the
+    CPU worker, then concatenates all token sequences into a single packed
+    tensor (the transformer pads to the per-batch max internally, around its
+    encoder only).
+
     Must be a top-level class (not a closure) to be picklable by
     Python's multiprocessing.
- 
+
     Batch dict keys:
         packed_tokens     : [total_N, C+3]             concatenated tokenized inputs
         packed_targets    : [total_N, output_channels] per-token averaged ground truth
@@ -41,8 +43,10 @@ class DeterministicCollateFn:
         targets           : [B, H, W, output_channels] dense ground truth (affine/dense loss)
     """
 
-    def __init__(self, tokenizer: QuadtreeTokenizer):
-        self.tokenizer = tokenizer
+    def __init__(self, refinement_criteria: RefinementCriteria, min_depth: int, max_depth: int):
+        self.refinement_criteria = refinement_criteria
+        self.min_depth = min_depth
+        self.max_depth = max_depth
         # Per-sample cache keyed by dataset index. The quadtree build and target
         # averaging are deterministic, so the first epoch fills this and every
         # later epoch is a lookup. Only persists with num_workers=0 (workers get
@@ -62,7 +66,14 @@ class DeterministicCollateFn:
 
             cached = self._cache.get(s["index"])
             if cached is None:
-                token_array, leaves = self.tokenizer.tokenize(input)
+                H, W, C = np.asarray(input).shape
+                leaves = build_adaptive_mesh(
+                    input,
+                    max_depth=self.max_depth,
+                    min_depth=self.min_depth,
+                    refinement_criteria=self.refinement_criteria,
+                )
+                token_array = nodes_to_token_array(leaves, H, W, C)
                 token_target = _per_token_targets(target, leaves)
                 self._cache[s["index"]] = (token_array, leaves, token_target)
             else:

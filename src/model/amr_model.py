@@ -13,7 +13,7 @@ per-token flow field with a transformer. There are two ways to get the adaptive-
 The mesh is built by a physics-based AMR criterion.
 
     grid_input [B, H, W, C]
-      ↓ QuadtreeTokenizer + build_adaptive_mesh   (in DeterministicCollateFn, CPU worker)
+      ↓ build_adaptive_mesh                       (refinement_criteria-based quadtree)
     packed_tokens [total_N, C+3]                  (already batched/packed)
       ↓ AeroTransformer                           (model.forward(packed_tokens, tokens_per_sample))
     token predictions [total_N, output_channels]
@@ -25,7 +25,7 @@ turns that score into the mesh.
     grid_input [B, H, W, C]
       ↓ RefinementNet (CNN scorer)
     depth_map d_pred [B, 1, H, W]                 (predicted target depth, not a sign logit)
-      ↓ build_depth_guided_mesh                   (running-depth quadtree: split iff max(d_pred)>d+offset)
+      ↓ build_depth_guided_mesh                   (depth-based quadtree)
     leaves
       ↓ inline token packing
     packed_tokens [total_N, C+3]

@@ -7,17 +7,17 @@ The RefinementNet emits a single scalar field over the grid, interpreted as a
 *predicted target depth* ``d_pred(p)`` (NOT a sign-thresholded logit). The mesh
 builder turns it into leaves with one rule:
 
-    a depth-``d`` cell subdivides  iff  max(d_pred over the cell) > d + offset
+    a depth-``d`` cell subdivides  iff  mean(d_pred over the cell) > d + offset
 
 ``offset`` is a single global budget knob that shifts the
 whole mesh coarser (positive) or finer (negative).
 
 Why a running-depth comparison rather than a fixed ``logit > 0`` threshold. A
-static sign map under the max-OR subdivision rule provably cannot represent an
-intermediate-depth plateau — if a depth-``d`` cell must stop, all of its pixels
-sit on the "stop" side, which forces its parent (four such cells) to stop one
-level too shallow. Comparing a predicted value against the moving depth removes
-that wall while keeping a single map.
+static sign map provably cannot represent an intermediate-depth plateau — a
+depth-``d`` cell that must stop pins all of its pixels to the "stop" side, which
+forces its parent (four such cells) to stop one level too shallow. Comparing a
+predicted value against the moving depth removes that wall while keeping a
+single map.
 
 Feeding the oracle-depth map (see ``src/amr/oracle_depth.py``) in place of the
 scorer output reconstructs the oracle mesh exactly — the consistency invariant
@@ -30,12 +30,13 @@ bbox convention (matched to ``quadtree.py``): ``(r0, c0, r1, c1)`` with
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from functools import partial
+from typing import List
 
 import numpy as np
 import torch
 
-from src.amr.quadtree import QuadNode, collect_leaves
+from src.amr.quadtree import QuadNode, build_tree, collect_leaves
 
 
 # ---------------------------------------------------------------------------
@@ -83,87 +84,48 @@ def build_depth_guided_mesh(
             f"depth_map shape must equal data H, W = {(H, W)}; got {depth_map.shape}"
         )
 
+    # partial binds the depth map and budget, leaving the (node) predicate
+    # build_tree expects.
     root = QuadNode(bbox=(0, 0, H, W), depth=0)
-    _build_node_depth(
-        data=data,
-        node=root,
+    should_subdivide = partial(
+        _should_subdivide_depth,
         depth_map=depth_map,
-        max_depth=max_depth,
         min_depth=min_depth,
+        max_depth=max_depth,
         offset=offset,
     )
+    build_tree(data, root, should_subdivide)
     return collect_leaves(root)
 
 
-
-
 # ---------------------------------------------------------------------------
-# Core recursive builder
+# Subdivision decision
 # ---------------------------------------------------------------------------
-
-def _build_node_depth(
-    data: np.ndarray,
-    node: QuadNode,
-    depth_map: np.ndarray,
-    max_depth: int,
-    min_depth: int,
-    offset: float,
-) -> None:
-    """Populate ``node`` (features + children) in-place by depth-guided recursion."""
-    r0, c0, r1, c1 = node.bbox
-    region = data[r0:r1, c0:c1, :]
-
-    if region.size == 0:
-        # Zero-area cell: not marked as leaf, so collect_leaves drops it
-        # (a degenerate token would yield NaN per-token targets downstream).
-        node.features = np.zeros(data.shape[2], dtype=data.dtype)
-        return
-
-    node.features = region.mean(axis=(0, 1))
-    node.metrics = {}
-
-    if _should_subdivide_depth(
-        depth_map=depth_map,
-        r0=r0, c0=c0, r1=r1, c1=c1,
-        depth=node.depth,
-        min_depth=min_depth,
-        max_depth=max_depth,
-        offset=offset,
-    ):
-        for child in node.subdivide(depth=node.depth + 1):
-            _build_node_depth(
-                data=data,
-                node=child,
-                depth_map=depth_map,
-                max_depth=max_depth,
-                min_depth=min_depth,
-                offset=offset,
-            )
-    else:
-        node.is_leaf = True
-
 
 def _should_subdivide_depth(
+    node: QuadNode,
+    *,
     depth_map: np.ndarray,
-    r0: int, c0: int, r1: int, c1: int,
-    depth: int,
     min_depth: int,
     max_depth: int,
     offset: float,
 ) -> bool:
-    """Running-depth subdivision test for a single cell.
+    """Running-depth subdivision test for a single cell (the ``build_tree``
+    predicate; ``functools.partial`` binds the depth map and budget).
 
     Returns True iff the cell should subdivide:
       * forced stop when the cell is at ``max_depth``;
       * forced split below ``min_depth``;
-      * otherwise subdivide iff ``max(d_pred over cell) > depth + offset``.
+      * otherwise subdivide iff ``mean(d_pred over cell) > depth + offset``.
     """
+    depth = node.depth
     if depth >= max_depth:
         return False
     if depth < min_depth:
         return True
-    cell_max = round(float(depth_map[r0:r1, c0:c1].mean()))
-    return cell_max > depth + offset
+    r0, c0, r1, c1 = node.bbox
+    cell_mean = round(float(depth_map[r0:r1, c0:c1].mean()))
+    return cell_mean > depth + offset
 
 
 # ---------------------------------------------------------------------------

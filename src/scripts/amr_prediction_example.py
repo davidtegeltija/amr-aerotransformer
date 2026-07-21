@@ -10,8 +10,9 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from src.utils.data_utils import test_row_indices
 from src.utils.geometry_utils import patch_sizes_to_depth_bounds
+from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
-from src.amr.quadtree_tokenizer import QuadtreeTokenizer, nodes_to_token_array
+from src.amr.quadtree import nodes_to_token_array
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.data.cavity_dataset import CavityDataset
 from src.data.dataset import AeroDataset
@@ -78,7 +79,7 @@ def predict_single(model, args, sample):
 
     The mesh is built here (mirroring the collate functions) and the transformer
     only consumes packed tokens:
-      * deterministic -> QuadtreeTokenizer (physics AMR criterion)
+      * deterministic -> build_adaptive_mesh (physics AMR criterion)
       * learned       -> ``scorer`` depth map -> build_depth_guided_mesh
     """
     input_grid = sample["input"]                  # [H, W, C] numpy
@@ -87,12 +88,13 @@ def predict_single(model, args, sample):
     output_channels = model.output_channels
 
     if args.get("refinement_mode") == "deterministic":
-        tokenizer = QuadtreeTokenizer(
-            min_depth=args.get("min_depth"),
+        leaves = build_adaptive_mesh(
+            input_grid,
             max_depth=args.get("max_depth"),
+            min_depth=args.get("min_depth"),
             refinement_criteria=CRITERIA_REGISTRY[args.get("refinement_criteria")],
         )
-        token_array, leaves = tokenizer.tokenize(input_grid)
+        token_array = nodes_to_token_array(leaves, H, W, C)
     else:
         # Learned mesh needs a frozen scorer to build the mesh at inference time.
         scorer = create_scorer(args.get("checkpoint_file"),

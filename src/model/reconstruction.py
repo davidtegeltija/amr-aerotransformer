@@ -23,7 +23,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from src.amr.quadtree_tokenizer import QuadNode
+from src.amr.quadtree import QuadNode
 
 
 # ---------------------------------------------------------------------------
