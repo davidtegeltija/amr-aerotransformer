@@ -1,0 +1,8 @@
+# ---- Data ----
+dataset: cavity_dataset                      # wing_dataset | cavity_dataset
+input_file: "/mnt/data/tegeltija/cavity"     # Folder holding the group sub-folders (bc, geo, prop)
+val_split: 0.2                               # Fraction of *cases* held out for validation
+seed: 42                                     # RNG seed for the case-disjoint train/val split
+
+# Next-step (t -> t+1) cavity-flow training.
+# input = (u_t, v_t) + broadcast physics channels, target = (u_{t+1}, v_{t+1}).

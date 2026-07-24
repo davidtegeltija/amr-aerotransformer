@@ -154,7 +154,7 @@ def test_row_indices(dataset, dataset_type: str, val_split: float, seed: int) ->
 
     Args:
         dataset      : the full dataset, before any splitting
-        dataset_type : the config's 'dataset' key ('aero_dataset' or 'cavity_dataset'),
+        dataset_type : the config's 'dataset' key ('wing_dataset' or 'cavity_dataset'),
                        which decides whether rows group by geometry or by case
         val_split    : the config's val_split, so the split matches the training run
         seed         : the config's seed, likewise

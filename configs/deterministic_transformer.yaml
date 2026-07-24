@@ -1,0 +1,17 @@
+# ---- Model ----
+model_trained: deterministic_transformer      # deterministic_transformer | learned_transformer | scorer | vit
+d_model: 256                                  # Token embedding width; also sets the LR schedule scale in train_transformer
+n_layers: 4                                   # Encoder blocks
+n_heads: 8                                    # Attention heads; must divide d_model
+d_ff: 512                                     # Feed-forward inner width
+dropout: 0.2                  
+min_patch_size: 1                             # Smallest allowed leaf patch (pixels). Fine cap -> hard limit on the deepest refinement
+max_patch_size: 16                            # Largest allowed leaf patch (pixels). Coarse floor -> every region is refined at least this far
+affine_output: true                           # Per-token value + gx + gy, dense per-pixel loss
+refinement_criteria: AERODYNAMIC_CRITERIA_2   # Key in CRITERIA_REGISTRY (src/amr/refinement_criteria.py)
+
+# ---- Training ----
+epochs: 250
+batch_size: 8
+warmup_steps: 1000                            # LR warm-up steps (transformer branches only)
+num_workers: 0                                # DataLoader workers; only 0 keeps the AMR collates' per-sample mesh cache across epochs

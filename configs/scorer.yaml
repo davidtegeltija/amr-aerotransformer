@@ -1,0 +1,20 @@
+# ---- Model ----
+model_trained: scorer      # deterministic_transformer | learned_transformer | scorer | vit
+min_patch_size: 2          # Smallest allowed leaf patch (pixels). Fine cap -> hard limit on the deepest refinement
+max_patch_size: 64         # Largest allowed leaf patch (pixels). Coarse floor -> every region is refined at least this far
+
+# Oracle target
+n_target: 800              # Target mean leaf count; one global tolerance is calibrated to it
+calib_samples: 256         # Train samples used for that calibration
+
+# Scorer loss
+tv_weight: 0.2             # Total-variation regulariser on the depth map (0 = off)
+decision_weight: 0.0       # Decision-consistency term (0 = off; enable only if d_pred is jittery near decision boundaries)
+decision_margin: 0.0
+decision_temp: null        # Smooth-max temperature (null = hard max)
+
+# ---- Training ----
+epochs: 250
+batch_size: 64
+warmup_steps: 1000         # LR warm-up steps (transformer branches only)
+num_workers: 0             # DataLoader workers; only 0 keeps the AMR collates' per-sample mesh cache across epochs

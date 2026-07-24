@@ -1,0 +1,8 @@
+# ---- Data ----
+dataset: synthetic_dataset   # wing_dataset | cavity_dataset | synthetic_dataset
+input_file: null             # null is what selects SyntheticDataset — no files are read
+val_split: 0.2               # Fraction of samples held out for validation
+seed: 42                     # Seeds both the sample generation and the train/val split
+
+# Fallback config: 64 procedurally generated samples, nothing on disk. Pair it with
+# any model config to smoke-test the wiring without touching the real datasets.

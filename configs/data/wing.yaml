@@ -1,0 +1,7 @@
+# ---- Data ----
+dataset: wing_dataset                                       # wing_dataset | cavity_dataset
+input_file: "/mnt/data/tegeltija/geom_subset-3000.npy"      # Path to .npz/.npy representing the geometry of the problem
+target_file: "/mnt/data/tegeltija/data_subset-3000.npy"     # Path to .npz/.npy representing the steady flow state
+index_file: "/mnt/data/tegeltija/index_subset-3000.npy"     # Path to .npz/.npy representing case operating conditions, aerodynamic coefficients
+val_split: 0.2                                              # Fraction of *geometries* held out for validation
+seed: 42                                                    # RNG seed for the geometry-disjoint train/val split

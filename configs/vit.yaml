@@ -1,26 +1,16 @@
 # ViT baseline — dense prediction on [H, W, C] grids, NMSE loss only.
-# ---- Data ----
-dataset: aero_dataset                      # Which dataset to build: aero_dataset | cavity_dataset
-input_file: "data/crmmgeom.npy"            # path to .npy/.npz (channel-last [N,H,W,C])
-target_file: "data/crmmdata.npy"
-index_file: "data/crmmindex.npy"            # AoA, Mach per sample
-val_split: 0.1              # fraction of *geometries* held out for validation
-seed: 42                    # RNG seed for the geometry-disjoint train/val split
 
 # ---- Model ----
-model_type: vit             # switch consumed by the entry point
-n_hidden: 256               # must be divisible by n_head; divisible by 4 if sincos
-n_layers: 6
-n_head: 8
-mlp_ratio: 4
-dropout: 0.1
-pos_embedding: sincos       # or 'trainable'
-min_patch_size: 2
+model_trained: vit      # deterministic_transformer | learned_transformer | scorer | vit
+n_hidden: 256           # Divisible by n_head, and by 4 if pos_embedding=sincos
+n_layers: 5             # Encoder blocks
+n_head: 8               # Singular — the transformer branches use n_heads
+mlp_ratio: 2
+dropout: 0.2
+pos_embedding: sincos   # sincos | trainable
+min_patch_size: 4       # The ViT patch size (pixels); must divide H and W
 
 # ---- Training ----
-epochs: 200
-batch_size: 8
-lr: 1.0e-4
-weight_decay: 1.0e-4
-grad_clip: 1.0
-num_workers: 4
+epochs: 250
+batch_size: 64
+num_workers: 0          # DataLoader workers; only 0 keeps the AMR collates' per-sample mesh cache across epochs
