@@ -26,11 +26,9 @@ def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None
             still load via ``load_state_dict(state, strict=False)``.
 
     Returns:
-        The full ``Path`` the checkpoint was written to (timestamp included).
+        The ``Path`` the checkpoint was written to (identical to ``save_path``).
     """
-    timestamp = datetime.now().strftime("%Y-%m-%d")
     save_path = Path(save_path)
-    save_path = save_path.with_name(f"{timestamp}_{save_path.name}")
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     state = model.state_dict() if model else None
@@ -165,7 +163,7 @@ def plot_loss_curves(
     train_loss_history: List[float],
     val_loss_history: List[float],
     epochs: int,
-    show: bool = True,
+    show: bool = False,
     save_path: Optional[str | Path] = None
 ):
     """ Plot the training and validation loss curves for training diagnostics """

@@ -3,15 +3,13 @@ import sys
 
 import numpy as np
 import torch
-import yaml
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.data.cavity_dataset import CavityDataset
-from src.data.dataset import AeroDataset
 from src.model.vit import ViT
-from src.utils.data_utils import test_row_indices
+from src.utils.config_utils import load_config
+from src.utils.data_utils import build_dataset, test_row_indices
 from src.utils.prediction_visualization import plot_flow_comparison
 
 
@@ -59,23 +57,12 @@ def predict_single(model, sample):
 
 
 if __name__ == "__main__":
-    config_file = "configs/vit.yaml"
+    model_config = "configs/vit.yaml"
+    data_config = "configs/data/wing.yaml"
     checkpoint_file = "outputs/checkpoints/vit.pt"
 
-    with open(config_file, "r") as f:
-        args = yaml.safe_load(f)
-
-    # The config's 'dataset' key picks the task: steady-state flow from geometry
-    # (aero) or the next frame from the current one (cavity). Both emit the same
-    # sample contract, so everything downstream is unchanged.
-    if args.get("dataset") == "cavity_dataset":
-        dataset = CavityDataset(input_path=args.get("input_file"))
-    else:
-        dataset = AeroDataset(
-            input_path=args.get("input_file"),
-            target_path=args.get("target_file"),
-            index_path=args.get("index_file"),
-        )
+    args = load_config(model_config, data_config)
+    dataset, dataset_type = build_dataset(args)
 
     model = create_model(args, checkpoint_file, dataset,
                          input_channels=dataset.input_channels,
@@ -85,7 +72,7 @@ if __name__ == "__main__":
     # show a geometry (or cavity case) the model never trained on. The last test
     # row is the final frame of its case, where the flow has fully developed.
     # Early frames are near rest and nearly featureless.
-    test_idx = test_row_indices(dataset, args.get("dataset"), args.get("val_split"), args.get("seed", 42))
+    test_idx = test_row_indices(dataset, dataset_type, args.get("val_split"), args.get("seed", 42))
     sample_index = test_idx[-1]
     sample = dataset[sample_index]
 

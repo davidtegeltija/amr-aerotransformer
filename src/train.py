@@ -254,9 +254,9 @@ def train_scorer_supervised(
         tv_weight: Small TV regulariser weight on ``d_pred`` (0 = off).
         decision_weight: Decision-consistency term weight (0 = off, default).
         decision_margin, decision_temp: Decision-term margin / smooth-max temp.
-        save_path: Full checkpoint path (e.g. ``outputs/checkpoints/scorer_supervised.pt``).
-            ``save_checkpoint`` prepends the date to the filename and is used for
-            the best-val checkpoint. ``None`` disables checkpointing.
+        save_path: Full checkpoint path (e.g. ``outputs/checkpoints/scorer_supervised.pt``),
+            The date in a run's filename comes from ``main.py``.
+            Overwritten on every val-loss improvement. ``None`` disables checkpointing.
 
     Returns:
         ``(train_loss_history, val_loss_history)``.

@@ -1,5 +1,6 @@
 import argparse
 from datetime import datetime
+import os
 from pathlib import Path
 import sys
 from typing import Dict
@@ -13,55 +14,14 @@ from torch.utils.tensorboard import SummaryWriter
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.oracle_depth import calibrate_global_tolerance
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn, VitCollateFn
-from src.data.dataset import AeroDataset
-from src.data.cavity_dataset import CavityDataset
-from src.data.synthetic_dataset import SyntheticDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.refinement_net import RefinementNet
 from src.model.vit import ViT
 from src.train import train_transformer, train_scorer_supervised, train_vit
-from src.utils.data_utils import geometry_disjoint_split
+from src.utils.config_utils import load_config
+from src.utils.data_utils import build_dataset, geometry_disjoint_split
 from src.utils.train_utils import plot_loss_curves
 from src.utils.geometry_utils import patch_sizes_to_depth_bounds
-
-
-def load_config(path: str, data_path: str) -> Dict:
-    """Load a YAML model config and merge a YAML data config over it. Return a flat namespace mimicking the argparse args."""
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
-
-    # Add data config to cfg
-    with open(data_path, "r") as f:
-        cfg.update(yaml.safe_load(f))
-
-    MODEL_TRAINED_OPTIONS = (
-        "deterministic_transformer",  # AMR transformer on a criteria-driven mesh
-        "learned_transformer",        # AMR transformer on a frozen-scorer mesh
-        "scorer",                     # RefinementNet trained against oracle depths
-        "vit",                        # dense ViT baseline, no quadtree
-    )
-
-    DATASET_OPTIONS = ("wing_dataset", "cavity_dataset", "synthetic_dataset")
-
-    model_trained = cfg.get("model_trained")
-    if model_trained not in MODEL_TRAINED_OPTIONS:
-        valid = ", ".join(MODEL_TRAINED_OPTIONS)
-        raise SystemExit(f"Invalid model_trained {model_trained!r} in {path}.\nValid options are: {valid}")
-    
-    dataset_type = cfg.get("dataset")
-    if dataset_type not in DATASET_OPTIONS:
-        raise SystemExit(f"Invalid dataset {dataset_type!r} in {data_path}.\nValid options are: {', '.join(DATASET_OPTIONS)}")
-
-    # Null input_file selects the synthetic dataset; wing needs three arrays, cavity one root.
-    if cfg.get("input_file") is not None:
-        path_keys = ("input_file", "target_file", "index_file") if dataset_type == "wing_dataset" else ("input_file",)
-        for key in path_keys:
-            value = cfg.get(key)
-            if value is None or not Path(value).exists():
-                raise SystemExit(f"dataset {dataset_type!r} requires {key}, got {value!r} which does not exist")
-
-    print(cfg)  # Print out the whole yaml file so it can be logged
-    return cfg
 
 
 def load_state_dict_partial(module, path, device, strip_prefix=None):
@@ -163,7 +123,7 @@ def make_loader(dataset: Dataset, batch_size: int, shuffle: bool, num_workers: i
                       pin_memory=device.type == "cuda")
 
 
-def train_model(args, model, train_loader, val_loader, device, writer):
+def train_model(args, model, train_loader, val_loader, device, writer, save_path):
     """Dispatch to the training loop matching model_trained."""
     model_trained = args["model_trained"]
 
@@ -172,6 +132,7 @@ def train_model(args, model, train_loader, val_loader, device, writer):
         return train_vit(
             model, train_loader, val_loader, device,
             epochs=args["epochs"],
+            save_path=save_path,
             writer=writer,
         )
 
@@ -183,6 +144,7 @@ def train_model(args, model, train_loader, val_loader, device, writer):
             epochs=args["epochs"],
             d_model=args["d_model"],
             warmup_steps=args["warmup_steps"],
+            save_path=save_path,
             writer=writer,
         )
 
@@ -197,6 +159,7 @@ def train_model(args, model, train_loader, val_loader, device, writer):
             decision_weight=args["decision_weight"],
             decision_margin=args["decision_margin"],
             decision_temp=args["decision_temp"],
+            save_path=save_path,
             writer=writer,
         )
 
@@ -216,14 +179,50 @@ def main(args=None):
 
         # Override a single value at runtime:
         python main.py --config configs/baseline.yaml --data configs/data/wing.yaml --override epochs=5
+
+        # Name the run, so its logs and checkpoint do not collide with a concurrent one:
+        python main.py --config configs/baseline.yaml --data configs/data/wing.yaml --name baseline_lr1e4
+
+        # Detach and keep running after the terminal/SSH session closes:
+        nohup python -u -m main --config configs/baseline.yaml --data configs/data/wing.yaml --name baseline_lr1e4 &
         """,
     )
 
     parser.add_argument("--config", type=str, required=True, help="Path to a YAML model config file (configs/*.yaml)")
     parser.add_argument("--data", type=str, required=True, help="Path to a YAML data config, merged over --config (configs/data/*.yaml)")
+    parser.add_argument("--name", type=str, default=None, help="Identifier for this run. Names the log directory, the loss plot and the checkpoint (default: <model-config>_<data-config>)")
     parser.add_argument("--override", nargs="*", metavar="KEY=VALUE", help="Override specific config values at runtime, e.g. --override epochs=5 batch_size=16")
 
     cli = parser.parse_args(args)
+
+    # ----------------------------------------------------------------
+    # Run Setup (log file, checkpoint dir, TensorBoard) and Load Arguments
+    # ----------------------------------------------------------------
+    # Make log file
+    run_name = cli.name or f"{Path(cli.config).stem}_{Path(cli.data).stem}"
+    log_dir = Path("outputs/logs") / f"{datetime.now().strftime("%Y-%m-%d_%H-%M")}_{run_name}"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{run_name}.log"
+
+    # buffering=1: line-buffered, so the log can be tailed live (like -u)
+    # Redirect the OS-level fds too, replicating shell's "> .log 2>&1"
+    log_file = open(log_path, "w", buffering=1)
+    os.dup2(log_file.fileno(), sys.stdout.fileno())
+    os.dup2(log_file.fileno(), sys.stderr.fileno())
+    sys.stdout = log_file
+    sys.stderr = log_file
+
+    # First thing in the log: how this run was invoked. sys.argv is just the
+    # script path when main() is called with an explicit list (the IDE branch),
+    # so the parsed namespace is what is authoritative in both branches.
+    print(f"Command: {sys.argv}")
+    print(f"CLI args: {vars(cli)}")
+
+    # Make checkpoints dir
+    checkpoint_dir = Path("outputs/checkpoints")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    save_path = checkpoint_dir / f"{datetime.now().strftime("%Y-%m-%d")}_{run_name}.pt"
+
     args = load_config(cli.config, cli.data)
 
     # Apply any runtime overrides, casting to the type of the existing value
@@ -235,51 +234,40 @@ def main(args=None):
                 value = type(existing)(value)  # preserve int/float/str type
             args[key] = value
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
-
-    # ----------------------------------------------------------------
     # TensorBoard writer (one run dir per config + timestamp)
-    # ----------------------------------------------------------------
-    # Both stems, since one model config now runs against several data configs and
-    # the model stem alone would collide across datasets.
-    config_name = f"{Path(cli.config).stem}_{Path(cli.data).stem}"
-    run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}_{config_name}"
-    log_dir = Path("outputs/logs") / run_name
     writer = SummaryWriter(log_dir=str(log_dir))
     writer.add_text("config", f"```yaml\n{yaml.safe_dump(args, sort_keys=False)}```", 0)
     print(f"TensorBoard logging to {log_dir}  (view: tensorboard --logdir outputs/logs)")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    
     # ----------------------------------------------------------------
     # Build Dataset
     # ----------------------------------------------------------------
     print("\n======== Building Dataset ========")
     seed = args["seed"]
-    dataset_type = args["dataset"]
+    dataset, dataset_type = build_dataset(args)
 
-    if dataset_type == "wing_dataset" and args["input_file"] is not None:
-        print(f"Using data from {args['input_file']}")
-        dataset = AeroDataset(input_path=args["input_file"], target_path=args["target_file"], index_path=args["index_file"])
+    if dataset_type == "wing_dataset":
         # Split by geometry, not by row. Each geometry spans many rows (one per
         # operating condition); a row-level split leaks the same wing into both
         # train and val, so val_loss measures interpolation, not generalization.
         train_dataset, val_dataset, _ = split_by_group_id(dataset, dataset.geometry_ids(), args["val_split"], seed, "Geometry")
 
-    elif dataset_type == "cavity_dataset" and args["input_file"] is not None:
-        print(f"Using cavity next-step data from {args['input_file']}")
-        dataset = CavityDataset(input_path=args["input_file"])
+    elif dataset_type == "cavity_dataset":
         # Split by case, not by pair. Consecutive frames of one simulation are
         # highly correlated; a pair-level split leaks a case into both train and
         # val, so val_loss would measure interpolation, not generalization.
         train_dataset, val_dataset, _ = split_by_group_id(dataset, dataset.case_ids(), args["val_split"], seed, "Case")
 
     else:
-        print("No input and target data provided -> using synthetic dataset.")
-        dataset = SyntheticDataset(n_samples=64, seed=seed)
+        # Generated samples share no geometry or case, so there is nothing to
+        # keep disjoint — a plain random split is the honest one here.
         n_val = max(1, int(args["val_split"] * len(dataset)))
         train_dataset, val_dataset = random_split(
             dataset, [len(dataset) - n_val, n_val], generator=torch.Generator().manual_seed(seed))
-        
+
     input_channels = dataset.input_channels
     output_channels = dataset.output_channels
 
@@ -326,7 +314,7 @@ def main(args=None):
         train_loader = make_loader(train_dataset, args["batch_size"], True, args["num_workers"], collate_fn, device)
         val_loader = make_loader(val_dataset, args["batch_size"], False, args["num_workers"], collate_fn, device)
 
-        train_loss_history, val_loss_history = train_model(args, model, train_loader, val_loader, device, writer)
+        train_loss_history, val_loss_history = train_model(args, model, train_loader, val_loader, device, writer, save_path)
 
     # ----------------------------------------------------------------
     # ViT baseline branch (standalone, no AMR / scorer / quadtree)
@@ -367,10 +355,11 @@ def main(args=None):
         train_loader = make_loader(train_dataset, args["batch_size"], True, args["num_workers"], collate_fn, device)
         val_loader = make_loader(val_dataset, args["batch_size"], False, args["num_workers"], collate_fn, device)
 
-        train_loss_history, val_loss_history = train_model(args, model, train_loader, val_loader, device, writer)
+        train_loss_history, val_loss_history = train_model(args, model, train_loader, val_loader, device, writer, save_path)
 
-    plot_loss_curves(train_loss_history, val_loss_history, args["epochs"], save_path=f"outputs/loss/{config_name}_config_loss.png")
+    plot_loss_curves(train_loss_history, val_loss_history, args["epochs"], save_path=f"outputs/loss/{run_name}_loss.png")
     writer.close()
+
 
 if __name__ == "__main__":
     # When calling the function from bash
@@ -380,6 +369,12 @@ if __name__ == "__main__":
 
     # When calling the function from IDE
     else:
-        args = ["--config", "configs/deterministic_transformer.yaml", "--data", "configs/data/overfit.yaml"]
+        print("No CLI args given -> using the hardcoded IDE configuration. Pass --config and --data to run something else.")        
+        model_config = "configs/deterministic_transformer.yaml"
+        data_config = "configs/data/overfit.yaml"
+        name = "deterministic_transformer_overfit_400_tokens"
+
+        args = ["--config", model_config, "--data", data_config, "--name", name]
+
         print(args)
         main(args)

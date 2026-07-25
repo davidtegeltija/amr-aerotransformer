@@ -3,19 +3,17 @@ import sys
 
 import numpy as np
 import torch
-import yaml
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.utils.data_utils import test_row_indices
+from src.utils.config_utils import load_config
+from src.utils.data_utils import build_dataset, test_row_indices
 from src.utils.geometry_utils import patch_sizes_to_depth_bounds
 from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
 from src.amr.quadtree import nodes_to_token_array
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
-from src.data.cavity_dataset import CavityDataset
-from src.data.dataset import AeroDataset
 from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.refinement_net import RefinementNet
 from src.model.reconstruction import tokens_to_grid, tokens_to_grid_affine
@@ -87,7 +85,7 @@ def predict_single(model, args, sample):
     input_channels = model.input_channels
     output_channels = model.output_channels
 
-    if args.get("refinement_mode") == "deterministic":
+    if args.get("model_trained") == "deterministic_transformer":
         leaves = build_adaptive_mesh(
             input_grid,
             max_depth=args.get("max_depth"),
@@ -126,23 +124,12 @@ def predict_single(model, args, sample):
 
 
 if __name__ == "__main__":
-    config_file = "configs/train_learned_transformer.yaml"
+    model_config = "configs/learned_transformer.yaml"
+    data_config = "configs/data/wing.yaml"
     checkpoint_file = "outputs/checkpoints/transformer_on_learned_mesh.pt"
 
-    with open(config_file, "r") as f:
-        args = yaml.safe_load(f)
-
-    # The config's 'dataset' key picks the task: steady-state flow from geometry
-    # (aero) or the next frame from the current one (cavity). Both emit the same
-    # sample contract, so everything downstream is unchanged.
-    if args.get("dataset") == "cavity_dataset":
-        dataset = CavityDataset(input_path=args.get("input_file"))
-    else:
-        dataset = AeroDataset(
-            input_path=args.get("input_file"),
-            target_path=args.get("target_file"),
-            index_path=args.get("index_file"),
-        )
+    args = load_config(model_config, data_config)
+    dataset, dataset_type = build_dataset(args)
 
     model, args = create_model(args, checkpoint_file, dataset,
                                input_channels=dataset.input_channels,
@@ -153,7 +140,7 @@ if __name__ == "__main__":
     # row is the final frame of its case: the flow has fully developed, so the
     # quadtree actually refines. Early frames are near rest and collapse to a
     # single root token.
-    test_idx = test_row_indices(dataset, args.get("dataset"), args.get("val_split"), args.get("seed", 42))
+    test_idx = test_row_indices(dataset, dataset_type, args.get("val_split"), args.get("seed", 42))
     sample_index = test_idx[-1]
     sample = dataset[sample_index]
 
