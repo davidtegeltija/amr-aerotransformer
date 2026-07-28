@@ -18,24 +18,8 @@ from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.refinement_net import RefinementNet
 from src.model.reconstruction import tokens_to_grid, tokens_to_grid_affine
 from src.utils.mesh_visualization import plot_mesh
+from src.utils.model_utils import load_checkpoint
 from src.utils.prediction_visualization import plot_flow_comparison, plot_3d_prediction
-
-
-def _load_weights(module, checkpoint_file, strip_prefix=None):
-    """Tolerant checkpoint load (strict=False), optionally stripping a key prefix."""
-    checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
-    state = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
-    if strip_prefix:
-        state = {(k[len(strip_prefix):] if k.startswith(strip_prefix) else k): v
-                 for k, v in state.items()}
-    # Drop shape-mismatched params (strict=False still errors on shape clashes)
-    # so a constant-head checkpoint can warm-start an affine_output model.
-    module_sd = module.state_dict()
-    state = {k: v for k, v in state.items()
-             if not (k in module_sd and v.shape != module_sd[k].shape)}
-    module.load_state_dict(state, strict=False)
-    module.eval()
-    return module
 
 
 def create_model(args, checkpoint_file, dataset, input_channels=5, output_channels=3):
@@ -57,7 +41,8 @@ def create_model(args, checkpoint_file, dataset, input_channels=5, output_channe
         dropout=args.get("dropout"),
         affine_output=args.get("affine_output", False),
     )
-    _load_weights(model, checkpoint_file)
+    load_checkpoint(model, checkpoint_file)
+    model.eval()
     return model, args
 
 
@@ -68,7 +53,8 @@ def create_scorer(scorer_checkpoint, input_channels=5):
             "learned-mesh inference needs a scorer checkpoint; set 'scorer_checkpoint_file' "
             "in the config to a trained RefinementNet checkpoint.")
     scorer = RefinementNet(input_channels=input_channels)
-    return _load_weights(scorer, scorer_checkpoint, strip_prefix="scorer.")
+    load_checkpoint(scorer, scorer_checkpoint)
+    return scorer.eval()
 
 
 @torch.no_grad()

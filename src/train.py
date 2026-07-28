@@ -51,7 +51,7 @@ from src.model.reconstruction import (
     tokens_to_grid_affine_torch,
 )
 from src.eval import evaluate_transformer, evaluate_scorer, evaluate_vit
-from src.utils.train_utils import save_checkpoint
+from src.utils.model_utils import save_checkpoint
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +369,7 @@ def train_scorer_supervised(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             if save_path:
-                saved = save_checkpoint(save_path, scorer, epoch=epoch, val_loss=val_loss, prefix="scorer")
+                saved = save_checkpoint(save_path, scorer, epoch=epoch, val_loss=val_loss)
                 pad = " " * len(f"[{tag}] ")
                 print(f"{pad}Saved best model to {saved.name}")
 

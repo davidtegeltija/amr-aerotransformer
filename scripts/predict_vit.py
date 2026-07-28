@@ -10,6 +10,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from src.model.vit import ViT
 from src.utils.config_utils import load_config
 from src.utils.data_utils import build_dataset, test_row_indices
+from src.utils.model_utils import load_checkpoint
 from src.utils.prediction_visualization import plot_flow_comparison
 
 
@@ -32,9 +33,7 @@ def create_model(args, checkpoint_file, dataset, input_channels=5, output_channe
         pos_embedding=args.get("pos_embedding", "sincos"),
     )
 
-    checkpoint = torch.load(checkpoint_file, map_location=torch.device("cpu"))
-    state = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
-    model.load_state_dict(state, strict=False)
+    load_checkpoint(model, checkpoint_file)
     model.eval()
     return model
 

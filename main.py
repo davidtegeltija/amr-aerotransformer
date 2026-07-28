@@ -20,31 +20,9 @@ from src.model.vit import ViT
 from src.train import train_transformer, train_scorer_supervised, train_vit
 from src.utils.config_utils import load_config
 from src.utils.data_utils import build_dataset, geometry_disjoint_split
+from src.utils.model_utils import load_checkpoint
 from src.utils.train_utils import plot_loss_curves
 from src.utils.geometry_utils import patch_sizes_to_depth_bounds
-
-
-def load_state_dict_partial(module, path, device, strip_prefix=None):
-    """Load a checkpoint into ``module`` tolerantly (strict=False).
-
-    Drops shape-mismatched params (so e.g. a constant-head checkpoint can
-    warm-start an affine_output model) and optionally strips a leading key
-    prefix. Scorer checkpoints are saved namespaced as ``scorer.*`` (see
-    ``save_checkpoint(..., prefix="scorer")``); pass ``strip_prefix="scorer."``
-    to load them into a standalone ``RefinementNet``.
-    """
-    ckpt = torch.load(path, map_location=device)
-    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-    if strip_prefix:
-        state = {(k[len(strip_prefix):] if k.startswith(strip_prefix) else k): v
-                 for k, v in state.items()}
-    module_sd = module.state_dict()
-    dropped = [k for k, v in state.items() if k in module_sd and v.shape != module_sd[k].shape]
-    if dropped:
-        state = {k: v for k, v in state.items() if k not in dropped}
-        print(f"  re-initialising {len(dropped)} shape-mismatched param(s): {dropped}")
-    missing, unexpected = module.load_state_dict(state, strict=False)
-    print(f"Loaded checkpoint {path}  (missing: {len(missing)}, unexpected: {len(unexpected)})")
 
 
 def split_by_group_id(dataset: Dataset, group_ids, val_split: float, seed: int, group_name: str):
@@ -110,7 +88,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
             raise SystemExit(f"checkpoint_file {checkpoint_file!r} does not exist. It must point to a trained scorer checkpoint.")
 
         scorer = RefinementNet(input_channels=input_channels)
-        load_state_dict_partial(scorer, checkpoint_file, device, strip_prefix="scorer.")
+        load_checkpoint(scorer, checkpoint_file, device)
         return LearnedCollateFn(scorer, min_depth=min_depth, max_depth=max_depth, offset=args["offset"])
 
     raise SystemExit(f"No collate defined for model_trained {model_trained!r}")

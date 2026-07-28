@@ -1,4 +1,3 @@
-from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -13,37 +12,6 @@ from src.model.reconstruction import (
 )
 from src.amr.quadtree import QuadNode
 from src.utils.visualization_utils import save_plot
-
-
-def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None, val_loss=None, prefix=""):
-    """Save model, optimizer, and scheduler at their current state.
-
-    Args:
-        save_path: Full checkpoint path (outputs/checkpoints/vit.pt)
-        prefix: Optional string prepended to every key of ``model.state_dict()``.
-            Use ``"scorer."`` to save a bare submodule (e.g. ``RefinementNet``)
-            so its keys namespace into the parent ``AdaptiveMeshAeroModel`` and
-            still load via ``load_state_dict(state, strict=False)``.
-
-    Returns:
-        The ``Path`` the checkpoint was written to (identical to ``save_path``).
-    """
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-
-    state = model.state_dict() if model else None
-    if state is not None and prefix:
-        state = {f"{prefix}.{k}": v for k, v in state.items()}
-
-    torch.save({
-        "model": state,
-        "optimizer": optimizer.state_dict() if optimizer else None,
-        "scheduler": scheduler.state_dict() if scheduler else None,
-        "epoch": epoch,
-        "val_loss": val_loss
-        }, save_path)
-
-    return save_path
 
 
 def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
