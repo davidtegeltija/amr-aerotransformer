@@ -10,30 +10,18 @@ sys.path.insert(0, PROJECT_ROOT)
 from src.model.vit import ViT
 from src.utils.config_utils import load_config
 from src.utils.data_utils import build_dataset, test_row_indices
-from src.utils.model_utils import load_checkpoint
+from src.utils.model_utils import build_model_from_checkpoint
 from src.utils.prediction_visualization import plot_flow_comparison
 
 
-def create_model(args, checkpoint_file, dataset, input_channels=5, output_channels=3):
-    """Instantiate the ViT baseline model and load weights from a checkpoint.
+def create_model(checkpoint_file):
+    """Rebuild the trained ViT baseline from its checkpoint.
 
     Unlike the AMR model, the ViT consumes dense [B, C, H, W] grids directly, so
-    there is no quadtree, tokenizer or scorer involved.
+    there is no quadtree, tokenizer or scorer involved — the checkpoint's own
+    hyperparameter record is all that is needed.
     """
-    model = ViT(
-        image_size=(dataset.H, dataset.W),
-        patch_size=args.get("min_patch_size"),
-        fun_dim=input_channels,
-        out_dim=output_channels,
-        n_layers=args.get("n_layers"),
-        n_hidden=args.get("n_hidden"),
-        n_head=args.get("n_head"),
-        mlp_ratio=args.get("mlp_ratio"),
-        dropout=args.get("dropout"),
-        pos_embedding=args.get("pos_embedding", "sincos"),
-    )
-
-    load_checkpoint(model, checkpoint_file)
+    model = build_model_from_checkpoint(ViT, checkpoint_file)
     model.eval()
     return model
 
@@ -63,9 +51,7 @@ if __name__ == "__main__":
     args = load_config(model_config, data_config)
     dataset, dataset_type = build_dataset(args)
 
-    model = create_model(args, checkpoint_file, dataset,
-                         input_channels=dataset.input_channels,
-                         output_channels=dataset.output_channels)
+    model = create_model(checkpoint_file)
 
     # Predict on the held-out test split, replayed from the config, so the plots
     # show a geometry (or cavity case) the model never trained on. The last test

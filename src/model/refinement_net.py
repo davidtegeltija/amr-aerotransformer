@@ -6,7 +6,7 @@ RefinementNet — learned per-pixel importance scorer for adaptive meshing.
 A small U-Net-style CNN that maps a geometry grid [B, C_in, H, W] to a
 per-pixel scalar map [B, 1, H, W] with an unbounded (raw) head. The map is
 interpreted as a predicted target depth ``d_pred``: the depth-guided builder
-subdivides a depth-``d`` cell iff ``max(d_pred over the cell) > d + offset``
+subdivides a depth-``d`` cell iff ``mean(d_pred over the cell) > d + offset``
 (running-depth comparison). The scorer is trained by supervised regression of
 ``d_pred`` to the variance-oracle depth target (src/amr/oracle_depth.py); there is
 no Gumbel sampling and no sign threshold.
@@ -34,6 +34,10 @@ class RefinementNet(nn.Module):
     def __init__(self, input_channels: int = 3):
         super().__init__()
         self.input_channels = input_channels
+
+        # Constructor arguments, recorded for build_model_from_checkpoint (see
+        # src/utils/model_utils.py). Keep in sync with the signature above.
+        self.init_kwargs = dict(input_channels=input_channels)
 
         self.enc1_conv = nn.Conv2d(input_channels, 32, kernel_size=3, padding=1)
         self.enc1_norm = nn.GroupNorm(8, 32)

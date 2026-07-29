@@ -1,70 +1,27 @@
 """
 ========================================================================
-Transformer-based neural solver for the adaptive mesh CFD pipeline.
+Shared pre-norm Transformer encoder block.
 ========================================================================
 
-Architecture:
-    token_embedding: MLP(physical_dim -> d_model) projecting per-token physical features into the latent space. `physical_dim = token_dim - 3`.
-    pos_embedding:   Fixed log-spaced Fourier features over the 3 positional meta channels (x_c, y_c, size), followed by an MLP into d_model.
-    input_norm:      LayerNorm applied to the sum of token + positional embeddings.
-    encoder:         Stack of pre-norm TransformerBlock layers (default: 6 layers, 4 heads, d_model=256, d_ff=1024).
-    final_norm:      LayerNorm before the prediction head.
-    prediction_head: MLP(d_model -> output_channels) producing per-token predictions.
-                     With affine_output=True it instead emits output_channels*3
-                     numbers per token, reshaped to [N, C, 3] = (value, gx, gy),
-                     a per-token affine (value + 2D gradient) field decoded into a
-                     linear ramp across each cell by tokens_to_grid_affine_torch.
+The one attention/FFN layer both models in this project are built from:
 
-Batching strategy (pad to per-batch max around the encoder):
-    The model boundary stays packed: all samples' token sequences arrive
-    concatenated into a single long sequence
+    * ``AdaptiveMeshAeroModel`` (src/model/amr_model.py) stacks it over padded
+      variable-length AMR token sequences, passing a boolean key-padding mask;
+    * ``ViT`` (src/model/vit_model.py) stacks it over fixed-length dense patch
+      grids, where every sequence has the same length and no mask is needed.
 
-        packed = [sample_0_tokens | sample_1_tokens | ... | sample_B_tokens]
-
-    and the embeddings and prediction head run on this packed [total_N, ...]
-    layout. Only around the encoder stack are the per-sample embedding
-    sequences padded to [B, N_max, d_model] and attended with a boolean
-    key-padding mask
-    (True = real token), computed by torch.nn.functional.
-    scaled_dot_product_attention; pad rows are dropped again before the head.
-    This replaces the earlier NaViT/APT-style packed layout with a dense
-    block-diagonal additive mask, whose [total_N, total_N] float mask cost
-    (sum of all lengths, squared) dominated compute and memory and forced the
-    slow SDPA math backend on Pascal-era GPUs; a boolean broadcast key-padding
-    mask costs B*N_max bytes and computes the same function.
+Keeping the block here — and the model-specific embeddings, heads and batching
+in the two model modules — is what lets those two otherwise unrelated
+architectures share exactly one implementation of attention.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
-
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-def _make_key_padding_mask(tokens_per_sample: List[int], n_max: int, device: torch.device) -> torch.Tensor:
-    """Build a boolean validity mask for a padded [B, n_max, d] batch.
-
-    True marks real tokens, False marks padding, matching the boolean mask
-    convention of torch.nn.functional.scaled_dot_product_attention (True =
-    take part in attention).
-
-    Args:
-        tokens_per_sample: Per-sample token counts.
-        n_max: Padded sequence length (max of tokens_per_sample).
-        device: Device on which to allocate the mask.
-
-    Returns:
-        Bool tensor of shape [B, n_max]; True = real token, False = pad.
-    """
-    lengths = torch.tensor(tokens_per_sample, device=device)
-    return torch.arange(n_max, device=device)[None, :] < lengths[:, None]
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +37,7 @@ class TransformerBlock(nn.Module):
 
     Attention is computed via torch.nn.functional.scaled_dot_product_attention
     with an optional boolean key-padding mask that keeps real tokens from
-    attending to pad slots in a ragged batch.
+    attending to pad slots in a padded batch.
     """
 
     def __init__(
@@ -159,181 +116,3 @@ class TransformerBlock(nn.Module):
         x = x + self.ff(self.norm2(x))
 
         return x
-
-
-# ---------------------------------------------------------------------------
-# Main transformer model
-# ---------------------------------------------------------------------------
-
-class AeroTransformer(nn.Module):
-    """Transformer solver over packed, variable-length token sequences.
-
-    Each token carries `token_dim` features, structured as:
-        [physical_channels (token_dim - 3) | positional_meta (3)]
-    where the positional meta channels are (x_c, y_c, size). Physical and
-    positional features are embedded separately, summed, normalized, then
-    refined by a stack of pre-norm Transformer blocks. The final per-token
-    embedding is mapped to `output_channels` flow-field predictions.
-
-    Forward pass (packed / training mode):
-        tokens:            [total_N, token_dim]  concatenated tokens from all samples
-        tokens_per_sample: List[int]             per-sample token counts
-
-    Forward pass (single sample / inference):
-        tokens:            [N, token_dim]
-        tokens_per_sample: [N]
-
-    Returns:
-        Predictions of shape [total_N, output_channels] (constant-per-token), or
-        [total_N, output_channels, 3] = (value, gx, gy) when affine_output=True.
-    """
-
-    def __init__(
-        self,
-        token_dim: int,           # C + 3  (physical channels + positional meta)
-        output_channels: int = 3,
-        d_model: int = 256,
-        n_layers: int = 6,
-        n_heads: int = 4,
-        d_ff: int = 1024,
-        dropout: float = 0.1,
-        n_fourier: int = 64,
-        affine_output: bool = False,
-    ):
-        super().__init__()
-        self.token_dim = token_dim
-        self.d_model = d_model
-        self.pos_dim = 3
-        self.output_channels = output_channels
-        self.affine_output = affine_output
-
-        # --- Token Embedding layer ---
-        # Projects raw token features [C] into the latent space [d_model]
-        physical_dim = token_dim - self.pos_dim
-        self.token_embedding = nn.Sequential(
-            nn.LayerNorm(physical_dim),
-            nn.Linear(physical_dim, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
-        )
-
-        # --- Positional Embedding layer ---
-        # Fixed log-spaced frequencies, not learned
-        self.register_buffer("pos_freqs", 2.0 ** torch.linspace(0, 8, n_fourier // 2).unsqueeze(0))  # [1, F/2]
-        fourier_dim = self.pos_dim * n_fourier
-        # Projects raw token position meta [3] into the latent space [d_model].
-        self.pos_embedding = nn.Sequential(
-            nn.Linear(fourier_dim, d_model * 2),
-            nn.GELU(),
-            nn.Linear(d_model * 2, d_model),
-        )
-
-        # --- Combine token + positional embeddings ---
-        self.input_norm = nn.LayerNorm(d_model)
-
-        # --- Transformer encoder ---
-        self.layers = nn.ModuleList([
-            TransformerBlock(d_model, n_heads, d_ff, dropout)
-            for _ in range(n_layers)
-        ])
-        self.final_norm = nn.LayerNorm(d_model)
-
-        # --- Prediction head ---
-        # In affine mode the head emits (value, gx, gy) per channel; the gradient
-        # components start near 0 under trunc_normal init, so the model begins as
-        # ~constant-per-cell and learns the ramps from the dense per-pixel loss.
-        head_out = output_channels * 3 if affine_output else output_channels
-        self.prediction_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, head_out),
-        )
-
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def embedd_position(self, pos: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-        """Encode positional meta channels as concatenated sin/cos Fourier features.
-
-        Args:
-            pos:   Positional channels of shape [total_N, 3] (x_c, y_c, size).
-            freqs: Fixed log-spaced frequencies of shape [1, F/2].
-
-        Returns:
-            Fourier features of shape [total_N, 3*F].
-        """
-        angles = pos.unsqueeze(-1) * freqs # [total_N, 3, F/2]
-        features = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        return features.flatten(-2) # [total_N, 3*F]
-
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        tokens_per_sample: List[int],
-    ) -> torch.Tensor:
-        """Run the encoder over a packed token sequence and produce per-token predictions.
-
-        Args:
-            tokens:            Packed token features of shape [total_N, token_dim], with the last 3 channels treated as positional meta (x_c, y_c, size).
-            tokens_per_sample: Per-sample token counts in the packed sequence.
-
-        Returns:
-            Per-token predictions of shape [total_N, output_channels], or
-            [total_N, output_channels, 3] = (value, gx, gy) when affine_output.
-        """
-        assert tokens.shape[-1] == self.token_dim, (
-            f"Expected tokens with {self.token_dim} channels "
-            f"(physical + {self.pos_dim} positional meta in the last slots), "
-            f"got {tokens.shape[-1]}."
-        )
-
-        device = tokens.device
-
-        # Split into physical features and positional meta
-        physical_channels = tokens[:, :-self.pos_dim]       # [total_N, 5]
-        positional_channels = tokens[:, -self.pos_dim:]     # [total_N, 3]
-
-        # Embed
-        tok_emb = self.token_embedding(physical_channels)   # [total_N, d_model]
-        pos_emb = self.pos_embedding(self.embedd_position(positional_channels, self.pos_freqs)) # [total_N, d_model]
-        x = self.input_norm(tok_emb + pos_emb)   # [total_N, d_model]
-
-        # Pad the per-sample embeddings to [B, N_max, d_model] and attend with a
-        # boolean key-padding mask: real tokens never see pad keys, so this is
-        # mathematically identical to per-sample (block-diagonal) attention at
-        # B*N_max^2 instead of (sum N)^2 cost. Embeddings above and the head
-        # below stay on the packed layout, so pad slots never touch them.
-        # Split packed [total_N, d_model] into B tensors of shape [N_b, d_model],
-        # one per sample (N_b = tokens_per_sample[b]).
-        per_sample_embeddings = list(torch.split(x, tokens_per_sample, dim=0))
-        x = pad_sequence(per_sample_embeddings, batch_first=True)  # [B, N_max, d_model]
-        n_max = x.shape[1]
-        valid = _make_key_padding_mask(tokens_per_sample, n_max, device)   # [B, N_max]
-        # Equal-length batches (incl. single-sample inference) need no mask at
-        # all, which keeps them eligible for the fastest SDPA path.
-        ragged = min(tokens_per_sample) < n_max
-        attn_mask = valid[:, None, None, :] if ragged else None            # [B, 1, 1, N_max]
-
-        # Transformer encoder
-        for layer in self.layers:
-            x = layer(x, attn_mask=attn_mask)
-
-        # Drop pad rows -> back to packed [total_N, d_model]; row order is
-        # sample 0's tokens, then sample 1's, ..., identical to the input
-        # packing, so downstream packed indexing (losses, owner maps) is unchanged.
-        x = x[valid] if ragged else x.reshape(-1, self.d_model)
-        x = self.final_norm(x)
-
-        # Per-token predictions
-        out = self.prediction_head(x)                  # [total_N, head_out]
-        if self.affine_output:
-            # [total_N, C, 3] = (value, gx, gy) per channel
-            return out.view(-1, self.output_channels, 3)
-        return out                                     # [total_N, C]  (legacy)

@@ -18,12 +18,18 @@ from src.model.amr_model import AdaptiveMeshAeroModel
 from src.model.refinement_net import RefinementNet
 from src.model.reconstruction import tokens_to_grid, tokens_to_grid_affine
 from src.utils.mesh_visualization import plot_mesh
-from src.utils.model_utils import load_checkpoint
+from src.utils.model_utils import build_model_from_checkpoint
 from src.utils.prediction_visualization import plot_flow_comparison, plot_3d_prediction
 
 
-def create_model(args, checkpoint_file, dataset, input_channels=5, output_channels=3):
-    """Instantiate the transformer model and load weights from a checkpoint."""
+def create_model(args, checkpoint_file, dataset):
+    """Rebuild the trained transformer model from its checkpoint.
+
+    The architecture (d_model, n_layers, affine_output, ...) comes from the
+    checkpoint itself, so it always matches the weights. ``args`` still supplies
+    the *mesh* settings, which are not part of the model: the depth bounds
+    derived here are what ``predict_single`` rebuilds the quadtree with.
+    """
     # Configs express bounds as patch sizes; convert once to integer depths (mirrors
     # main.py) and inject back into args so predict_single reuses the same values.
     H, W = dataset.H, dataset.W
@@ -31,30 +37,18 @@ def create_model(args, checkpoint_file, dataset, input_channels=5, output_channe
     args["min_depth"] = min_depth
     args["max_depth"] = max_depth
 
-    model = AdaptiveMeshAeroModel(
-        input_channels=input_channels,
-        output_channels=output_channels,
-        d_model=args.get("d_model"),
-        n_layers=args.get("n_layers"),
-        n_heads=args.get("n_heads"),
-        d_ff=args.get("d_ff"),
-        dropout=args.get("dropout"),
-        affine_output=args.get("affine_output", False),
-    )
-    load_checkpoint(model, checkpoint_file)
+    model = build_model_from_checkpoint(AdaptiveMeshAeroModel, checkpoint_file)
     model.eval()
     return model, args
 
 
-def create_scorer(scorer_checkpoint, input_channels=5):
+def create_scorer(scorer_checkpoint):
     """Load a standalone frozen ``RefinementNet`` for learned-mesh inference."""
     if not scorer_checkpoint:
         raise ValueError(
             "learned-mesh inference needs a scorer checkpoint; set 'scorer_checkpoint_file' "
             "in the config to a trained RefinementNet checkpoint.")
-    scorer = RefinementNet(input_channels=input_channels)
-    load_checkpoint(scorer, scorer_checkpoint)
-    return scorer.eval()
+    return build_model_from_checkpoint(RefinementNet, scorer_checkpoint).eval()
 
 
 @torch.no_grad()
@@ -68,7 +62,6 @@ def predict_single(model, args, sample):
     """
     input_grid = sample["input"]                  # [H, W, C] numpy
     H, W, C = input_grid.shape
-    input_channels = model.input_channels
     output_channels = model.output_channels
 
     if args.get("model_trained") == "deterministic_transformer":
@@ -81,8 +74,7 @@ def predict_single(model, args, sample):
         token_array = nodes_to_token_array(leaves, H, W, C)
     else:
         # Learned mesh needs a frozen scorer to build the mesh at inference time.
-        scorer = create_scorer(args.get("checkpoint_file"),
-                               input_channels=input_channels)
+        scorer = create_scorer(args.get("checkpoint_file"))
         grid = torch.from_numpy(np.asarray(input_grid, dtype=np.float32)).unsqueeze(0)  # [1, H, W, C]
         depth_map = scorer(grid).squeeze(1)[0].numpy()                                  # [H, W]
         leaves = build_depth_guided_mesh(
@@ -117,9 +109,7 @@ if __name__ == "__main__":
     args = load_config(model_config, data_config)
     dataset, dataset_type = build_dataset(args)
 
-    model, args = create_model(args, checkpoint_file, dataset,
-                               input_channels=dataset.input_channels,
-                               output_channels=dataset.output_channels)
+    model, args = create_model(args, checkpoint_file, dataset)
 
     # Predict on the held-out test split, replayed from the config, so the plots
     # show a geometry (or cavity case) the model never trained on. The last test
