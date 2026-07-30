@@ -20,7 +20,7 @@ The mesh is built by a physics-based AMR criterion.
     leaves 
         ↓ nodes_to_token_array
     packed_tokens [total_N, C+3]                  (already batched/packed)
-        ↓ AdaptiveMeshAeroModel
+        ↓ AMRTransformer
     token predictions [total_N, output_channels]
 
 --- "learned" -----------------------------------------------------------
@@ -34,7 +34,7 @@ turns that score into the mesh.
     leaves
         ↓ nodes_to_token_array
     packed_tokens [total_N, C+3]
-        ↓ AdaptiveMeshAeroModel
+        ↓ AMRTransformer
     token predictions [total_N, output_channels]
 
 The scorer is trained separately by supervised regression against the variance
@@ -109,7 +109,7 @@ def _make_key_padding_mask(tokens_per_sample: List[int], n_max: int, device: tor
 # Main model
 # ---------------------------------------------------------------------------
 
-class AdaptiveMeshAeroModel(nn.Module):
+class AMRTransformer(nn.Module):
     """Per-token flow-field predictor over packed AMR tokens.
 
     Each token carries ``input_channels + 3`` features, structured as:

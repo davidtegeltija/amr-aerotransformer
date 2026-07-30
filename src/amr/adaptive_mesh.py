@@ -165,7 +165,7 @@ def _should_subdivide(
     predicate; ``functools.partial`` binds the field, criteria and depth bounds).
 
     Computes only the metrics whose thresholds are enabled, for the x, y, z
-    channels (Storage AVG step, Fig. 2 of AMR-Transformer), stores them on the
+    channels (Storage AVG step, Fig. 2 of the AMR-Transformer paper), stores them on the
     node for inspection, then returns True iff the cell should subdivide:
       * forced stop when the cell is at ``max_depth``;
       * forced split below ``min_depth``;

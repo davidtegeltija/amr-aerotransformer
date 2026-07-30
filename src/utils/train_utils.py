@@ -81,7 +81,7 @@ def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, 
 
     Args:
         scorer: Trained ``RefinementNet`` (produces the predicted depth map).
-        model: Transformer ``AdaptiveMeshAeroModel`` (consumes packed tokens).
+        model: Transformer ``AMRTransformer`` (consumes packed tokens).
         loader: DataLoader yielding ``grids`` and dense ``targets``.
         min_depth, max_depth, offset: Depth-guided mesh-builder parameters (must
             match the scorer's training bounds).

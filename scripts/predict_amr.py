@@ -14,7 +14,7 @@ from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
 from src.amr.quadtree import nodes_to_token_array
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
-from src.model.amr_model import AdaptiveMeshAeroModel
+from src.model.amr_model import AMRTransformer
 from src.model.refinement_net import RefinementNet
 from src.model.reconstruction import tokens_to_grid, tokens_to_grid_affine
 from src.utils.mesh_visualization import plot_mesh
@@ -37,7 +37,7 @@ def create_model(args, checkpoint_file, dataset):
     args["min_depth"] = min_depth
     args["max_depth"] = max_depth
 
-    model = build_model_from_checkpoint(AdaptiveMeshAeroModel, checkpoint_file)
+    model = build_model_from_checkpoint(AMRTransformer, checkpoint_file)
     model.eval()
     return model, args
 

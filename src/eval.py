@@ -11,9 +11,9 @@ evaluate - runs the model over a DataLoader and returns mean NMSE loss
 import torch
 from torch.utils.data import DataLoader
 
-from src.model.amr_model import AdaptiveMeshAeroModel
+from src.model.amr_model import AMRTransformer
 from src.model.refinement_net import RefinementNet
-from src.model.vit import ViT
+from src.model.vit_model import ViT
 from src.model.loss import nmse_loss, scorer_depth_loss
 from src.model.reconstruction import (
     precompute_affine_geometry,
@@ -23,7 +23,7 @@ from src.model.reconstruction import (
 
 @torch.no_grad()
 def evaluate_transformer(
-    model: AdaptiveMeshAeroModel,
+    model: AMRTransformer,
     val_loader: DataLoader,
     device: torch.device,
 ) -> float:

@@ -14,9 +14,9 @@ from torch.utils.tensorboard import SummaryWriter
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.oracle_depth import calibrate_global_tolerance
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn, VitCollateFn
-from src.model.amr_model import AdaptiveMeshAeroModel
+from src.model.amr_model import AMRTransformer
 from src.model.refinement_net import RefinementNet
-from src.model.vit import ViT
+from src.model.vit_model import ViT
 from src.train import train_transformer, train_scorer_supervised, train_vit
 from src.utils.config_utils import load_config
 from src.utils.data_utils import build_dataset, geometry_disjoint_split
@@ -146,7 +146,7 @@ def train_model(args, model, train_loader, val_loader, device, writer, save_path
 
 def main(args=None):
     parser = argparse.ArgumentParser(
-        description="Train AdaptiveMeshAeroModel",
+        description="Train AMRTransformer",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=
         """
@@ -273,7 +273,7 @@ def main(args=None):
             model = RefinementNet(input_channels=input_channels).to(device)
             print(f"Scorer parameters: {sum(p.numel() for p in model.parameters()):,}")
         else:
-            model = AdaptiveMeshAeroModel(
+            model = AMRTransformer(
                 input_channels=input_channels,
                 output_channels=output_channels,
                 d_model=args["d_model"],
@@ -300,29 +300,29 @@ def main(args=None):
     else:
         H, W = dataset.H, dataset.W
         patch_size = args["min_patch_size"]
-        n_hidden = args["n_hidden"]
-        n_head = args["n_head"]
+        d_model = args["d_model"]
+        n_heads = args["n_heads"]
         pos_embedding = args["pos_embedding"]
 
         if H % patch_size != 0 or W % patch_size != 0:
             raise SystemExit(f"image_size {(H, W)} must be divisible by patch_size {patch_size}")
 
-        if n_hidden % n_head != 0:
-            raise SystemExit(f"n_hidden {n_hidden} must be divisible by n_head {n_head}")
+        if d_model % n_heads != 0:
+            raise SystemExit(f"d_model {d_model} must be divisible by n_heads {n_heads}")
 
-        if pos_embedding == "sincos" and n_hidden % 4 != 0:
-            raise SystemExit(f"n_hidden {n_hidden} must be divisible by 4 when pos_embedding='sincos'")
+        if pos_embedding == "sincos" and d_model % 4 != 0:
+            raise SystemExit(f"d_model {d_model} must be divisible by 4 when pos_embedding='sincos'")
 
         print("\n======== Model (ViT baseline) ========")
         model = ViT(
             image_size=(H, W),
             patch_size=patch_size,
-            fun_dim=input_channels,
-            out_dim=output_channels,
+            input_channels=input_channels,
+            output_channels=output_channels,
+            d_model=d_model,
             n_layers=args["n_layers"],
-            n_hidden=n_hidden,
-            n_head=n_head,
-            mlp_ratio=args["mlp_ratio"],
+            n_heads=n_heads,
+            d_ff=args["d_ff"],
             dropout=args["dropout"],
             pos_embedding=pos_embedding)
         print(f"ViT parameters: {sum(p.numel() for p in model.parameters()):,}")

@@ -40,9 +40,6 @@ num_workers: 0                                # DataLoader workers. Only 0 keeps
 # decision_temp: null       # Smooth-max temperature (null = hard max)
 
 
-# ---- vit (no max_patch_size / d_model / n_heads / d_ff / affine_output / warmup_steps) ----
-# n_hidden: 256             # Divisible by n_head, and by 4 if pos_embedding=sincos
-# n_head: 8                 # Singular — the transformer branches use n_heads
-# mlp_ratio: 2
-# pos_embedding: sincos     # sincos | trainable
+# ---- vit (reuses d_model / n_layers / n_heads / d_ff / dropout above; no max_patch_size / affine_output / warmup_steps) ----
+# pos_embedding: sincos     # sincos | trainable. With sincos, d_model must be divisible by 4
 # min_patch_size: 4         # On this branch: the ViT patch size (pixels). Must divide H and W

@@ -236,7 +236,7 @@ def build_tree(
         node.features = np.zeros(data.shape[2], dtype=data.dtype)
         return
 
-    # 2. Compute per-channel mean features (Storage AVG step, Fig. 2 of AMR-Transformer)
+    # 2. Compute per-channel mean features (Storage AVG step, Fig. 2 of the AMR-Transformer paper)
     node.features = region.mean(axis=(0, 1))  # (C,)
 
     # 3. and 4. Subdivide into four children and recurse, or mark as leaf

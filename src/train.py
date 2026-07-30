@@ -11,7 +11,7 @@ Key design decisions
    with a boolean key-padding mask (cost B*N_max^2 instead of the dense
    block-diagonal mask's (sum N)^2), then unpadded back to the packed layout.
 
-2. **Warmup LR schedule** (AMR-Transformer style):
+2. **Warmup LR schedule** (as in the AMR-Transformer paper):
        lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t * warmup^{-1.5})
 
 3. **NMSE loss**: per-channel normalised MSE, scale-invariant across flow
@@ -42,9 +42,9 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.model.amr_model import AdaptiveMeshAeroModel
+from src.model.amr_model import AMRTransformer
 from src.model.refinement_net import RefinementNet
-from src.model.vit import ViT
+from src.model.vit_model import ViT
 from src.model.loss import nmse_loss, scorer_depth_loss
 from src.model.reconstruction import (
     precompute_affine_geometry,
@@ -62,7 +62,7 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
     """
     lr(t) = (1/sqrt(d_model)) * min(t^{-0.5}, t * warmup_steps^{-1.5})
 
-    Identical to the schedule used in AMR-Transformer and the original
+    Identical to the schedule used in the AMR-Transformer paper and the original
     Attention is All You Need paper.
     """
 
@@ -86,7 +86,7 @@ class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
 # ---------------------------------------------------------------------------
 
 def train_transformer(
-    model: AdaptiveMeshAeroModel,
+    model: AMRTransformer,
     train_loader: DataLoader,
     val_loader: DataLoader,
     device: torch.device,

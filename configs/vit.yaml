@@ -2,10 +2,10 @@
 
 # ---- Model ----
 model_trained: vit      # deterministic_transformer | learned_transformer | scorer | vit
-n_hidden: 256           # Divisible by n_head, and by 4 if pos_embedding=sincos
+d_model: 256            # Patch embedding width. Divisible by n_heads, and by 4 if pos_embedding=sincos
 n_layers: 5             # Encoder blocks
-n_head: 8               # Singular — the transformer branches use n_heads
-mlp_ratio: 2
+n_heads: 8              # Attention heads. Must divide d_model
+d_ff: 512               # Feed-forward inner width (previously mlp_ratio 2 x n_hidden 256)
 dropout: 0.2
 pos_embedding: sincos   # sincos | trainable
 min_patch_size: 4       # The ViT patch size (pixels); must divide H and W

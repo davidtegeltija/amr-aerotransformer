@@ -5,7 +5,7 @@ Shared pre-norm Transformer encoder block.
 
 The one attention/FFN layer both models in this project are built from:
 
-    * ``AdaptiveMeshAeroModel`` (src/model/amr_model.py) stacks it over padded
+    * ``AMRTransformer`` (src/model/amr_model.py) stacks it over padded
       variable-length AMR token sequences, passing a boolean key-padding mask;
     * ``ViT`` (src/model/vit_model.py) stacks it over fixed-length dense patch
       grids, where every sequence has the same length and no mask is needed.

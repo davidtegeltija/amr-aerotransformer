@@ -7,7 +7,7 @@ import torch
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.model.vit import ViT
+from src.model.vit_model import ViT
 from src.utils.config_utils import load_config
 from src.utils.data_utils import build_dataset, test_row_indices
 from src.utils.model_utils import build_model_from_checkpoint
