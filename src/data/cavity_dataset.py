@@ -13,7 +13,7 @@ Loads lid-driven cavity simulations laid out as per-case folders::
 The learning task is next-step prediction: given the flow (u, v) at time t,
 predict the flow at time t+1. A case with T timesteps yields T-1 pairs.
 
-Samples follow the same contract as :class:`~src.data.dataset.AeroDataset`::
+Samples follow the same contract as :class:`~src.data.dataset.WingDataset`::
 
     {
         "input":  np.ndarray [H, W, C],   # (u_t, v_t, + broadcast physics)
@@ -24,7 +24,7 @@ so the existing collate function, model and training loop consume it unchanged.
 The model needs no architecture change: construct it with
 ``input_channels = 2 + len(param_keys)`` and ``output_channels = 2``.
 
-For the SuperWing steady-state data, see :class:`~src.data.dataset.AeroDataset`.
+For the SuperWing steady-state data, see :class:`~src.data.dataset.WingDataset`.
 For the DataLoader collate function, see src.data.collate_fn.
 """
 
@@ -47,7 +47,7 @@ class CavityDataset(Dataset):
 
     Each case folder contributes ``T - 1`` consecutive-frame pairs. Physical
     parameters read from ``case.json`` are broadcast to constant channels and
-    appended to the input, mirroring how :class:`AeroDataset` appends the
+    appended to the input, mirroring how :class:`WingDataset` appends the
     angle-of-attack / Mach channels.
 
     Args:
@@ -272,7 +272,7 @@ class CavityDataset(Dataset):
         pair-level split leaks a case across train/val. Feed this to
         ``geometry_disjoint_split`` (see src.utils.data_utils) to build a
         case-disjoint split instead — the direct analogue of
-        :meth:`AeroDataset.geometry_ids`.
+        :meth:`WingDataset.geometry_ids`.
 
         Returns:
             Integer array of shape ``[N]`` with the case id of each row.

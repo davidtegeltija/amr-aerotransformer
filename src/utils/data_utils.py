@@ -4,55 +4,8 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from src.data.cavity_dataset import CavityDataset
-from src.data.dataset import AeroDataset
+from src.data.dataset import WingDataset
 from src.data.synthetic_dataset import SyntheticDataset
-
-
-# ---------------------------------------------------------------------------
-# Dataset construction — the one place a config's 'dataset' key picks a class
-# ---------------------------------------------------------------------------
-
-def build_dataset(args: Dict) -> Tuple[Dataset, str]:
-    """
-    Construct the dataset selected by a merged model+data config.
-
-    That fallback is why the resolved type is returned alongside the dataset:
-    it can differ from ``args['dataset']``, and callers that branch on the kind
-    of dataset they got (to pick a split, or a group id to split on) must follow
-    the choice actually made here rather than re-deriving it from the config.
-
-    Args:
-        args : merged config, i.e. a model config with a data config
-               (``configs/data/*.yaml``) merged over it. Every key read here
-               lives in that data half, so a config missing 'dataset' was
-               never merged and would otherwise fail much later with a
-               confusing error.
-    """
-    if "dataset" not in args:
-        raise KeyError(
-            "Config has no 'dataset' key. The data keys live in configs/data/*.yaml "
-            "and must be merged over the model config before building a dataset."
-        )
-
-    dataset_type = args["dataset"]
-    input_file = args.get("input_file")
-
-    if dataset_type == "wing_dataset" and input_file is not None:
-        print(f"Using wing data from {input_file}")
-        return AeroDataset(input_path=input_file, target_path=args["target_file"], index_path=args["index_file"]), dataset_type
-
-    if dataset_type == "cavity_dataset" and input_file is not None:
-        print(f"Using cavity next-step data from {input_file}")
-        return CavityDataset(input_path=input_file), dataset_type
-
-    if dataset_type == "synthetic_dataset" or input_file is None:
-        print("No input and target data provided -> using synthetic dataset.")
-        return SyntheticDataset(n_samples=64, seed=args["seed"]), dataset_type
-
-    raise ValueError(
-        f"Unknown dataset {dataset_type!r}. Valid options are: "
-        "wing_dataset, cavity_dataset, synthetic_dataset."
-    )
 
 
 def create_data_subset(
@@ -105,7 +58,7 @@ def create_data_subset(
     index_subset = np.concatenate(index_subsets, axis=0)
 
     if save_path:
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(save_path).mkdir(parents=True, exist_ok=True)
         np.save(f"{save_path}/geom_subset-{n_samples}.npy", input_subset)
         np.save(f"{save_path}/data_subset-{n_samples}.npy", target_subset)
         np.save(f"{save_path}/index_subset-{n_samples}.npy", index_subset)
@@ -120,7 +73,7 @@ def create_sample_npz(
     save_path: Optional[str] = None,
 ) -> None:
     """
-    Save one CFD sample as a .npz file compatible with AeroDataset.
+    Save one CFD sample as a .npz file compatible with WingDataset.
     
     Args:
         input_array  : [H, W, C] float32 input field
@@ -149,7 +102,7 @@ def geometry_disjoint_split(
 
     Args:
         geometry_ids : [N] geometry id of every dataset row
-                       (see ``AeroDataset.geometry_ids``)
+                       (see ``WingDataset.geometry_ids``)
         val_split    : fraction of *geometries* (not rows) used for validation
         seed         : seed for the geometry choice, so the split is
                        reproducible across runs
@@ -217,3 +170,46 @@ def test_row_indices(dataset, dataset_type: str, val_split: float, seed: int) ->
     group_ids = dataset.case_ids() if dataset_type == "cavity_dataset" else dataset.geometry_ids()
     _, _, test_idx = geometry_disjoint_split(group_ids, val_split, seed)
     return test_idx
+
+
+def build_dataset(args: Dict) -> Tuple[Dataset, str]:
+    """
+    Construct the dataset selected by a merged model+data config.
+
+    That fallback is why the resolved type is returned alongside the dataset:
+    it can differ from ``args['dataset']``, and callers that branch on the kind
+    of dataset they got (to pick a split, or a group id to split on) must follow
+    the choice actually made here rather than re-deriving it from the config.
+
+    Args:
+        args : merged config, i.e. a model config with a data config
+               (``configs/data/*.yaml``) merged over it. Every key read here
+               lives in that data half, so a config missing 'dataset' was
+               never merged and would otherwise fail much later with a
+               confusing error.
+    """
+    if "dataset" not in args:
+        raise KeyError(
+            "Config has no 'dataset' key. The data keys live in configs/data/*.yaml "
+            "and must be merged over the model config before building a dataset."
+        )
+
+    dataset_type = args["dataset"]
+    input_file = args.get("input_file")
+
+    if dataset_type == "wing_dataset" and input_file is not None:
+        print(f"Using wing data from {input_file}")
+        return WingDataset(input_path=input_file, target_path=args["target_file"], index_path=args["index_file"]), dataset_type
+
+    if dataset_type == "cavity_dataset" and input_file is not None:
+        print(f"Using cavity next-step data from {input_file}")
+        return CavityDataset(input_path=input_file), dataset_type
+
+    if dataset_type == "synthetic_dataset" or input_file is None:
+        print("No input and target data provided -> using synthetic dataset.")
+        return SyntheticDataset(n_samples=64, seed=args["seed"]), dataset_type
+
+    raise ValueError(
+        f"Unknown dataset {dataset_type!r}. Valid options are: "
+        "wing_dataset, cavity_dataset, synthetic_dataset."
+    )

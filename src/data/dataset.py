@@ -22,7 +22,7 @@ import numpy as np
 from torch.utils.data import Dataset
 
 
-class AeroDataset(Dataset):
+class WingDataset(Dataset):
     """
     Generic CFD dataset for real aerodynamic data.
 
@@ -44,12 +44,26 @@ class AeroDataset(Dataset):
     For a single .npy file the array is treated as inputs; targets must
     be provided separately (see save_sample_npz).
 
+
+    Geometry row layouts
+    --------------------
+    Every geometry is simulated at several operating conditions, so the raw
+    SuperWing arrays hold one geometry row per *wing* and one target row per
+    *simulation*. Both layouts of the input array are accepted:
+
+        one row per geometry   : the raw 'geom0.npy'; row i of the dataset reads
+                                 geometry ``index[i, 0]``. Nothing is duplicated,
+                                 so the whole dataset fits in memory.
+        one row per simulation : the aligned arrays written by
+                                 ``create_data_subset``, where the geometry rows
+                                 are already repeated to match the targets 1:1.
+
     Args:
         input_path  : path to a single .npz file (contains both arrays) or a .npy
                     file (requires target_path).
         target_path : path to a single .npy file with targets. Required when
                     input_path points to a .npy file (ignored for .npz)
-        index_path  : path to a single .npy file which defines the operating 
+        index_path  : path to a single .npy file which defines the operating
                     conditions
     """
 
@@ -88,8 +102,8 @@ class AeroDataset(Dataset):
             if not path_target.exists():
                 raise FileNotFoundError(f"target_path does not exist: {target_path}")            
 
-            self._inputs = np.load(path_input).astype(np.float32)
-            self._targets = np.load(path_target).astype(np.float32)
+            self._inputs = np.load(path_input, mmap_mode="r").astype(np.float32)
+            self._targets = np.load(path_target, mmap_mode="r").astype(np.float32)
 
             # Detect channel-first (N, C, W, H) and transpose to (N, H, W, C)
             if self._inputs.shape[1] < self._inputs.shape[2] and self._inputs.shape[1] < self._inputs.shape[3]:
@@ -107,39 +121,59 @@ class AeroDataset(Dataset):
         if self._targets.ndim != 4:
             raise ValueError(f"Targets must be 4-D [N, H, W, output_channels], got shape {self._targets.shape}.")
         
-        if self._inputs.shape[0] != self._targets.shape[0]:
-            raise ValueError(f"Inputs and targets must have the same number of samples, got {self._inputs.shape[0]} vs {self._targets.shape[0]}.")
-        
-        
-        N, H, W, _ = self._inputs.shape
+        self._index = np.load(path_index)
+        if self._index.shape[0] != self._targets.shape[0]:
+            raise ValueError(f"Index and targets must have the same number of rows, got {self._index.shape[0]} vs {self._targets.shape[0]}. The index file describes one simulation per target row, so the two are written together.")
+
+        # Column 0 of the index is the geometry each simulation was run on (see
+        # https://huggingface.co/datasets/yunplus/SuperWing). It is a row index
+        # into the raw geometry array
+        geometry_rows = self._index[:, 0].astype(int)
+        n_inputs, H, W, _ = self._inputs.shape
+
+        # One input row per target, so the geometry rows were already
+        # repeated to match and every row maps to itself
+        if n_inputs == self._targets.shape[0]:
+            self._geometry_rows = np.arange(n_inputs)
+        # Fewer input rows than targets, so each one is a geometry
+        # shared by several simulations
+        elif np.all(geometry_rows < n_inputs):
+            self._geometry_rows = geometry_rows
+        else:
+            raise ValueError(f"Inputs hold neither one row per target ({self._targets.shape[0]}) nor one row per geometry: got {n_inputs} rows, but the index refers to geometry {geometry_rows.max()}. Inputs, targets and index must come from the same dataset.")
+
         # Add operating conditions (angle of attack, Mach number) as inputs channels
         # The columns of the index file are defined in https://huggingface.co/datasets/yunplus/SuperWing
-        self._index = np.load(path_index)
         angle_of_attack = self._index[:, 2]
         mach_number = self._index[:, 3]
-        aoa_channel  = angle_of_attack.reshape(N, 1, 1, 1) * np.ones((N, H, W, 1), dtype=np.float32)
-        mach_channel = mach_number.reshape(N, 1, 1, 1) * np.ones((N, H, W, 1), dtype=np.float32)
-        self._inputs = np.concatenate([self._inputs, aoa_channel, mach_channel], axis=-1)    # (N, H, W, C+2)
+        self._conditions = np.column_stack((angle_of_attack, mach_number)).astype(np.float32)
 
-        # Expose dataset metadata
+        # Expose dataset metadata. Two input channels are appended per sample in
+        # __getitem__, so they are counted here but never materialised for the
+        # whole dataset (that alone would be ~19 GB on the full SuperWing set).
         self.H = H
         self.W = W
-        self.input_channels = self._inputs.shape[3]
+        self.input_channels = self._inputs.shape[3] + self._conditions.shape[1]
         self.output_channels = self._targets.shape[3]
 
         print(
-            f"AeroDataset: {len(self)} samples  |  "
+            f"WingDataset: {len(self)} samples  |  "
             f"grid {H}x{W}  |  "
             f"input_channels={self.input_channels}  output_channels={self.output_channels}"
         )
 
     def __len__(self) -> int:
-        return len(self._inputs)
+        return len(self._targets)
 
     def __getitem__(self, index: int) -> Dict:
+        geometry = self._inputs[self._geometry_rows[index]]                     # [H, W, C]
+
+        # Angle of attack and Mach number ride along as two constant channels.
+        conditions = np.broadcast_to(self._conditions[index], (self.H, self.W, 2))
+
         return {
             "index":  index,
-            "input":  self._inputs[index],
+            "input":  np.concatenate([geometry, conditions], axis=-1),          # [H, W, C+2]
             "target": self._targets[index],
         }
 

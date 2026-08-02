@@ -3,10 +3,16 @@
 Offline data prep: carve a smaller SuperWing dataset out of the full one.
 ========================================================================
 
-Run once, before training, to produce the ``*_subset-{n}.npy`` arrays that the
-data configs point at (see ``configs/data/wing.yaml``). Selects ``n_samples``
-geometries at random and keeps every simulation row belonging to them, so the
-subset stays geometry-complete and the geometry-disjoint split still works on it.
+Optional: only needed to train on *fewer* geometries than the dataset holds.
+``WingDataset`` reads the raw arrays directly (it resolves each simulation row to
+its geometry through column 0 of the index), so training on everything needs no
+preparation at all — point ``configs/data/wing.yaml`` at geom0/data/index.
+
+Selects ``n_samples`` geometries at random and keeps every simulation row
+belonging to them, so the subset stays geometry-complete and the
+geometry-disjoint split still works on it. The geometry rows are repeated to
+match the target rows, which is why a subset costs ~6.8x its geometry data on
+disk — the reason the full dataset is better read raw.
 
 The heavy lifting lives in ``src/utils/data_utils.py``; this file only supplies
 the paths and sizes for one run.
