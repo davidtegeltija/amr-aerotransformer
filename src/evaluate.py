@@ -33,6 +33,15 @@ SURFACE_REFERENCE_MAGNITUDES = np.array([2.35499597, 0.01597823, 0.00696571], dt
 # Order of the coefficients returned by ``aero_coefficients``.
 COEFFICIENT_NAMES = ("CL", "CD", "CMz")
 
+# Where the SuperWing index file keeps the numbers this module reads per case:
+# the angle of attack, the reference area every coefficient is normalized by, and
+# the solver's own (CL, CD, CMz) — the values the whole pipeline is scored
+# against. See https://huggingface.co/datasets/yunplus/SuperWing.
+INDEX_GEOMETRY_COLUMN = 0
+INDEX_ANGLE_OF_ATTACK_COLUMN = 2
+INDEX_REF_AREA_COLUMN = 4
+INDEX_COEFFICIENT_COLUMNS = [6, 7, 8]
+
 # Unit each coefficient error is quoted in: one lift count, one drag count and
 # one moment count. The counterpart of SURFACE_REFERENCE_MAGNITUDES for the
 # integrated coefficients, and the scale the field is conventionally read at —
@@ -107,7 +116,7 @@ def evaluate_error_rate(
     args,
     dataset,
     sample_indices,
-    error_fn=relative_l2
+    error_fn="l2"
 ):
     """Mean per-channel field error of a model over the given dataset rows.
 
@@ -156,9 +165,16 @@ def evaluate_error_rate(
                 offset=args.get("offset", 0.0)
             )
         else:
-            raise ValueError(f"Cannot evaluate {type(model).__name__}; expected ViT or AMRTransformer")
+            raise ValueError(f"Cannot evaluate {type(model).__name__}; expected **ViT** or **AMRTransformer**")
 
-        per_sample.append(error_fn(result["prediction"], result["ground_truth"]))
+        if error_fn == "l2":
+            error = relative_l2(result["prediction"], result["ground_truth"])
+        elif error_fn == "mae":
+            error = relative_mae(result["prediction"], result["ground_truth"])
+        else:
+            raise ValueError(f"Only **l2** or **mae** are valid error functions")
+        
+        per_sample.append(error)
 
     per_sample = np.stack(per_sample)                     # [n_samples, C]
     per_channel_error = 100.0 * per_sample.mean(axis=0)   # [C]
@@ -172,7 +188,7 @@ def evaluate_error_rate(
         "n_samples": len(sample_indices),
     }
 
-    print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  {error_fn.__name__}")
+    print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  {error_fn}")
     print(f"{'channel':>10}  {'error':>14}  {'accuracy':>10}")
 
     for c, (err, acc) in enumerate(zip(metrics["per_channel_error"], metrics["per_channel_accuracy"])):
@@ -199,17 +215,20 @@ def calculate_coefficients(
     The same integral the SuperWing solver reports, applied to whichever field
     is handed in — so calling it once on the ground truth and once on the
     prediction gives the pair of coefficient sets ``evaluate_aero_coefficients``
-    scores. Reproduces the solver's own CL within ~1% and CD within a few
-    percent on the stored fields; that offset is a property of the integration,
-    not of the model, and cancels when true and predicted fields are compared.
+    scores. On the stored fields it reproduces the solver's own coefficients
+    (columns 6-8 of the index file) to within a few parts in ten thousand, so
+    the gap it reports between a prediction and the reference is the model's
+    rather than the integrator's.
 
     Args:
-        geometry: Node coordinates ``(x, y, z)`` of the wing surface,
-            shape ``[H, W, 3]``, i.e. the first three channels of a dataset
-            sample's ``input``.
-        solution: Surface solution ``(cp, cf_tau, cf_z)``, shape ``[H, W, 3]``,
-            still carrying the stored channel scaling — a dataset ``target`` or
-            a model prediction of one.
+        geometry: Node coordinates ``(x, y, z)`` of the wing surface, shape
+            ``[H + 1, W + 1, 3]``. The solution lives on the cells this node
+            grid spans, so it carries one extra point in each direction — it is
+            a row of the original geometry file (``origingeom.npy``), laid out
+            channels-last like a dataset sample.
+        solution: Surface solution ``(cp, cf_tau, cf_z)`` at cell centres, shape
+            ``[H, W, 3]``, still carrying the stored channel scaling — a dataset
+            ``target`` or a model prediction of one.
         angle_of_attack: Angle of attack of the case, in degrees.
         ref_area: Reference area of the wing (column 4 of the SuperWing index
             file). Defaults to 1, which leaves the coefficients unnormalized.
@@ -219,7 +238,10 @@ def calculate_coefficients(
         quarter-chord point.
     """
     if geometry.shape[-1] != 3 or solution.shape[-1] != 3:
-        raise ValueError(f"expected 3 channels each, got geometry {geometry.shape} and solution {solution.shape}")
+        raise ValueError(f"Expected 3 channels each, got geometry {geometry.shape} and solution {solution.shape}")
+
+    if geometry.shape[:2] != (solution.shape[0] + 1, solution.shape[1] + 1):
+        raise ValueError(f"Geometry must be the node grid the solution cells span, i.e. one point larger in each direction: got geometry {geometry.shape} for solution {solution.shape}")
 
     # Dataset grids run [chordwise, spanwise, channel]; the surface integrals
     # index the mesh the other way round, so the two leading axes swap. Getting
@@ -228,10 +250,7 @@ def calculate_coefficients(
     solution = torch.from_numpy(np.asarray(solution, dtype=np.float32).transpose(1, 0, 2))
     solution = solution / torch.from_numpy(SOLUTION_CHANNEL_SCALES)
 
-    # The solution sits on mesh nodes, the integrals want it at the centre of
-    # every cell: average the four corner nodes each cell spans.
-    cells = 0.25 * (solution[:-1, :-1] + solution[:-1, 1:] + solution[1:, 1:] + solution[1:, :-1])
-    cp, cf = cells[..., 0], skin_friction_to_xyz(geometry, cells[..., 1:])
+    cp, cf = solution[..., 0], skin_friction_to_xyz(geometry, solution[..., 1:])
 
     # wind_force_coefficients rotates a batch of samples, hence the leading axis.
     angle_of_attack = torch.tensor([angle_of_attack], dtype=torch.float32)
@@ -241,26 +260,91 @@ def calculate_coefficients(
     return np.array([lift.item(), drag.item(), moment_z.item()], dtype=np.float32)
 
 
+# ---------------------------------------------------------------------------
+# Scoring one set of coefficients against another
+# ---------------------------------------------------------------------------
+def coefficient_errors(estimate: np.ndarray, reference: np.ndarray) -> dict:
+    """Score a set of coefficients against the set it should have reproduced.
+
+    Errors are reported as a mean absolute error normalized by the mean
+    magnitude of the reference over the split, rather than as a mean of
+    per-sample relative errors: CL and CMz cross zero as the angle of attack
+    sweeps, and a per-sample ratio explodes on those cases.
+
+    Args:
+        estimate: Coefficients under test, shape ``[n_samples, 3]``.
+        reference: Coefficients they are compared against, same shape.
+
+    Returns:
+        Dict with ``mae`` ``[3]``, the same error in counts ``mae_counts``
+        ``[3]``, ``reference`` ``[3]`` (mean magnitude of the reference),
+        ``per_coefficient_error`` / ``per_coefficient_accuracy`` ``[3]``
+        (percentages), and the scalar ``error`` / ``accuracy`` averaged over the
+        three coefficients.
+    """
+    mae = np.abs(estimate - reference).mean(axis=0)          # [3]
+    magnitude = np.abs(reference).mean(axis=0)               # [3]
+    per_coefficient_error = 100.0 * mae / magnitude
+
+    return {
+        "mae": mae,
+        "mae_counts": mae / COEFFICIENT_COUNT_SCALES,
+        "reference": magnitude,
+        "per_coefficient_error": per_coefficient_error,
+        "per_coefficient_accuracy": 100.0 - per_coefficient_error,
+        "error": float(per_coefficient_error.mean()),
+        "accuracy": float(100.0 - per_coefficient_error.mean()),
+    }
+
+
+def print_coefficient_errors(title: str, errors: dict) -> None:
+    """Print one ``coefficient_errors`` block as a per-coefficient table.
+
+    Args:
+        title: Line printed above the table, naming what is compared to what.
+        errors: The dict returned by ``coefficient_errors``.
+    """
+    print(f"\n{title}")
+    print(f"{'coef.':>10}  {'MAE':>12}  {'MAE (counts)':>13}  {'mean |ref|':>12}  {'error':>10}  {'accuracy':>10}")
+
+    for name, err_abs, counts, ref, err, acc in zip(COEFFICIENT_NAMES, errors["mae"], errors["mae_counts"],
+                                                    errors["reference"], errors["per_coefficient_error"],
+                                                    errors["per_coefficient_accuracy"]):
+        print(f"{name:>10}  {err_abs:>12.5f}  {counts:>13.1f}  {ref:>12.5f}  {err:>9.2f}%  {acc:>9.2f}%")
+
+    print(f"{'overall':>10}  {'':>12}  {'':>13}  {'':>12}  {errors['error']:>9.2f}%  {errors['accuracy']:>9.2f}%")
+
+
 @torch.no_grad()
 def evaluate_aero_coefficients(
     model,
     args,
     dataset,
     sample_indices,
-    ref_areas=None
+    index_array,
+    geometry_array
 ):
     """Accuracy of the predicted lift, drag and pitching moment over a set of rows.
 
     A prediction can score well pointwise and still integrate to the wrong
     forces, which is what a surrogate is ultimately used for. Each row is
-    predicted exactly as at inference time and both the predicted and the
-    ground-truth field are pushed through the same surface integral, so the
-    reported gap is the model's, not the integrator's.
+    predicted exactly as at inference time, and both the predicted and the
+    ground-truth field are pushed through the same surface integral.
 
-    Errors are reported as a mean absolute error normalized by the mean
-    magnitude of the true coefficient over the split, rather than as a mean of
-    per-sample relative errors: CL and CMz cross zero as the angle of attack
-    sweeps, and a per-sample ratio explodes on those cases.
+    The solver's own coefficients sit in the index file, so all three sets are
+    scored against each other:
+
+        prediction vs solver : the number that matters — how far the model's
+                               field lands from the coefficients the CFD run
+                               reported, integration error included.
+        truth vs solver      : the integrator's own error floor, obtained by
+                               feeding it the stored ground-truth field. Small
+                               (a few parts in ten thousand), and what is left
+                               of "prediction vs solver" if the model were
+                               perfect.
+        prediction vs truth  : the model's error alone, with the integration
+                               offset cancelled out because both sides go
+                               through the same integral.
 
     Args:
         model: The loaded model itself, which selects the inference path exactly
@@ -269,18 +353,19 @@ def evaluate_aero_coefficients(
             settings. Unused for a ``ViT``.
         dataset: The full dataset, before splitting.
         sample_indices: Rows to evaluate (typically the held-out test split).
-        ref_areas: Reference area of every dataset row, i.e. column 4 of the
-            SuperWing index file (``np.load(index_file)[:, 4]``). Optional: left
-            out, the coefficients stay unnormalized, which rescales each sample
-            by its own wing area but leaves the reported accuracy meaningful.
+        index_array: The SuperWing index file the dataset was built from
+            (``np.load(args["index_file"])``), one row per dataset row. Supplies
+            the angle of attack, the reference area, the solver's coefficients,
+            and the geometry row each case was run on.
+        geometry_array: The original geometry file (``origingeom.npy``), one row
+            per wing, holding the node grid the solution cells span. Indexed by
+            column 0 of ``index_array``, not by the dataset row.
 
     Returns:
-        Dict with ``mae`` ``[3]``, the same error in counts ``mae_counts``
-        ``[3]``, ``reference`` ``[3]`` (mean magnitude of the
-        true coefficients), ``per_coefficient_error`` / ``per_coefficient_accuracy``
-        ``[3]`` (percentages), the scalar ``error`` / ``accuracy`` averaged over
-        the three coefficients, the raw ``coefficients_true`` / ``coefficients_pred``
-        ``[n_samples, 3]``, and ``n_samples``.
+        Dict with one ``coefficient_errors`` block per comparison
+        (``prediction_vs_solver``, ``truth_vs_solver``, ``prediction_vs_truth``),
+        the raw ``coefficients_solver`` / ``coefficients_true`` /
+        ``coefficients_pred`` ``[n_samples, 3]``, and ``n_samples``.
     """
     if len(sample_indices) == 0:
         raise ValueError("no samples to evaluate; check val_split and the dataset")
@@ -288,7 +373,7 @@ def evaluate_aero_coefficients(
     refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
     scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
 
-    true, predicted = [], []
+    solver, true, predicted = [], [], []
     for index in tqdm(sample_indices, unit=" sample", desc="Integrating", disable=not sys.stderr.isatty()):
         if isinstance(model, ViT):
             result = predict_single_vit(model, dataset[index])
@@ -305,45 +390,36 @@ def evaluate_aero_coefficients(
         else:
             raise ValueError(f"Cannot evaluate {type(model).__name__}; expected ViT or AMRTransformer")
 
-        # Channels 0-2 of the input are the surface nodes and channel 3 is the
-        # angle of attack, broadcast over the grid by WingDataset.
-        input_grid = np.asarray(result["input_grid"])
-        geometry = input_grid[..., :3]
-        angle_of_attack = float(input_grid[0, 0, 3])
-        ref_area = 1.0 if ref_areas is None else float(ref_areas[index])
+        # The mesh the integrals run on is the *node* grid of the original
+        # geometry file, one point larger in each direction than the solution
+        # and shared by every case flown on that wing — hence the lookup through
+        # the geometry column rather than the dataset row. Both grids are laid
+        # out channels-last, like a dataset sample.
+        geometry = np.asarray(geometry_array[int(index_array[index, INDEX_GEOMETRY_COLUMN])]).transpose(2, 1, 0)
+        angle_of_attack = float(index_array[index, INDEX_ANGLE_OF_ATTACK_COLUMN])
+        ref_area = float(index_array[index, INDEX_REF_AREA_COLUMN])
 
+        solver.append(np.asarray(index_array[index, INDEX_COEFFICIENT_COLUMNS], dtype=np.float32))
         true.append(calculate_coefficients(geometry, result["ground_truth"], angle_of_attack, ref_area))
         predicted.append(calculate_coefficients(geometry, result["prediction"], angle_of_attack, ref_area))
 
+    solver = np.stack(solver)                               # [n_samples, 3]
     true = np.stack(true)                                   # [n_samples, 3]
     predicted = np.stack(predicted)                         # [n_samples, 3]
 
-    mae = np.abs(predicted - true).mean(axis=0)             # [3]
-    reference = np.abs(true).mean(axis=0)                   # [3]
-    per_coefficient_error = 100.0 * mae / reference
-
     metrics = {
-        "mae": mae,
-        "mae_counts": mae / COEFFICIENT_COUNT_SCALES,
-        "reference": reference,
-        "per_coefficient_error": per_coefficient_error,
-        "per_coefficient_accuracy": 100.0 - per_coefficient_error,
-        "error": float(per_coefficient_error.mean()),
-        "accuracy": float(100.0 - per_coefficient_error.mean()),
+        "prediction_vs_solver": coefficient_errors(predicted, solver),
+        "truth_vs_solver": coefficient_errors(true, solver),
+        "prediction_vs_truth": coefficient_errors(predicted, true),
+        "coefficients_solver": solver,
         "coefficients_true": true,
         "coefficients_pred": predicted,
         "n_samples": len(sample_indices),
     }
 
-    print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  aero coefficients"
-          f"{'' if ref_areas is not None else '  (unnormalized: no ref_areas given)'}")
-    print(f"{'coef.':>10}  {'MAE':>12}  {'MAE (counts)':>13}  {'mean |true|':>12}  {'error':>10}  {'accuracy':>10}")
-
-    for name, err, acc, err_abs, counts, ref in zip(COEFFICIENT_NAMES, metrics["per_coefficient_error"],
-                                                    metrics["per_coefficient_accuracy"], mae,
-                                                    metrics["mae_counts"], reference):
-        print(f"{name:>10}  {err_abs:>12.5f}  {counts:>13.1f}  {ref:>12.5f}  {err:>9.2f}%  {acc:>9.2f}%")
-
-    print(f"{'overall':>10}  {'':>12}  {'':>13}  {'':>12}  {metrics['error']:>9.2f}%  {metrics['accuracy']:>9.2f}%")
+    print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  aero coefficients")
+    print_coefficient_errors("prediction vs solver  (the model, integration error included)", metrics["prediction_vs_solver"])
+    print_coefficient_errors("ground truth vs solver  (the integrator's own error floor)", metrics["truth_vs_solver"])
+    print_coefficient_errors("prediction vs ground truth  (the model, integration cancelled)", metrics["prediction_vs_truth"])
 
     return metrics
