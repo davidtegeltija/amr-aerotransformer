@@ -18,11 +18,10 @@ from src.model.amr_model import AMRTransformer
 from src.model.refinement_net import RefinementNet
 from src.model.vit_model import ViT
 from src.train import train_transformer, train_scorer_supervised, train_vit
-from src.utils.config_utils import load_config
+from src.utils.config_utils import load_config, resolve_depth_bounds
 from src.utils.data_utils import build_dataset, geometry_disjoint_split
 from src.utils.model_utils import load_checkpoint
 from src.utils.train_utils import plot_loss_curves
-from src.utils.geometry_utils import patch_sizes_to_depth_bounds
 
 
 def split_by_group_id(dataset: Dataset, group_ids, val_split: float, seed: int, group_name: str):
@@ -178,7 +177,7 @@ def main(args=None):
     # ----------------------------------------------------------------
     # Make log file
     run_name = cli.name or f"{Path(cli.config).stem}_{Path(cli.data).stem}"
-    log_dir = Path("outputs/logs") / f"{datetime.now().strftime("%Y-%m-%d_%H-%M")}_{run_name}"
+    log_dir = Path("outputs/logs") / f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}_{run_name}"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{run_name}.log"
 
@@ -199,7 +198,7 @@ def main(args=None):
     # Make checkpoints dir
     checkpoint_dir = Path("outputs/checkpoints")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    save_path = checkpoint_dir / f"{datetime.now().strftime("%Y-%m-%d")}_{run_name}.pt"
+    save_path = checkpoint_dir / f"{datetime.now().strftime('%Y-%m-%d')}_{run_name}.pt"
 
     args = load_config(cli.config, cli.data)
 
@@ -258,15 +257,10 @@ def main(args=None):
         print("\n======== Model (AMR) ========")
 
         # Patch-size bounds -> Quadtree depth bounds
-        H, W = dataset.H, dataset.W
-        min_patch_size = args["min_patch_size"]
-        max_patch_size = args["max_patch_size"]
-        min_depth, max_depth = patch_sizes_to_depth_bounds(H, W, min_patch_size, max_patch_size)
-        args["min_depth"] = min_depth
-        args["max_depth"] = max_depth
-        print(f"Patch-size bounds -> depth bounds:\nmin_patch_size={min_patch_size}, "
-            f"max_patch_size={max_patch_size} -> min_depth={min_depth}, max_depth={max_depth} "
-            f"(grid {H}x{W})")
+        args = resolve_depth_bounds(args, dataset)
+        print(f"Patch-size bounds -> depth bounds:\nmin_patch_size={args['min_patch_size']}, "
+            f"max_patch_size={args['max_patch_size']} -> min_depth={args['min_depth']}, "
+            f"max_depth={args['max_depth']} (grid {dataset.H}x{dataset.W})")
         
         # Model
         if model_trained == "scorer":

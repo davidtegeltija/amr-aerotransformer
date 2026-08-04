@@ -5,7 +5,8 @@ Config loading — the one place a run's YAML files become an args dict.
 
 Contents
 --------
-load_config - merge a model config with a data config and validate the result
+load_config          - merge a model config with a data config and validate the result
+resolve_depth_bounds - turn the configured patch sizes into quadtree depth bounds
 
 A run is described by two YAML files: a model config (``configs/*.yaml``,
 what to train and with which hyperparameters) and a data config
@@ -22,6 +23,12 @@ from pathlib import Path
 from typing import Dict
 import yaml
 
+from src.utils.geometry_utils import patch_sizes_to_depth_bounds
+
+
+# ---------------------------------------------------------------------------
+# Config loading — model config + data config -> one validated args dict
+# ---------------------------------------------------------------------------
 
 def load_config(path: str, data_path: str) -> Dict:
     """
@@ -76,3 +83,28 @@ def load_config(path: str, data_path: str) -> Dict:
 
     print(cfg)  # Print out the whole yaml file so it can be logged
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Patch sizes -> quadtree depth bounds, the one conversion every run shares
+# ---------------------------------------------------------------------------
+
+def resolve_depth_bounds(args: Dict, dataset) -> Dict:
+    """Derive quadtree depth bounds from the configured patch sizes and store them in ``args``.
+
+    Configs express mesh bounds as pixel patch sizes; the builders, oracle and loss
+    all work in integer depths. This is the single conversion point, so every entry
+    point gets identical bounds for a given config + grid.
+
+    Args:
+        args: Merged config dict; gains ``min_depth`` and ``max_depth``.
+        dataset: Dataset supplying the grid dimensions ``H``, ``W``.
+
+    Returns:
+        The updated ``args``
+    """
+    H, W = dataset.H, dataset.W
+    min_depth, max_depth = patch_sizes_to_depth_bounds(H, W, args.get("min_patch_size"), args.get("max_patch_size"))
+    args["min_depth"] = min_depth
+    args["max_depth"] = max_depth
+    return args
