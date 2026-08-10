@@ -555,10 +555,6 @@ def save_plot(save_path: str | Path, figure: Figure, dpi: int = 150, use_date_su
     if save_path.suffix == "":
         save_path = save_path.with_suffix(".png")
 
-    # Add a timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    save_path = save_path.with_name(f"{timestamp}_{save_path.stem}{save_path.suffix}")
-
     # Add a current date subfolder for better organization
     if use_date_subfolder:
         subfolder = datetime.now().strftime("%Y-%m-%d")

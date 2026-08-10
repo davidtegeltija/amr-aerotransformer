@@ -6,7 +6,7 @@ import numpy as np
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.amr.refinement_criteria import RefinementCriteria, AERODYNAMIC_CRITERIA_2
+from src.amr.refinement_criteria import RefinementCriteria, CRITERIA_REGISTRY
 from src.data.synthetic_dataset import make_synthetic_field
 from src.amr.adaptive_mesh import build_adaptive_mesh, mesh_statistics
 from src.utils.plot import (
@@ -57,31 +57,33 @@ if __name__ == "__main__":
     sample_index = 0
     max_depth = 6
     min_depth = 2
+    criteria_name = "AERODYNAMIC_CRITERIA_2"
 
-    sample, mesh = create_mesh(data=data, sample_index=sample_index, max_depth=max_depth, min_depth=min_depth, refinement_criteria=AERODYNAMIC_CRITERIA_2)
+    sample, mesh = create_mesh(data=data, sample_index=sample_index, max_depth=max_depth, min_depth=min_depth, refinement_criteria=CRITERIA_REGISTRY[criteria_name])
 
     # --- Plotting ---
     show_plots = True
     # save_path = "outputs/plots"
     save_path = None
+    prefix = f"{save_path}/{criteria_name}" if save_path else None
 
     # Main mesh overlay
-    save_path_mesh = f"{save_path}/01_adaptive_mesh.png" if save_path else None
+    save_path_mesh = f"{prefix}_adaptive_mesh.png" if save_path else None
     title_mesh = "Adaptive Mesh (threshold=0.15, max_depth=6)"
     plot_mesh(sample, mesh, title=title_mesh, show=show_plots, save_path=save_path_mesh)
 
     # Per-depth subplot
-    save_path_depth = f"{save_path}/02_mesh_by_depth.png" if save_path else None
+    save_path_depth = f"{prefix}_mesh_by_depth.png" if save_path else None
     title_depth = "Adaptive Mesh by Depth"
     plot_mesh_by_depth(sample, mesh, title=title_depth, show=show_plots, save_path=save_path_depth)
 
     # Metric heatmap
-    save_path_heatmap = f"{save_path}/03_velocity_gradient.png" if save_path else None
+    save_path_heatmap = f"{prefix}_velocity_gradient.png" if save_path else None
     title_heatmap = "Velocity Gradient Magnitude per Patch"
     plot_metric_heatmap(sample, mesh, metric_name="velocity_gradient", title=title_heatmap, show=show_plots, save_path=save_path_heatmap)
 
     # Patch feature reconstruction
-    save_path_reconstruction = f"{save_path}/05_reconstruction.png" if save_path else None
+    save_path_reconstruction = f"{prefix}_reconstruction.png" if save_path else None
     title_features = "AMR Patch Reconstruction  (velocity_x)"
     plot_patch_features(sample, mesh, channel=0, title=title_features, show=show_plots, save_path=save_path_reconstruction)
 

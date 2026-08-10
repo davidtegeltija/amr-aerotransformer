@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -59,28 +60,25 @@ if __name__ == "__main__":
     # ------------------------
     # Plotting
     # ------------------------
+    model_name = Path(checkpoint_file).stem
 
     # --- Mesh --- (AMR only; the ViT predicts the dense grid, so there is none)
     if "mesh" in result:
-        plot_mesh(result["input_grid"], result["mesh"], show=False, save_path=f"outputs/plots/amr_mesh_sample={sample_index}.png")
+        plot_mesh(result["input_grid"], result["mesh"], show=False, save_path=f"outputs/plots/{model_name}_sample={sample_index}.png")
 
     # ---Flow ---
-    plot_flow_comparison(result["ground_truth"], result["prediction"], save_path=f"outputs/plots/prediction_test_sample={sample_index}.png")
+    plot_flow_comparison(result["ground_truth"], result["prediction"], save_path=f"outputs/plots/{model_name}_prediction_sample={sample_index}.png")
     # plot_3d_prediction(sample["input"], prediction)
 
 
     # ------------------------
     # Model Accuracy
     # ------------------------
-    
     # --- Prediction --- 
     metrics_l2 = evaluate_error_rate(model, args, dataset, test_idx, "l2")
     metrics_cae = evaluate_error_rate(model, args, dataset, test_idx, "mae")
 
     # --- Aero Coefficients ---
-    # The index file the dataset was built from, so its rows line up with the
-    # dataset rows; the geometry file stays memory-mapped (~3 GB) and is read
-    # one wing at a time through column 0 of the index.
     index_array = np.load(args["index_file"])
     geometry_array = np.load("/mnt/data/tegeltija/origingeom.npy", mmap_mode="r")
 
