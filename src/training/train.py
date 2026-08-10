@@ -1,4 +1,4 @@
-﻿"""
+"""
 ========================================================================
 Training pipeline for the Adaptive Mesh CFD model.
 ========================================================================
@@ -48,6 +48,7 @@ from src.models.reconstruction import (
     precompute_affine_geometry,
     tokens_to_grid_affine_torch,
 )
+from src.training.scheduler import WarmupScheduler
 from src.training.loss import nmse_loss, scorer_depth_loss
 from src.utils.checkpoint import save_checkpoint
 
