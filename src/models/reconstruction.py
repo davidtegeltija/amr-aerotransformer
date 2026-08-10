@@ -367,6 +367,64 @@ def _interp_reconstruction(
     return out.squeeze(0).permute(1, 2, 0)  # [H, W, C]
 
 
+@torch.no_grad()
+def _tokens_to_grid_idw(
+    predictions: torch.Tensor,
+    token_list: List[QuadNode],
+    H: int,
+    W: int,
+    output_channels: int,
+    bandwidth: float = 0.75,
+    chunk: int = 8192,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Scattered-data reconstruction by scale-aware inverse-distance weighting.
+
+    Each token's prediction is treated as a sample at its centroid; every output
+    pixel is a normalised distance-weighted blend of all token values, with a
+    per-token Gaussian bandwidth proportional to the cell size. Coarse cells get
+    broad, smooth influence (recovering intra-cell gradients); fine cells stay
+    local (keeping shocks sharp). The field is smooth everywhere and seam-free.
+
+    Args:
+        predictions: [N, output_channels] per-token predictions (any device).
+        token_list: N QuadNode leaves tiling the H x W grid.
+        H, W: Grid dimensions.
+        output_channels: C.
+        bandwidth: Gaussian sigma as a multiple of each token's cell size (px).
+            Smaller -> sharper / more local; larger -> smoother. ~0.5-0.8 is sane.
+        chunk: Pixels per chunk for the [chunk, N] distance matrix.
+        eps: Weight-sum floor.
+
+    Returns:
+        [H, W, output_channels] float32 tensor on CPU.
+    """
+    device = predictions.device
+    vals = predictions.reshape(len(token_list), output_channels).float()
+
+    cx = torch.tensor([(t.c0 + t.c1) * 0.5 for t in token_list], device=device)
+    cy = torch.tensor([(t.r0 + t.r1) * 0.5 for t in token_list], device=device)
+    size = torch.tensor([max(t.c1 - t.c0, t.r1 - t.r0) for t in token_list],
+                        device=device, dtype=torch.float32)
+    inv2h2 = 1.0 / (2.0 * (bandwidth * size).clamp_min(1.0) ** 2)   # [N]
+
+    rows = torch.arange(H, device=device) + 0.5
+    cols = torch.arange(W, device=device) + 0.5
+    gy, gx = torch.meshgrid(rows, cols, indexing="ij")
+    py, px = gy.reshape(-1), gx.reshape(-1)                          # [P]
+    P = px.numel()
+
+    out = torch.empty((P, output_channels), device=device, dtype=torch.float32)
+    for s in range(0, P, chunk):
+        e = min(s + chunk, P)
+        dx = px[s:e, None] - cx[None, :]                            # [p, N]
+        dy = py[s:e, None] - cy[None, :]
+        w = torch.exp(-(dx * dx + dy * dy) * inv2h2[None, :])        # [p, N]
+        w = w / (w.sum(1, keepdim=True) + eps)                       # partition of unity
+        out[s:e] = w @ vals                                         # [p, C]
+    return out.reshape(H, W, output_channels).cpu()
+
+
 # ---------------------------------------------------------------------------
 # Batch reconstruction (list of samples)
 # ---------------------------------------------------------------------------

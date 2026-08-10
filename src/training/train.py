@@ -15,7 +15,7 @@ Key design decisions
        lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t * warmup^{-1.5})
 
 3. **NMSE loss**: per-channel normalised MSE, scale-invariant across flow
-   quantities (see src.model.loss.nmse_loss).
+   quantities (see src.training.loss.nmse_loss).
 
 4. **Tokenization is done in the DataLoader workers** (CPU) so the GPU
    only ever touches float tensors.
@@ -29,7 +29,6 @@ predicted depth map against the variance-oracle depth target
 
 from __future__ import annotations
 
-
 import sys
 import time
 from typing import List, Optional, Tuple
@@ -42,49 +41,21 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.model.amr_model import AMRTransformer
-from src.model.refinement_net import RefinementNet
-from src.model.vit_model import ViT
-from src.model.loss import nmse_loss, scorer_depth_loss
-from src.model.reconstruction import (
+from src.models.amr_model import AMRTransformer
+from src.models.refinement_net import RefinementNet
+from src.models.vit_model import ViT
+from src.models.reconstruction import (
     precompute_affine_geometry,
     tokens_to_grid_affine_torch,
 )
-from src.eval import evaluate_transformer, evaluate_scorer, evaluate_vit
-from src.utils.model_utils import save_checkpoint
-
-
-# ---------------------------------------------------------------------------
-# Learning rate schedule (Transformer warmup)
-# ---------------------------------------------------------------------------
-
-class WarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
-    """
-    lr(t) = (1/sqrt(d_model)) * min(t^{-0.5}, t * warmup_steps^{-1.5})
-
-    Identical to the schedule used in the AMR-Transformer paper and the original
-    Attention is All You Need paper.
-    """
-
-    def __init__(self, optimizer, d_model: int, warmup_steps: int = 1000):
-        self.d_model = d_model
-        self.warmup_steps = warmup_steps
-        super().__init__(optimizer)
-
-    def get_lr(self):
-        step = max(1, self._step_count)
-        scale = (self.d_model ** -0.5) * min(
-            step ** -0.5,
-            step * self.warmup_steps ** -1.5
-        )
-        return [scale for _ in self.base_lrs]
+from src.training.loss import nmse_loss, scorer_depth_loss
+from src.utils.checkpoint import save_checkpoint
 
 
 # ---------------------------------------------------------------------------
 # Transformer training loop (mesh + per-token targets come pre-built from the
 # collate, so this is identical for deterministic and learned-mesh modes)
 # ---------------------------------------------------------------------------
-
 def train_transformer(
     model: AMRTransformer,
     train_loader: DataLoader,
@@ -214,11 +185,36 @@ def train_transformer(
 
     return train_loss_history, val_loss_history
 
+@torch.no_grad()
+def evaluate_transformer(
+    model: AMRTransformer,
+    val_loader: DataLoader,
+    device: torch.device,
+) -> float:
+    model.eval()
+    total_loss = 0.0
+    for batch in val_loader:
+        packed_tokens  = batch["packed_tokens"].to(device)
+        packed_targets = batch["packed_targets"].to(device)
+        tokens_per_sample = batch["tokens_per_sample"]
+        out = model(packed_tokens, tokens_per_sample)
+        if model.affine_output:
+            # Mirror the dense affine training loss so train/val are comparable.
+            dense_targets = batch["targets"].to(device)
+            Hd, Wd = dense_targets.shape[1], dense_targets.shape[2]
+            geom = precompute_affine_geometry(batch["token_lists"], tokens_per_sample, Hd, Wd)
+            dense_pred = tokens_to_grid_affine_torch(out["token_preds"], geom, Hd, Wd, model.output_channels)
+            total_loss += nmse_loss(dense_pred, dense_targets).item()
+        else:
+            total_loss += nmse_loss(out["token_preds"], packed_targets).item()
+
+    model.train()
+    return total_loss / len(val_loader)
+
 
 # ---------------------------------------------------------------------------
 # Supervised scorer training (variance-oracle target, transformer decoupled)
 # ---------------------------------------------------------------------------
-
 def train_scorer_supervised(
     scorer: RefinementNet,
     train_loader: DataLoader,
@@ -377,11 +373,41 @@ def train_scorer_supervised(
 
     return train_loss_history, val_loss_history
 
+@torch.no_grad()
+def evaluate_scorer(
+    scorer: RefinementNet, 
+    val_loader: DataLoader,
+    device: torch.device,
+    *, 
+    max_depth, 
+    min_depth, 
+    tv_weight,
+    decision_weight, 
+    decision_margin, 
+    decision_temp,
+) -> float:
+    """Mean supervised scorer loss over the val split."""
+    scorer.eval()
+    total_loss = 0.0
+    for batch in val_loader:
+        grids = batch["grids"].to(device)
+        oracle = batch["oracle_depth"].to(device)
+        d_pred = scorer(grids)
+        _, comp = scorer_depth_loss(
+            d_pred, oracle,
+            tv_weight=tv_weight, decision_weight=decision_weight,
+            min_depth=min_depth, max_depth=max_depth,
+            margin=decision_margin, decision_temp=decision_temp,
+        )
+        total_loss += comp["total"]
+
+    scorer.train()
+    return total_loss / len(val_loader)
+
 
 # ---------------------------------------------------------------------------
 # ViT baseline training (dense prediction, NMSE only)
 # ---------------------------------------------------------------------------
-
 def train_vit(
     model: ViT,
     train_loader: DataLoader,
@@ -464,3 +490,18 @@ def train_vit(
 
     return train_loss_history, val_loss_history
 
+@torch.no_grad()
+def evaluate_vit(
+    model: ViT, 
+    val_loader: DataLoader,
+    device: torch.device,
+) -> float:
+    model.eval()
+    total_loss = 0.0
+    for batch in val_loader:
+        grids   = batch["grids"].to(device).permute(0, 3, 1, 2).float()
+        targets = batch["targets"].to(device).permute(0, 3, 1, 2).float()
+        total_loss += nmse_loss(model(grids), targets, channel_dim=1).item()
+
+    model.train()
+    return total_loss / len(val_loader)

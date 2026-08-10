@@ -4,7 +4,7 @@ import torch
 from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
 from src.amr.quadtree import nodes_to_token_array
-from src.model.reconstruction import tokens_to_grid, tokens_to_grid_affine
+from src.models.reconstruction import tokens_to_grid, tokens_to_grid_affine
 
 
 @torch.no_grad()

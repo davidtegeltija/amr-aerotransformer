@@ -6,17 +6,17 @@ import numpy as np
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.utils.config_utils import load_config, resolve_depth_bounds
-from src.utils.data_utils import build_dataset, test_row_indices
-from src.utils.mesh_visualization import plot_mesh
-from src.utils.model_utils import build_model_from_checkpoint
-from src.utils.prediction_visualization import plot_flow_comparison
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
-from src.model.amr_model import AMRTransformer
-from src.model.refinement_net import RefinementNet
-from src.model.vit_model import ViT
-from src.evaluate import evaluate_aero_coefficients, evaluate_error_rate
-from src.inference import predict_single_amr, predict_single_vit
+from src.data.dataset_factory import build_dataset
+from src.data.split import test_row_indices
+from src.models.amr_model import AMRTransformer
+from src.models.refinement_net import RefinementNet
+from src.models.vit_model import ViT
+from src.evaluation.evaluate import evaluate_aero_coefficients, evaluate_error_rate
+from src.inference.predict import predict_single_amr, predict_single_vit
+from src.utils.config import load_config, resolve_depth_bounds
+from src.utils.checkpoint import build_model_from_checkpoint
+from src.utils.plot import plot_mesh, plot_flow_comparison
 
 
 if __name__ == "__main__":
@@ -26,9 +26,6 @@ if __name__ == "__main__":
 
     args = load_config(model_config, data_config)
     dataset, dataset_type = build_dataset(args)
-
-    # Add min_depth/max_depth to args
-    args = resolve_depth_bounds(args, dataset)
 
     # Predict on the test split, replayed from the config
     test_idx = test_row_indices(dataset, dataset_type, args.get("val_split"), args.get("seed", 42))
@@ -41,6 +38,10 @@ if __name__ == "__main__":
         result = predict_single_vit(model, sample)
     else:
         model = build_model_from_checkpoint(AMRTransformer, checkpoint_file).eval()
+
+        # Add min_depth/max_depth to args. Only the AMR path builds a quadtree,
+        # and only its configs carry the patch sizes the bounds come from.
+        args = resolve_depth_bounds(args, dataset)
 
         refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
         scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
@@ -59,8 +60,9 @@ if __name__ == "__main__":
     # Plotting
     # ------------------------
 
-    # --- Mesh ---
-    plot_mesh(result["input_grid"], result["mesh"], show=False, save_path=f"outputs/plots/amr_mesh_sample={sample_index}.png")
+    # --- Mesh --- (AMR only; the ViT predicts the dense grid, so there is none)
+    if "mesh" in result:
+        plot_mesh(result["input_grid"], result["mesh"], show=False, save_path=f"outputs/plots/amr_mesh_sample={sample_index}.png")
 
     # ---Flow ---
     plot_flow_comparison(result["ground_truth"], result["prediction"], save_path=f"outputs/plots/prediction_test_sample={sample_index}.png")

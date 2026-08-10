@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.model.transformer import TransformerBlock
+from src.models.transformer import TransformerBlock
 
 
 def pair(t):

@@ -14,32 +14,15 @@ from torch.utils.tensorboard import SummaryWriter
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.oracle_depth import calibrate_global_tolerance
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn, VitCollateFn
-from src.model.amr_model import AMRTransformer
-from src.model.refinement_net import RefinementNet
-from src.model.vit_model import ViT
-from src.train import train_transformer, train_scorer_supervised, train_vit
-from src.utils.config_utils import load_config, resolve_depth_bounds
-from src.utils.data_utils import build_dataset, geometry_disjoint_split
-from src.utils.model_utils import load_checkpoint
-from src.utils.train_utils import plot_loss_curves
-
-
-def split_by_group_id(dataset: Dataset, group_ids, val_split: float, seed: int, group_name: str):
-    """Split a dataset into disjoint train/val/test subsets by group id (geometry or case)."""
-    try:
-        train_idx, val_idx, test_idx = geometry_disjoint_split(group_ids, val_split, seed)
-        train_dataset = Subset(dataset, train_idx)
-        val_dataset = Subset(dataset, val_idx)
-        test_dataset = Subset(dataset, test_idx)
-        print(f"{group_name}-disjoint split (seed={seed}): "
-              f"{len(train_idx)} train / {len(val_idx)} val / {len(test_idx)} test")
-        return train_dataset, val_dataset, test_dataset
-    except ValueError as e:
-        print(f"WARNING: {e}")
-        print("Falling back to validating on the full training set. This is an "
-              "overfit sanity check only — val_loss is NOT a generalization metric "
-              f"when train and val share a {group_name.lower()}.")
-        return dataset, dataset, dataset
+from src.data.dataset_factory import build_dataset
+from src.data.split import split_by_group_id
+from src.models.amr_model import AMRTransformer
+from src.models.refinement_net import RefinementNet
+from src.models.vit_model import ViT
+from src.training.train import train_transformer, train_scorer_supervised, train_vit
+from src.utils.config import load_config, resolve_depth_bounds
+from src.utils.checkpoint import load_checkpoint
+from src.utils.plot import plot_loss_curves
 
 
 def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, device: torch.device):

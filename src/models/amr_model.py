@@ -79,7 +79,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 
-from src.model.transformer import TransformerBlock
+from src.models.transformer import TransformerBlock
 
 
 # ---------------------------------------------------------------------------

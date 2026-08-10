@@ -40,8 +40,6 @@ run can be checked against them directly.
 Note the target channels are stored pre-scaled by ``(1, 150, 300)``; undo that
 scaling before integrating, or the friction contribution is off by two orders of
 magnitude.
-
-Adapted to torch from the numpy originals in ``cfdpost.utils``.
 """
 
 import torch

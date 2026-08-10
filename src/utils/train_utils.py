@@ -4,14 +4,14 @@ from typing import List, Optional, Tuple
 from matplotlib import pyplot as plt
 import torch
 
-from src.model.loss import nmse_loss
-from src.model.reconstruction import (
+from src.training.loss import nmse_loss
+from src.models.reconstruction import (
     precompute_affine_geometry,
     tokens_to_grid_affine_torch,
     tokens_to_grid_torch,
 )
 from src.amr.quadtree import QuadNode
-from src.utils.visualization_utils import save_plot
+from src.utils.plot import save_plot
 
 
 def tau_schedule(epoch: int, tau_start: float, tau_end: float, T: int) -> float:
@@ -127,34 +127,8 @@ def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, 
     return total_nmse / max(1, n), tokens / max(1, samples)
 
 
-def plot_loss_curves(
-    train_loss_history: List[float],
-    val_loss_history: List[float],
-    epochs: int,
-    show: bool = False,
-    save_path: Optional[str | Path] = None
-):
-    """ Plot the training and validation loss curves for training diagnostics """
-    train_steps = torch.arange(1, epochs + 1, 1)
-
-    fig = plt.figure(figsize=(10, 4))
-    plt.plot(train_steps, train_loss_history, label="train_loss")
-    plt.plot(train_steps, val_loss_history, label="val_loss")
-    plt.legend()
-    plt.title(f"Training Loss Curves for {epochs} Epochs")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.grid(True)
-
-    if save_path:
-        save_plot(save_path, fig)
-
-    if show:
-        plt.show()
-        
-
 if __name__ == "__main__":
-    from src.model.loss import smooth_loss
+    from src.training.loss import smooth_loss
     # tau_schedule
     assert abs(tau_schedule(0, 5.0, 0.5, 10) - 5.0) < 1e-6
     assert abs(tau_schedule(9, 5.0, 0.5, 10) - 0.5) < 1e-6

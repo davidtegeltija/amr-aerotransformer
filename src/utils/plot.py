@@ -9,21 +9,65 @@ plot_metric_heatmap : Show a heatmap of a chosen physics metric on the original 
 plot_patch_features : Reconstruct and display the field from averaged patch features
 plot_score_map      : Render a per-pixel refinement score as a heatmap (optionally over geometry)
 animate_mesh_refinement  : Depth-by-depth animated GIF of the quadtree build (requires Pillow)
+
+
+Flow field and token-level visualization utilities.
+
+Functions
+---------
+plot_flow_comparison  : Side-by-side comparison of ground truth vs predicted flow fields
+plot_token_statistics : Histogram of token counts per sample and (optionally) cell size distribution.
+plot_3d_prediction    : 3D surface rendering of predicted fields over wing geometry
 """
 
+from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 from matplotlib.collections import PatchCollection
+from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 
 from src.amr.quadtree import QuadNode
-from src.utils.visualization_utils import save_plot, channel_image, sum_image, color_map
 
 
+# ---------------------------------------------------------------------------
+# Training Visualization
+# ---------------------------------------------------------------------------
+def plot_loss_curves(
+    train_loss_history: List[float],
+    val_loss_history: List[float],
+    epochs: int,
+    show: bool = False,
+    save_path: Optional[str | Path] = None
+):
+    """ Plot the training and validation loss curves for training diagnostics """
+    train_steps = np.arange(1, epochs + 1, 1)
+
+    fig = plt.figure(figsize=(10, 4))
+    plt.plot(train_steps, train_loss_history, label="train_loss")
+    plt.plot(train_steps, val_loss_history, label="val_loss")
+    plt.legend()
+    plt.title(f"Training Loss Curves for {epochs} Epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid(True)
+
+    if save_path:
+        save_plot(save_path, fig)
+
+    if show:
+        plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Mesh Visualization
+# ---------------------------------------------------------------------------
 def plot_mesh(
     sample: np.ndarray,
     mesh: List[QuadNode],
@@ -87,6 +131,7 @@ def plot_mesh(
         plt.show()
 
     return fig
+
 
 def plot_mesh_by_depth(
     sample: np.ndarray,
@@ -324,10 +369,7 @@ def plot_score_map(
     return fig
 
 
-# ---------------------------------------------------------------------------
 # Depth-by-depth refinement animation
-# ---------------------------------------------------------------------------
-
 def animate_mesh_refinement(
     grid: np.ndarray,
     token_list: List[QuadNode],
@@ -372,20 +414,221 @@ def animate_mesh_refinement(
     print(f"Saved animation to {save_path}")
 
 
-if __name__ == "__main__":
-    import os
+# ---------------------------------------------------------------------------
+# Prediction Visualization
+# ---------------------------------------------------------------------------
+def plot_flow_comparison(
+    ground_truth: np.ndarray,
+    prediction: np.ndarray,
+    channel_names: Optional[List[str]] = None,
+    figsize_per_col: float = 4.0,
+    title: str = "Ground truth  vs  Prediction",
+    show: bool = False,
+    save_path: Optional[str] = None,
+) -> None:
+    """Side-by-side comparison of ground truth vs predicted flow fields."""
+    if ground_truth.shape != prediction.shape:
+        raise ValueError(f"Shape mismatch: ground_truth={ground_truth.shape} prediction={prediction.shape}")
+    
+    output_channels = ground_truth.shape[-1]
+    names = channel_names or [f"channel {i}" for i in range(output_channels)]
 
-    H, W = 256, 128
-    rows = np.arange(H).reshape(H, 1)
-    cols = np.arange(W).reshape(1, W)
-    r0, c0 = H / 2, W / 2
-    sigma_r, sigma_c = H / 6, W / 6
-    score_map = np.exp(
-        -(((rows - r0) ** 2) / (2 * sigma_r ** 2) + ((cols - c0) ** 2) / (2 * sigma_c ** 2))
+    # 3 cols per output channel: GT | Pred | |Error|
+    n_cols = 3
+    n_rows = output_channels
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * figsize_per_col, n_rows * figsize_per_col))
+
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
+
+    fig.suptitle(title, fontsize=13, y=1.01)
+
+    for r in range(output_channels):
+        gt = ground_truth[..., r]
+        pred = prediction[..., r]
+        err  = np.abs(gt - pred)
+
+        vmin = min(gt.min(), pred.min())
+        vmax = max(gt.max(), pred.max())
+
+        for col, (data, label) in enumerate(zip([gt, pred, err], ["Ground truth", "Prediction", "|Error|"])):
+            ax = axes[r, col]
+            vm = err.max() if col == 2 else vmax
+            im = ax.imshow(
+                data, origin="upper", cmap="hot" if col == 2 else "RdBu_r",
+                vmin=0 if col == 2 else vmin,
+                vmax=vm,
+                interpolation="bilinear",
+            )
+            ax.set_title(f"{names[r]}  -  {label}", fontsize=9)
+            ax.axis("off")
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+
+def plot_token_statistics(
+    token_counts: List[int],
+    cell_sizes: Optional[List[float]] = None,
+    title: str = "Token statistics",
+    show: bool = False,
+    save_path: Optional[str] = None,
+) -> None:
+    """Histogram of token counts per sample and, optionally, cell size distribution."""
+    n_plots = 2 if cell_sizes else 1
+    fig, axes = plt.subplots(1, n_plots, figsize=(6 * n_plots, 4))
+    if n_plots == 1:
+        axes = [axes]
+
+    axes[0].hist(token_counts, bins=30, color="steelblue", edgecolor="white")
+    axes[0].set_xlabel("Tokens per sample")
+    axes[0].set_ylabel("Count")
+    axes[0].set_title(f"{title}\nmean={np.mean(token_counts):.0f}  min={min(token_counts)}  max={max(token_counts)}")
+
+    if cell_sizes:
+        axes[1].hist(cell_sizes, bins=40, color="coral", edgecolor="white", log=True)
+        axes[1].set_xlabel("Normalised cell size")
+        axes[1].set_ylabel("Count (log)")
+        axes[1].set_title("Cell size distribution")
+
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+
+def plot_3d_prediction(
+    geom: np.ndarray,
+    prediction: np.ndarray,
+    *,
+    title: str = "Adaptive Mesh",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> None:
+    """3D surface rendering of predicted fields over wing geometry."""
+    fig = plt.figure()
+    ax: Axes3D = fig.add_subplot(projection="3d")
+
+    elev = 68; azim =120 
+
+    _, _, colors = color_map(prediction[..., 0], "gist_rainbow", alpha=1, dmin=-1, dmax=1)    # cp
+    x = geom[:, :, 0]
+    y = geom[:, :, 1]
+    z = geom[:, :, 2]
+    ax.plot_surface(x, y, z, facecolors=colors, edgecolor="none", rstride=1, cstride=3, shade=True)
+    ax.view_init(elev=elev, azim=azim)
+
+    # Remove background planes (panes)
+    ax.set_axis_off()
+    # ax.grid(False)
+    # ax.xaxis.pane.set_visible(False)
+    # ax.yaxis.pane.set_visible(False)
+    # ax.zaxis.pane.set_visible(False)
+
+    plt.title(title)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def save_plot(save_path: str | Path, figure: Figure, dpi: int = 150, use_date_subfolder: bool = False) -> None:
+    """ Save a matplotlib figure to disk under a date-organised subfolder """
+    save_path = Path(save_path)
+
+    # Check for figure type. Default is PNG
+    if save_path.suffix == "":
+        save_path = save_path.with_suffix(".png")
+
+    # Add a timestamp
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    save_path = save_path.with_name(f"{timestamp}_{save_path.stem}{save_path.suffix}")
+
+    # Add a current date subfolder for better organization
+    if use_date_subfolder:
+        subfolder = datetime.now().strftime("%Y-%m-%d")
+        save_path = save_path.parent / subfolder / save_path.name
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    print(f"SUCCESS: Plot saved to {save_path}")
+
+
+def channel_image(data: np.ndarray, channel_idx: int = 0) -> np.ndarray:
+    """ Extract a 2-D image of a single channel from a physical field for display """
+    if data.ndim == 2:
+        return data.astype(float)
+
+    if data.ndim == 3:
+        if data.shape[0] < data.shape[1] and data.shape[0] < data.shape[2]:
+            # (C, H, W)
+            return data[channel_idx].astype(float)
+        else:
+            # (H, W, C)
+            return data[:, :, channel_idx].astype(float)
+
+    raise ValueError(f"Unsupported data shape {data.shape}")
+
+
+def sum_image(data: np.ndarray) -> np.ndarray:
+    """Sum all channels into a single 2-D image for background display."""
+    if data.ndim == 2:
+        return data.astype(float)
+
+    if data.ndim == 3:
+        if data.shape[0] < data.shape[1] and data.shape[0] < data.shape[2]:
+            return data.sum(axis=0).astype(float)
+        else:
+            return data.sum(axis=2).astype(float)
+
+    raise ValueError(f"Unsupported data shape {data.shape}")
+
+
+def color_map(
+    values: np.ndarray,
+    cmap_name: str,
+    *,
+    alpha: float = 1.0,
+    dmin: Optional[float] = None,
+    dmax: Optional[float] = None,
+    n_levels: Optional[int] = None,
+):
+    """Build a normalized matplotlib colormap and per-value RGBA colors.
+
+    Args:
+        values:    array whose values are mapped to colors
+        cmap_name: matplotlib colormap name (e.g. "viridis", "plasma")
+        alpha:     opacity applied to all returned RGBA colors
+        dmin:      lower bound for normalization (defaults to values.min())
+        dmax:      upper bound for normalization (defaults to values.max())
+        n_levels:  number of discrete colormap levels (None for continuous)
+
+    Returns:
+        (cmap, norm, colors) where colors has shape values.shape + (4,).
+    """
+    norm = Normalize(
+        vmin=dmin if dmin is not None else values.min(),
+        vmax=dmax if dmax is not None else values.max(),
     )
-    score_map = score_map.astype(np.float32)
+    cmap = plt.get_cmap(cmap_name, n_levels)
+    colors = cmap(norm(values))
+    colors[..., 3] = alpha
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    return cmap, norm, colors
 
-    save_path = os.path.join("outputs", "phase2_score_map_test.png")
-    ax = plot_score_map(score_map, title="synthetic")
-    ax.figure.savefig(save_path, dpi=150, bbox_inches="tight")
-    print(f"[visualization] Saved -> {save_path}")

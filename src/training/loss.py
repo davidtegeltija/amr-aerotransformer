@@ -102,8 +102,9 @@ def budget_loss(soft_N: torch.Tensor, n_target: int, n_floor: int = 16) -> torch
 #     (``beta=1`` == one depth level);
 #   * TV (optional, small): keeps hot regions contiguous (non-zero at the oracle);
 #   * decision-consistency (optional, off): per-cell max-reduced hinge pushing each
-#     depth-``d`` cell to the correct side of ``d``, using the same max reduction as
-#     inference (smooth max -> hard max as the temperature grows).
+#     depth-``d`` cell to the correct side of ``d`` (smooth max -> hard max as the
+#     temperature grows). Note: inference subdivides on the cell *mean* of
+#     ``d_pred``; this term is a conservative max-side approximation of it.
 # Loss anchor: at ``d_pred == oracle`` the supervised loss is zero (smooth-L1(x,x)=0,
 # decision term in the hard-max limit with zero margin, TV weight 0).
 
@@ -130,8 +131,8 @@ def _cell_reduce_max(
 ) -> torch.Tensor:
     """Reduce ``x`` [B,1,H,W] over non-overlapping ``kernel`` cells.
 
-    With ``temp is None`` this is a hard max (exactly the inference reduction).
-    With a finite ``temp`` it is a numerically-stabilised smooth max
+    With ``temp is None`` this is a hard max. With a finite ``temp`` it is a
+    numerically-stabilised smooth max
     ``(1/T) * logsumexp(T * x)`` over each cell, which approaches the hard max as
     ``T`` grows but gives gradient to every pixel in the cell.
     """
@@ -206,7 +207,7 @@ def scorer_depth_loss(
         min_depth, max_depth: Decision-depth range for the decision term.
         margin: Decision hinge margin.
         decision_temp: Smooth-max temperature for the decision term; ``None``
-            uses the hard max (the inference reduction and the anchor limit).
+            uses the hard max (the anchor limit).
 
     Returns:
         ``(loss, components)`` where ``components`` holds the scalar value of

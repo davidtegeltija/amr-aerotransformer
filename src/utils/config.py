@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Dict
 import yaml
 
-from src.utils.geometry_utils import patch_sizes_to_depth_bounds
+from src.amr.mesh_bounds import patch_sizes_to_depth_bounds
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +88,6 @@ def load_config(path: str, data_path: str) -> Dict:
 # ---------------------------------------------------------------------------
 # Patch sizes -> quadtree depth bounds, the one conversion every run shares
 # ---------------------------------------------------------------------------
-
 def resolve_depth_bounds(args: Dict, dataset) -> Dict:
     """Derive quadtree depth bounds from the configured patch sizes and store them in ``args``.
 

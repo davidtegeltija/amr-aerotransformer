@@ -134,7 +134,7 @@ def _should_subdivide_depth(
 
 if __name__ == "__main__":
     import numpy as np
-    from src.utils.geometry_utils import mesh_token_bounds
+    from src.amr.mesh_bounds import mesh_token_bounds
 
     H, W = 256, 128
     floor, cap = mesh_token_bounds(H, W, min_depth=2, max_depth=5)

@@ -9,7 +9,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from src.amr.refinement_criteria import RefinementCriteria, AERODYNAMIC_CRITERIA_2
 from src.data.synthetic_dataset import make_synthetic_field
 from src.amr.adaptive_mesh import build_adaptive_mesh, mesh_statistics
-from src.utils.mesh_visualization import (
+from src.utils.plot import (
     plot_mesh,
     plot_mesh_by_depth,
     plot_metric_heatmap,

@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Dict, Tuple
 
 
 def max_reachable_depth(H: int, W: int, min_cell_size: int, max_depth: int) -> int:
@@ -158,3 +158,4 @@ def patch_sizes_to_depth_bounds(
         )
     
     return min_depth, max_depth
+
