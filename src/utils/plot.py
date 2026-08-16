@@ -16,13 +16,15 @@ Flow field and token-level visualization utilities.
 Functions
 ---------
 plot_flow_comparison  : Side-by-side comparison of ground truth vs predicted flow fields
+plot_channel_sections : Chordwise curves of one solution channel at selected spanwise stations
+plot_coefficient_correlation : Predicted vs target integrated coefficient over a set of samples
 plot_token_statistics : Histogram of token counts per sample and (optionally) cell size distribution.
 plot_3d_prediction    : 3D surface rendering of predicted fields over wing geometry
 """
 
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from matplotlib.collections import PatchCollection
 from matplotlib.colors import Normalize
@@ -34,6 +36,14 @@ from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 
 from src.amr.quadtree import QuadNode
+from src.evaluation.metrics import SOLUTION_CHANNEL_SCALES
+
+# Axis labels for the coefficients ``calculate_coefficients`` returns, in its order.
+COEFFICIENT_LABELS = ("$C_L$", "$C_D$", "$C_{Mz}$")
+
+# Axis labels for the SuperWing solution channels (cp, cf_tau, cf_z), in the
+# order they are stored; see SOLUTION_CHANNEL_SCALES in src.evaluation.metrics.
+SOLUTION_CHANNEL_LABELS = ("$C_p$", r"$C_{f,\tau}$", "$C_{f,z}$")
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +481,179 @@ def plot_flow_comparison(
 
     if show:
         plt.show()
+
+
+def plot_channel_sections(
+    geometry: np.ndarray,
+    predictions: np.ndarray | Dict[str, np.ndarray],
+    ground_truth: Optional[np.ndarray] = None,
+    *,
+    spanwise_position: Optional[List[int]] = None,
+    channel: int = 0,
+    title: str = "Chordwise section curves",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Plot one solution channel against the chordwise coordinate at selected
+    spanwise stations.
+
+    Column ``j`` of the grid is a spanwise station and row ``i`` walks once
+    around that section, so a single station traces a closed loop: the upper
+    and lower surface branches meet at the leading and trailing edge.
+
+    Args:
+        geometry:     Node coordinates ``[H, W, C]`` with ``(x, y, z)`` first;
+                      extra channels (e.g. the appended operating conditions)
+                      are ignored.
+        predictions:  Predicted fields ``[H, W, C]``, or a ``{model name: fields}``
+                      dict to overlay several models.
+        ground_truth: Optional target fields of the same shape, drawn as a
+                      dashed reference curve.
+        spanwise_position: Spanwise column indices to plot. Defaults to three
+                      stations at 25%, 50% and 75% of the span.
+        channel:      Channel index to plot, in the stored ``(cp, cf_tau, cf_z)``
+                      order. Labelled from `SOLUTION_CHANNEL_LABELS`.
+        title:        Figure title.
+        show:         Display the figure.
+        save_path:    Write the figure to this path (date subfolder).
+    """
+    named_predictions = {"Prediction": predictions} if isinstance(predictions, np.ndarray) else predictions
+
+    # Datasets other than SuperWing carry their own channels, so fall back to
+    # the bare index rather than mislabelling one of them.
+    channel_label = SOLUTION_CHANNEL_LABELS[channel] if channel < len(SOLUTION_CHANNEL_LABELS) else f"channel {channel}"
+
+    # The channels are stored pre-scaled, so divide the factor out to plot the
+    # physical coefficient the axis is labelled with. Cp's factor is 1.
+    channel_scale = SOLUTION_CHANNEL_SCALES[channel] if channel < len(SOLUTION_CHANNEL_SCALES) else 1.0
+
+    if ground_truth is not None and ground_truth.shape[:2] != geometry.shape[:2]:
+        raise ValueError(f"Grid mismatch: ground_truth={ground_truth.shape[:2]} geometry={geometry.shape[:2]}")
+
+    # Grids are stored [chordwise, spanwise, channel]: axis 0 walks around the
+    # section, axis 1 runs root to tip. A station is therefore a *column*.
+    n_spanwise_position = geometry.shape[1]
+    if spanwise_position is None:
+        spanwise_position = [int(n_spanwise_position * f) for f in (0.25, 0.5, 0.75)]
+
+    model_colors = plt.get_cmap("tab10")
+    fig, axes = plt.subplots(1, len(spanwise_position), figsize=(5 * len(spanwise_position), 4.5), squeeze=False, sharey=True)
+
+    for ax, station in zip(axes[0], spanwise_position):
+        if not 0 <= station < n_spanwise_position:
+            raise ValueError(f"Station {station} out of range for {n_spanwise_position} spanwise columns")
+
+        x = geometry[:, station, 0].astype(float)
+        # chord = x.max() - x.min()
+        # x_over_c = (x - x.min()) / (chord if chord > 0 else 1.0)
+
+        if ground_truth is not None:
+            ax.plot(x, ground_truth[:, station, channel] / channel_scale, color="black", linestyle="--", linewidth=1.2, label="Ground truth")
+
+        for color_idx, (name, prediction) in enumerate(named_predictions.items()):
+            ax.plot(x, prediction[:, station, channel] / channel_scale, color=model_colors(color_idx % 10), linewidth=1.4, label=name)
+
+        ax.axhline(0.0, color="grey", linewidth=0.6, alpha=0.6)
+        ax.set_title(f"Spanwise Position {station}  (y/b ≈ {station / max(n_spanwise_position - 1, 1):.2f})", fontsize=10)
+        ax.set_xlabel("x")
+        ax.grid(True, alpha=0.3)
+
+        # Suction (negative Cp) upwards by convention
+        if channel == 0:
+            ax.invert_yaxis()
+
+    axes[0][0].set_ylabel(channel_label)
+    axes[0][0].legend(fontsize=9)
+
+    fig.suptitle(title, fontsize=13)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_coefficient_correlation(
+    reference: np.ndarray,
+    predictions: np.ndarray | Dict[str, np.ndarray],
+    *,
+    coefficient: int = 1,
+    title: str = "Integrated coefficient  -  prediction vs target",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Scatter one integrated coefficient of every sample against its target.
+
+    A prediction can score well pointwise and still integrate to the wrong
+    force, so this plots the number the surrogate is actually used for: each
+    sample is one point, the target coefficient on the x axis and the predicted
+    one on the y axis. Points on the dashed diagonal integrate to the target
+    exactly; a model that lands consistently above or below it has a bias, one
+    that scatters around it has noise, and the two failure modes read apart at
+    a glance where a single mean error would not separate them.
+
+    Args:
+        reference:    Target coefficients ``[n_samples, 3]`` holding
+                      ``(CL, CD, CMz)`` per sample, as returned by
+                      ``evaluate_aero_coefficients`` (its ``coefficients_true``
+                      for the integrated ground truth, or ``coefficients_solver``
+                      for the solver's own values).
+        predictions:  Predicted coefficients ``[n_samples, 3]`` in the same row
+                      order, or a ``{model name: coefficients}`` dict to overlay
+                      several models.
+        coefficient:  Column to plot: 0 = CL, 1 = CD (default), 2 = CMz.
+        title:        Figure title.
+        show:         Display the figure.
+        save_path:    Write the figure to this path (date subfolder).
+    """
+    named_predictions = {"Prediction": predictions} if isinstance(predictions, np.ndarray) else predictions
+
+    if not 0 <= coefficient < len(COEFFICIENT_LABELS):
+        raise ValueError(f"coefficient {coefficient} out of range for {COEFFICIENT_LABELS}")
+
+    label = COEFFICIENT_LABELS[coefficient]
+    target = reference[:, coefficient].astype(float)
+
+    model_colors = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    # The diagonal spans everything drawn, so both sides of it stay visible even
+    # when a model sits entirely off the target range.
+    values = [target] + [p[:, coefficient].astype(float) for p in named_predictions.values()]
+    low = min(v.min() for v in values)
+    high = max(v.max() for v in values)
+    margin = 0.05 * (high - low if high > low else max(abs(high), 1.0))
+    limits = (low - margin, high + margin)
+
+    ax.plot(limits, limits, color="black", linestyle="--", linewidth=1.2, label="Perfect agreement")
+
+    for color_idx, (name, prediction) in enumerate(named_predictions.items()):
+        predicted = prediction[:, coefficient].astype(float)
+        mae = np.abs(predicted - target).mean()
+        ax.scatter(target, predicted, s=22, alpha=0.75, color=model_colors(color_idx % 10), edgecolor="none", label=f"{name}  (MAE {mae:.5f})")
+
+    ax.set_xlim(limits)
+    ax.set_ylim(limits)
+    ax.set_aspect("equal")
+    ax.set_xlabel(f"Target {label}")
+    ax.set_ylabel(f"Predicted {label}")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=9)
+
+    fig.suptitle(f"{title}  ({len(target)} samples)", fontsize=13)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
 
 
 def plot_token_statistics(
