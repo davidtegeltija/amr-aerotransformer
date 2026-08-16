@@ -14,6 +14,7 @@ Coordinate convention (row-major, matching numpy/image layout):
 """
 
 from __future__ import annotations
+import math
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 import numpy as np
@@ -256,9 +257,26 @@ def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int) -> np.nd
 
     Columns:
         0..C-1  : per-channel mean features (from node.features)
-        C       : x_center  -- normalised column centre  = x_center / W
-        C+1     : y_center  -- normalised row centre     = y_center / H
-        C+2     : cell_size -- normalised max dimension  = max(width/W, height/H)
+        C       : x_center   -- normalised column centre = x_center / W
+        C+1     : y_center   -- normalised row centre    = y_center / H
+        C+2     : cell_level -- refinement depth = -log2(max(width/W, height/H))
+
+    The size channel is stored as a log2 level rather than the raw normalised
+    extent because cell size is inherently a power of two. A leaf at quadtree
+    depth d has normalised extent 2**-d, so this column is just d, giving evenly
+    spaced integers 0, 1, 2, ... instead of the geometrically bunched 1, 1/2,
+    1/4, ... The consumer is the Fourier positional encoding in AMRTransformer,
+    whose fixed frequency bank is shared across all three meta channels; raw
+    extents crowd every refinement level into a narrow band near zero, where the
+    low frequencies are near-linear and the high ones alias, so neither end of
+    the bank separates a coarse cell from a fine one cleanly. Levels spread the
+    same information across a range the bank resolves. Non-power-of-two extents
+    (partial edge cells from a uniform mesh) stay well defined as a float level.
+
+    Note:
+        This is the *model's* view of cell size. Anything doing geometry with the
+        cell -- e.g. the affine ramp normalisation in models/reconstruction.py --
+        needs the linear extent and computes it from the leaf directly.
 
     Args:
         nodes: Leaf ``QuadNode`` s to tokenize.
@@ -276,5 +294,5 @@ def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int) -> np.nd
         arr[i, :C] = node.features if node.features is not None else 0.0
         arr[i, C] = x_center / W
         arr[i, C + 1] = y_center / H
-        arr[i, C + 2] = max(node.width / W, node.height / H)
+        arr[i, C + 2] = -math.log2(max(node.width / W, node.height / H))
     return arr

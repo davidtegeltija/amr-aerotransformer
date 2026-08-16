@@ -43,7 +43,7 @@ of this model.
 
 Architecture:
     token_embedding: MLP(physical_dim -> d_model) projecting per-token physical features into the latent space. `physical_dim = token_dim - 3`.
-    pos_embedding:   Fixed log-spaced Fourier features over the 3 positional meta channels (x_c, y_c, size), followed by an MLP into d_model.
+    pos_embedding:   Fixed log-spaced Fourier features over the 3 positional meta channels (x_c, y_c, cell_level), followed by an MLP into d_model. One set of frequencies, scaled per channel by POS_FREQ_SCALE, since x/y and cell_level are not on the same scale.
     input_norm:      LayerNorm applied to the sum of token + positional embeddings.
     encoder:         Stack of pre-norm TransformerBlock layers (src/model/transformer.py, shared with the ViT baseline).
     final_norm:      LayerNorm before the prediction head.
@@ -73,6 +73,7 @@ Batching strategy (pad to per-batch max around the encoder):
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List
 
 import torch
@@ -80,6 +81,40 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 
 from src.models.transformer import TransformerBlock
+
+
+# ---------------------------------------------------------------------------
+# Positional frequency scaling
+# ---------------------------------------------------------------------------
+# Per-channel multiplier applied to the shared log-spaced frequencies, in the
+# meta order (x_center, y_center, cell_level). One set of frequencies feeds all
+# three channels, but they do not live on the same scale, and one set of values
+# cannot serve both:
+#
+#   x_center, y_center are normalised to [0, 1], so a frequency f completes
+#   f / (2*pi) cycles across the whole domain. Without the 2*pi the highest
+#   frequency (2**8) completes only ~40 cycles over a 128-column grid -- a ~3 px
+#   period, which leaves adjacent leaf centres at the finest refinement nearly
+#   collinear in feature space -- and the lowest seven frequencies sweep under
+#   pi radians across the entire domain, i.e. they are still on the near-linear
+#   arc of sin/cos and add nothing the following MLP could not get from
+#   x_center itself. The 2*pi reads them as cycles-per-domain instead of
+#   radians-per-domain, which spends every frequency on a distinguishable
+#   period.
+#
+#   cell_level is a small integer (the leaf's refinement depth), spanning a
+#   handful of values -- a 256x128 grid with patch bounds 1..16 reaches exactly
+#   four, depths 4..7. The same 2*pi would be actively harmful there: it maps
+#   every integer level onto the same phase for any frequency completing a whole
+#   number of cycles, collapsing those to a constant. Left unscaled, the low
+#   frequencies vary smoothly across the levels (keeping a coarse-to-fine
+#   ordering) while the high ones alias them onto effectively random but well
+#   separated codes -- measured adjacent-level cosine similarity 0.02, against
+#   0.21 if the 2*pi were applied here too.
+#
+# These are properties of what the three channels *mean*, not of any dataset, so
+# they are fixed here rather than exposed as config.
+POS_FREQ_SCALE = (2.0 * math.pi, 2.0 * math.pi, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +149,10 @@ class AMRTransformer(nn.Module):
 
     Each token carries ``input_channels + 3`` features, structured as:
         [physical_channels (input_channels) | positional_meta (3)]
-    where the positional meta channels are (x_c, y_c, size). Physical and
+    where the positional meta channels are (x_c, y_c, cell_level), the last being
+    the leaf's refinement depth -log2(normalised extent); see
+    src/amr/quadtree.py:nodes_to_token_array for why size is stored as a level.
+    Physical and
     positional features are embedded separately, summed, normalized, then
     refined by a stack of pre-norm Transformer blocks. The final per-token
     embedding is mapped to ``output_channels`` flow-field predictions.
@@ -157,7 +195,7 @@ class AMRTransformer(nn.Module):
         self.affine_output = affine_output
         self.d_model = d_model
         self.pos_dim = 3
-        self.token_dim = input_channels + self.pos_dim  # C + (x_center, y_center, size)
+        self.token_dim = input_channels + self.pos_dim  # C + (x_center, y_center, cell_level)
 
         # Every constructor argument, recorded so save_checkpoint can store it and
         # build_model_from_checkpoint can rebuild this exact architecture from the
@@ -185,10 +223,14 @@ class AMRTransformer(nn.Module):
         )
 
         # --- Positional Embedding layer ---
-        # Fixed log-spaced frequencies, not learned
-        self.register_buffer("pos_freqs", 2.0 ** torch.linspace(0, 8, n_fourier // 2).unsqueeze(0))  # [1, F/2]
+        # Fixed log-spaced frequencies, not learned. One shared set, scaled per
+        # meta channel by POS_FREQ_SCALE (see the note at the top of this module
+        # for why x/y and cell_level cannot share one unscaled set).
+        freqs = 2.0 ** torch.linspace(0, 8, n_fourier // 2)                 # [F/2]
+        scale = torch.tensor(POS_FREQ_SCALE).unsqueeze(-1)                  # [pos_dim, 1]
+        self.register_buffer("pos_freqs", scale * freqs.unsqueeze(0))       # [pos_dim, F/2]
         fourier_dim = self.pos_dim * n_fourier
-        # Projects raw token position meta [3] into the latent space [d_model].
+        # Projects the Fourier-encoded position meta into the latent space [d_model].
         self.pos_embedding = nn.Sequential(
             nn.Linear(fourier_dim, d_model * 2),
             nn.GELU(),
@@ -230,8 +272,11 @@ class AMRTransformer(nn.Module):
         """Encode positional meta channels as concatenated sin/cos Fourier features.
 
         Args:
-            pos:   Positional channels of shape [total_N, 3] (x_c, y_c, size).
-            freqs: Fixed log-spaced frequencies of shape [1, F/2].
+            pos:   Positional channels of shape [total_N, 3] (x_c, y_c, cell_level).
+            freqs: Fixed log-spaced frequencies of shape [3, F/2], already scaled
+                per channel by POS_FREQ_SCALE. The per-channel row is what lets
+                one shared set serve channels that are not on the same scale; it
+                broadcasts against the [total_N, 3, 1] positions.
 
         Returns:
             Fourier features of shape [total_N, 3*F].
@@ -245,7 +290,7 @@ class AMRTransformer(nn.Module):
 
         Args:
             packed_tokens: ``[total_N, C+3]`` concatenated tokens of all samples,
-                with the last 3 channels treated as positional meta (x_c, y_c, size).
+                with the last 3 channels treated as positional meta (x_c, y_c, cell_level).
             tokens_per_sample: per-sample token counts (``len == B``).
 
         Returns:

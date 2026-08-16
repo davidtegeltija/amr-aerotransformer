@@ -127,8 +127,11 @@ def precompute_affine_geometry(
 
     offset = 0
     for b, leaves in enumerate(token_lists):
-        # Per-leaf normalised centres/sizes (matching nodes_to_token_array),
-        # reused for both the box fill and the nearest-leaf fallback.
+        # Per-leaf normalised centres and linear extents, reused for both the box
+        # fill and the nearest-leaf fallback. The centres match the meta layout in
+        # nodes_to_token_array; the extent deliberately does not -- that column is
+        # stored as a log2 level for the positional encoding, while the ramp below
+        # needs the linear extent it divides by.
         centres = np.empty((len(leaves), 2), dtype=np.float32)   # (x_c, y_c)
         sizes = np.empty(len(leaves), dtype=np.float32)
         for i, leaf in enumerate(leaves):
