@@ -54,6 +54,23 @@ from src.utils.checkpoint import save_checkpoint
 
 
 # ---------------------------------------------------------------------------
+# Peak GPU memory tracking (counter reset per epoch, so the reading covers one
+# epoch of training + validation)
+# ---------------------------------------------------------------------------
+def reset_peak_gpu(device: torch.device) -> None:
+    """Reset the CUDA peak-memory counter (no-op on CPU)."""
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def peak_gpu_gb(device: torch.device) -> float:
+    """Peak allocated GPU memory in GiB since the last reset (0.0 on CPU)."""
+    if device.type != "cuda":
+        return 0.0
+    return torch.cuda.max_memory_allocated(device) / 1024 ** 3
+
+
+# ---------------------------------------------------------------------------
 # Transformer training loop (mesh + per-token targets come pre-built from the
 # collate, so this is identical for deterministic and learned-mesh modes)
 # ---------------------------------------------------------------------------
@@ -80,6 +97,7 @@ def train_transformer(
     scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
     best_val_loss = float('inf')
+    max_gpu_gb = 0.0
     interactive = sys.stderr.isatty()
     global_step = 0
 
@@ -97,6 +115,7 @@ def train_transformer(
         grad_abs_sum = torch.zeros(2)
         grad_abs_steps = 0
         t0 = time.time()
+        reset_peak_gpu(device)
 
         with tqdm(train_loader, unit=" batch", leave=False, desc=f"Training Epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for batch in tq_loader:
@@ -149,6 +168,10 @@ def train_transformer(
         val_loss = evaluate_transformer(model, val_loader, device)
         val_loss_history.append(val_loss)
 
+        # Peak GPU memory over this epoch's train + val passes (0.0 on CPU)
+        gpu_gb = peak_gpu_gb(device)
+        max_gpu_gb = max(max_gpu_gb, gpu_gb)
+
         # Affine probe: mean |gx|, |gy| over the epoch (empty in non-affine mode)
         grad_str = ""
         if grad_abs_steps > 0:
@@ -160,7 +183,8 @@ def train_transformer(
         print(f"[{tag}] epoch {epoch:03d}/{epochs}"
             f"  train_loss={train_loss_history[-1]:.6f}"
             f"  val_loss={val_loss:.6f}"
-            f"  time={elapsed:.1f}s{grad_str}"
+            f"  time={elapsed:.1f}s"
+            f"  gpu_peak={gpu_gb:.2f}GiB{grad_str}"
         )
 
         # Log the metrics for TensorBoard
@@ -170,6 +194,7 @@ def train_transformer(
             writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
             writer.add_scalar("Tokens/mean_N", epoch_mean, epoch)
             writer.add_scalar("Time/epoch_s", elapsed, epoch)
+            writer.add_scalar("GPU/peak_mem_GiB", gpu_gb, epoch)
             if grad_abs_steps > 0:
                 writer.add_scalar("Affine/mean_abs_gx", mean_gx, epoch)
                 writer.add_scalar("Affine/mean_abs_gy", mean_gy, epoch)
@@ -182,7 +207,8 @@ def train_transformer(
                 pad = " " * len(f"[{tag}] ")
                 print(f"{pad}Saved best model to {saved.name}")
 
-    print(f"\nTransformer training complete. Best val loss: {best_val_loss:.6f}")
+    print(f"\nTransformer training complete. Best val loss: {best_val_loss:.6f}"
+          f"  Peak GPU memory: {max_gpu_gb:.2f}GiB")
 
     return train_loss_history, val_loss_history
 
@@ -264,6 +290,7 @@ def train_scorer_supervised(
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     best_val_loss = float("inf")
+    max_gpu_gb = 0.0
     interactive = sys.stderr.isatty()
     train_loss_history: List[float] = []
     val_loss_history: List[float] = []
@@ -272,6 +299,7 @@ def train_scorer_supervised(
         scorer.train()
         epoch_loss = 0.0
         t0 = time.time()
+        reset_peak_gpu(device)
         # Per-depth pixel histograms (predicted vs oracle), accumulated over the
         # epoch and reset each epoch. Vectorised via bincount on the rounded depth
         # maps already in scope — no mesh build, no signature change. Reveals
@@ -325,6 +353,10 @@ def train_scorer_supervised(
         )
         val_loss_history.append(val_loss)
 
+        # Peak GPU memory over this epoch's train + val passes (0.0 on CPU)
+        gpu_gb = peak_gpu_gb(device)
+        max_gpu_gb = max(max_gpu_gb, gpu_gb)
+
         # Depth-distribution diagnostic (no mesh build, no signature change)
         # tokens-per-depth-per-sample = frac_d * 4^d  (each depth-d leaf tiles
         # H*W/4^d pixels); summing over depths gives an approximate mean_N
@@ -347,7 +379,8 @@ def train_scorer_supervised(
         print(f"[{tag}] epoch {epoch:03d}/{epochs}"
             f"  train_loss={train_loss_history[-1]:.6f}"
             f"  val_loss={val_loss:.6f}"
-            f"  time={elapsed:.1f}s{depth_str}"
+            f"  time={elapsed:.1f}s"
+            f"  gpu_peak={gpu_gb:.2f}GiB{depth_str}"
         )
 
         # Log the metrics for TensorBoard
@@ -356,6 +389,7 @@ def train_scorer_supervised(
             writer.add_scalar("Loss/val", val_loss, epoch)
             writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
             writer.add_scalar("Time/epoch_s", elapsed, epoch)
+            writer.add_scalar("GPU/peak_mem_GiB", gpu_gb, epoch)
             writer.add_scalar("Tokens/mean_N_pred", pred_mean_N, epoch)
             writer.add_scalar("Tokens/mean_N_oracle", oracle_mean_N, epoch)
             for d in range(max_depth + 1):
@@ -370,7 +404,8 @@ def train_scorer_supervised(
                 pad = " " * len(f"[{tag}] ")
                 print(f"{pad}Saved best model to {saved.name}")
 
-    print(f"\nScorer training complete. Best val loss: {best_val_loss:.6f}")
+    print(f"\nScorer training complete. Best val loss: {best_val_loss:.6f}"
+          f"  Peak GPU memory: {max_gpu_gb:.2f}GiB")
 
     return train_loss_history, val_loss_history
 
@@ -430,6 +465,7 @@ def train_vit(
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     best_val_loss = float("inf")
+    max_gpu_gb = 0.0
     interactive = sys.stderr.isatty()
 
     # Track loss history to see how the network behaves during training
@@ -440,6 +476,7 @@ def train_vit(
         model.train()
         epoch_loss = 0.0
         t0 = time.time()
+        reset_peak_gpu(device)
 
         with tqdm(train_loader, leave=False, desc=f"ViT epoch {epoch}/{epochs}", disable=not interactive) as tq_loader:
             for batch in tq_loader:
@@ -464,12 +501,17 @@ def train_vit(
         val_loss = evaluate_vit(model, val_loader, device)
         val_loss_history.append(val_loss)
 
+        # Peak GPU memory over this epoch's train + val passes (0.0 on CPU)
+        gpu_gb = peak_gpu_gb(device)
+        max_gpu_gb = max(max_gpu_gb, gpu_gb)
+
         # Log the metrics
         tag = "vit"
         print(f"[{tag}] epoch {epoch:03d}/{epochs}"
             f"  train_loss={train_loss_history[-1]:.6f}"
             f"  val_loss={val_loss:.6f}"
             f"  time={elapsed:.1f}s"
+            f"  gpu_peak={gpu_gb:.2f}GiB"
         )
 
         # Log the metrics for TensorBoard
@@ -478,6 +520,7 @@ def train_vit(
             writer.add_scalar("Loss/val", val_loss, epoch)
             writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
             writer.add_scalar("Time/epoch_s", elapsed, epoch)
+            writer.add_scalar("GPU/peak_mem_GiB", gpu_gb, epoch)
 
         # Save the best model
         if val_loss < best_val_loss:
@@ -487,7 +530,8 @@ def train_vit(
                 pad = " " * len(f"[{tag}] ")
                 print(f"{pad}Saved best model to {saved.name}")
 
-    print(f"\nViT training complete. Best val loss: {best_val_loss:.6f}")
+    print(f"\nViT training complete. Best val loss: {best_val_loss:.6f}"
+          f"  Peak GPU memory: {max_gpu_gb:.2f}GiB")
 
     return train_loss_history, val_loss_history
 
