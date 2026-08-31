@@ -1,6 +1,6 @@
 # ---- Model ----
 model_trained: learned_transformer      # deterministic_transformer | learned_transformer | scorer | vit
-d_model: 256                            # Token embedding width; also sets the LR schedule scale in train_transformer
+d_model: 256                            # Token embedding width; also sets the LR schedule scale under schedule: noam
 n_layers: 5                             # Encoder blocks
 n_heads: 8                              # Attention heads; must divide d_model
 d_ff: 512                               # Feed-forward inner width
@@ -15,4 +15,7 @@ checkpoint_file: "outputs/checkpoints/2026-07-16_scorer_supervised_cavity.pt"   
 epochs: 250
 batch_size: 128
 warmup_steps: 1000                      # LR warm-up steps (transformer branches only)
+schedule: cosine                        # cosine (AdamW + warmup + cosine decay) | noam (Adam + inverse-sqrt)
+lr: 0.001                               # Peak learning rate. Ignored under schedule=noam, whose peak is fixed by d_model
+weight_decay: 0.01                      # AdamW decay, matrix params only. Ignored under schedule=noam
 num_workers: 0                          # DataLoader workers; only 0 keeps the AMR collates' per-sample mesh cache across epochs

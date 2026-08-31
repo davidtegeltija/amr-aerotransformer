@@ -11,8 +11,15 @@ Key design decisions
    with a boolean key-padding mask (cost B*N_max^2 instead of the dense
    block-diagonal mask's (sum N)^2), then unpadded back to the packed layout.
 
-2. **Warmup LR schedule** (as in the AMR-Transformer paper):
-       lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t * warmup^{-1.5})
+2. **AdamW + warmup-cosine LR schedule**: linear warmup to a peak learning rate
+   that does not depend on ``d_model``, then cosine decay to 1e-6 at the last
+   step, with decoupled weight decay on the weight matrices only. The Noam
+   schedule of the AMR-Transformer paper,
+       lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t * warmup^{-1.5}),
+   is what every run before 2026-08-22 used and is still reachable with
+   ``schedule="noam"``; it is no longer the default because its peak scales as
+   ``d_model ** -0.5`` (so a width sweep changes two things at once) and its
+   inverse-sqrt tail never anneals.
 
 3. **NMSE loss**: per-channel normalised MSE, scale-invariant across flow
    quantities (see src.training.loss.nmse_loss). With the affine head the loss is
@@ -48,7 +55,7 @@ from tqdm import tqdm
 from src.models.amr_model import AMRTransformer
 from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
-from src.training.scheduler import WarmupScheduler
+from src.training.scheduler import WarmupCosineScheduler, WarmupScheduler
 from src.training.loss import affine_nmse_loss, nmse_loss, scorer_depth_loss
 from src.utils.checkpoint import save_checkpoint
 
@@ -71,6 +78,32 @@ def peak_gpu_gb(device: torch.device) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Weight-decay param groups (matrices decay, LayerNorm gains and biases do not)
+# ---------------------------------------------------------------------------
+def decay_param_groups(model: torch.nn.Module, weight_decay: float) -> List[dict]:
+    """Split a model's parameters into a decayed and an undecayed group.
+
+    Everything with two or more dimensions is a weight matrix and is decayed;
+    everything else is a LayerNorm gain or a bias and is not. Shrinking a
+    LayerNorm gain toward zero rescales the whole activation it normalises,
+    which is a different thing from the capacity control weight decay is meant
+    to be. On the 256/5/8/512 model this leaves 11,539 of 2,997,011 parameters
+    undecayed.
+
+    Args:
+        model: Model whose parameters are being split.
+        weight_decay: Decay applied to the matrix group; the other group gets 0.
+
+    Returns:
+        Two param-group dicts ready to hand to an optimizer.
+    """
+    decay = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
+    no_decay = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+    return [{"params": decay, "weight_decay": weight_decay},
+            {"params": no_decay, "weight_decay": 0.0}]
+
+
+# ---------------------------------------------------------------------------
 # Transformer training loop (mesh + per-token targets come pre-built from the
 # collate, so this is identical for deterministic and learned-mesh modes)
 # ---------------------------------------------------------------------------
@@ -83,6 +116,9 @@ def train_transformer(
     epochs: int,
     d_model: int = 256,
     warmup_steps: int = 4000,
+    schedule: str = "cosine",
+    lr: float = 1e-3,
+    weight_decay: float = 1e-2,
     save_path: Optional[str] = "outputs/checkpoints/transformer.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[float]]:
@@ -91,10 +127,66 @@ def train_transformer(
     The adaptive mesh, packed tokens and per-token targets are built upstream in
     the collate function (``DeterministicCollateFn`` or ``LearnedCollateFn``),
     which emit the same batch dict — so this loop is shared by both mesh sources.
+
+    Args:
+        model: The ``AMRTransformer`` to train.
+        train_loader / val_loader: Loaders built with an AMR collate.
+        device: Device to train on.
+        epochs: Number of epochs.
+        d_model: Model width. Read only by the ``"noam"`` schedule, which ties
+            its peak learning rate to it; ignored under ``"cosine"``.
+        warmup_steps: Warmup length, in optimizer steps, for either schedule.
+        schedule: ``"cosine"`` for AdamW + linear warmup + cosine decay to 1e-6
+            (the default), or ``"noam"`` for plain Adam + the inverse-sqrt
+            schedule every run before 2026-08-22 used. Pass ``"noam"`` to
+            reproduce those runs.
+        lr: Peak learning rate of the ``"cosine"`` schedule. Unused under
+            ``"noam"``, whose peak is fixed at ``d_model ** -0.5 *
+            warmup_steps ** -0.5``.
+        weight_decay: Decoupled AdamW weight decay on the matrix param group
+            (see ``decay_param_groups``). Applied only under ``"cosine"``;
+            ``"noam"`` keeps the undecayed Adam it was logged with. Note the
+            total shrinkage is ``exp(-weight_decay * sum(lr))``, so it depends
+            on run length as well as on this value.
+        save_path: Checkpoint path, overwritten on every val-loss improvement.
+        writer: Optional TensorBoard writer.
+
+    Returns:
+        ``(train_loss_history, val_loss_history)``.
+
+    Raises:
+        ValueError: if ``schedule`` is neither ``"cosine"`` nor ``"noam"``.
     """
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
+
+    if schedule == "cosine":
+        optimizer = AdamW(decay_param_groups(model, weight_decay), lr=lr)
+        scheduler = WarmupCosineScheduler(
+            optimizer, warmup_steps=warmup_steps,
+            total_steps=epochs * len(train_loader), eta_min=1e-6,
+        )
+        # Same schedule built from stock PyTorch (needs LinearLR, SequentialLR
+        # imported alongside CosineAnnealingLR above). Differs only past the
+        # last step: CosineAnnealingLR is periodic in 2 * T_max and ramps back
+        # up, where WarmupCosineScheduler clamps at eta_min.
+        # scheduler = SequentialLR(
+        #     optimizer,
+        #     [LinearLR(optimizer, start_factor=1 / warmup_steps, total_iters=warmup_steps),
+        #      CosineAnnealingLR(optimizer, T_max=max(1, epochs * len(train_loader) - warmup_steps),
+        #                        eta_min=1e-6)],
+        #     milestones=[warmup_steps],
+        # )
+        print(f"Optimizer: AdamW(lr={lr:g}, weight_decay={weight_decay:g} on matrices only), "
+              f"warmup {warmup_steps} steps -> cosine to 1e-6 over {epochs * len(train_loader):,} steps")
+    elif schedule == "noam":
+        # The pre-2026-08-22 recipe, kept verbatim so old runs reproduce.
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        scheduler = WarmupScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
+        print(f"Optimizer: Adam (no weight decay) + Noam schedule "
+              f"(d_model={d_model}, warmup {warmup_steps} steps), peak lr="
+              f"{d_model ** -0.5 * warmup_steps ** -0.5:.2e}")
+    else:
+        raise ValueError(f"Unknown schedule {schedule!r}; expected 'cosine' or 'noam'")
 
     best_val_loss = float('inf')
     max_gpu_gb = 0.0
