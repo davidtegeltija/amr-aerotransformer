@@ -47,6 +47,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
             refinement_criteria=CRITERIA_REGISTRY[refinement_criteria],
             min_depth=min_depth,
             max_depth=max_depth,
+            affine=args["affine_output"],
         )
 
     # Learned-scorer training: oracle depth targets from a calibrated tolerance.
@@ -71,7 +72,8 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
 
         scorer = RefinementNet(input_channels=input_channels)
         load_checkpoint(scorer, checkpoint_file, device)
-        return LearnedCollateFn(scorer, min_depth=min_depth, max_depth=max_depth, offset=args["offset"])
+        return LearnedCollateFn(scorer, min_depth=min_depth, max_depth=max_depth,
+                                offset=args["offset"], affine=args["affine_output"])
 
     raise SystemExit(f"No collate defined for model_trained {model_trained!r}")
 

@@ -37,6 +37,57 @@ def nmse_loss(
     return ((pred - target) ** 2 / (var + eps)).mean()
 
 
+def affine_nmse_loss(
+    affine_params: torch.Tensor,
+    stats: Dict[str, torch.Tensor],
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Dense per-pixel NMSE of an affine-per-cell prediction, in closed form.
+
+    Numerically equal, in value and in gradient, to
+
+        nmse_loss(tokens_to_grid_affine_torch(affine_params, geom, H, W, C), targets)
+
+    but evaluated over the ``[total_N, C]`` token axis instead of the
+    ``[B, H, W, C]`` pixel grid, so no owner map, no per-pixel gather and no dense
+    target are needed. Everything that depends on the target is precomputed once
+    per sample by ``src/data/collate_fn.py:_affine_leaf_stats``; see that function
+    for the derivation.
+
+    ``nmse_loss`` normalises by the per-channel variance of the batch's dense
+    target and averages over ``B*H*W*C``. Both are recovered from the leaf
+    statistics: the leaves tile the grid, so ``sum(num_pixels)`` is exactly
+    ``B*H*W`` and the target's first two moments are the leaf moments summed.
+
+    Args:
+        affine_params: ``[total_N, C, 3]`` packed per-token (value, gx, gy), graph
+            attached.
+        stats: Batch-concatenated ``_affine_leaf_stats`` output, on the same device
+            as ``affine_params`` and with rows in the same packed order.
+        eps: Numerical floor added to each per-channel variance, matching
+            ``nmse_loss``.
+
+    Returns:
+        Scalar loss tensor.
+    """
+    value, gx, gy = affine_params[..., 0], affine_params[..., 1], affine_params[..., 2]
+    num_pixels = stats["num_pixels"].unsqueeze(1)                        # [N, 1]
+    mean_target = stats["mean_target"]                                   # [N, C]
+    sum_sq_resid = stats["sum_sq_resid"]                                 # [N, C]
+
+    sse = (num_pixels * (value - mean_target) ** 2
+           + stats["sum_xx"].unsqueeze(1) * gx * gx - 2.0 * gx * stats["sum_target_dx"]
+           + stats["sum_yy"].unsqueeze(1) * gy * gy - 2.0 * gy * stats["sum_target_dy"]
+           + sum_sq_resid)                                               # [N, C]
+
+    total_pixels = num_pixels.sum()                                      # B*H*W
+    mean_t = (num_pixels * mean_target).sum(dim=0) / total_pixels        # [C]
+    sq_t = (sum_sq_resid + num_pixels * mean_target ** 2).sum(dim=0) / total_pixels
+    var = sq_t - mean_t ** 2                                             # [C]
+
+    return (sse.sum(dim=0) / (var + eps)).sum() / (total_pixels * affine_params.shape[1])
+
+
 def smooth_loss(score_map: torch.Tensor) -> torch.Tensor:
     """
     Total-variation regularizer on the CNN score map.

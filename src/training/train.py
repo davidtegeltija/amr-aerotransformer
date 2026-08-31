@@ -15,7 +15,11 @@ Key design decisions
        lr(t) = (1 / sqrt(d_model)) * min(t^{-0.5}, t * warmup^{-1.5})
 
 3. **NMSE loss**: per-channel normalised MSE, scale-invariant across flow
-   quantities (see src.training.loss.nmse_loss).
+   quantities (see src.training.loss.nmse_loss). With the affine head the loss is
+   still the dense per-pixel NMSE, but it is evaluated in closed form over
+   per-leaf sufficient statistics (src.training.loss.affine_nmse_loss), so no
+   [B, H, W, C] grid is ever reconstructed during training. Reconstruction is
+   still used at inference and for plots (src.models.reconstruction).
 
 4. **Tokenization is done in the DataLoader workers** (CPU) so the GPU
    only ever touches float tensors.
@@ -44,12 +48,8 @@ from tqdm import tqdm
 from src.models.amr_model import AMRTransformer
 from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
-from src.models.reconstruction import (
-    precompute_affine_geometry,
-    tokens_to_grid_affine_torch,
-)
 from src.training.scheduler import WarmupScheduler
-from src.training.loss import nmse_loss, scorer_depth_loss
+from src.training.loss import affine_nmse_loss, nmse_loss, scorer_depth_loss
 from src.utils.checkpoint import save_checkpoint
 
 
@@ -131,11 +131,11 @@ def train_transformer(
                 out = model(packed_tokens, tokens_per_sample)
 
                 if model.affine_output:
-                    dense_targets = batch["targets"].to(device)
-                    Hd, Wd = dense_targets.shape[1], dense_targets.shape[2]
-                    geom = precompute_affine_geometry(batch["token_lists"], tokens_per_sample, Hd, Wd)
-                    dense_pred = tokens_to_grid_affine_torch(out["token_preds"], geom, Hd, Wd, model.output_channels)
-                    loss = nmse_loss(dense_pred, dense_targets)
+                    # Dense per-pixel NMSE in closed form over the per-leaf statistics
+                    # the collate cached. Same loss and same gradients as painting the
+                    # [B, H, W, C] grid and scoring that, without ever building it.
+                    stats = {k: v.to(device) for k, v in batch["affine_stats"].items()}
+                    loss = affine_nmse_loss(out["token_preds"], stats)
                     with torch.no_grad():
                         grad_abs_sum += out["token_preds"][..., 1:].abs().mean(dim=(0, 1)).detach().cpu()
                         grad_abs_steps += 1
@@ -227,11 +227,8 @@ def evaluate_transformer(
         out = model(packed_tokens, tokens_per_sample)
         if model.affine_output:
             # Mirror the dense affine training loss so train/val are comparable.
-            dense_targets = batch["targets"].to(device)
-            Hd, Wd = dense_targets.shape[1], dense_targets.shape[2]
-            geom = precompute_affine_geometry(batch["token_lists"], tokens_per_sample, Hd, Wd)
-            dense_pred = tokens_to_grid_affine_torch(out["token_preds"], geom, Hd, Wd, model.output_channels)
-            total_loss += nmse_loss(dense_pred, dense_targets).item()
+            stats = {k: v.to(device) for k, v in batch["affine_stats"].items()}
+            total_loss += affine_nmse_loss(out["token_preds"], stats).item()
         else:
             total_loss += nmse_loss(out["token_preds"], packed_targets).item()
 
