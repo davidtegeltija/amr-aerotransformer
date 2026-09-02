@@ -3,7 +3,7 @@ import torch
 
 from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
-from src.amr.quadtree import nodes_to_token_array
+from src.amr.quadtree import nodes_to_token_array, token_feature_width
 from src.models.reconstruction import tokens_to_grid, tokens_to_grid_affine
 
 
@@ -31,10 +31,13 @@ def predict_single_amr(model, sample, *, max_depth, min_depth, refinement_criter
         # Learned mesh needs a frozen scorer to build the mesh at inference time.
         input_grid = np.asarray(input_grid, dtype=np.float32)
         grid = torch.from_numpy(input_grid).unsqueeze(0)  # [1, H, W, C]
-        depth_map = scorer(grid).squeeze(1)[0].numpy()                                  # [H, W]
-        leaves = build_depth_guided_mesh(input_grid, depth_map, max_depth, min_depth, offset)
+        depth_map = scorer(grid).squeeze(1)[0].numpy()    # [H, W]
+        leaves = build_depth_guided_mesh(input_grid, depth_map, max_depth=max_depth, min_depth=min_depth, offset=offset)
 
-    token_array = nodes_to_token_array(leaves, H, W, C)
+    # The model's token width is what says whether it was trained with affine_input,
+    # so the checkpoint decides this rather than a config that could disagree with it.
+    affine_input = model.input_channels == token_feature_width(C)
+    token_array = nodes_to_token_array(leaves, H, W, C, affine_input)
     packed_tokens = torch.from_numpy(token_array).float()
     out = model(packed_tokens, [len(leaves)])
     token_preds = out["token_preds"]

@@ -87,7 +87,7 @@ def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, 
             match the scorer's training bounds).
     """
     from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
-    from src.amr.quadtree import nodes_to_token_array
+    from src.amr.quadtree import nodes_to_token_array, token_feature_width
 
     scorer.eval()
     model.eval()
@@ -97,6 +97,8 @@ def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, 
         grids = batch["grids"].to(device)
         targets = batch["targets"].to(device)
         H, W, C = grids.shape[1], grids.shape[2], grids.shape[3]
+        # The transformer's token width says whether it was trained with affine_input.
+        affine_input = model.input_channels == token_feature_width(C)
 
         # Scorer depth map -> per-sample leaves -> packed tokens.
         depth_maps = scorer(grids).squeeze(1).cpu().numpy()      # [B, H, W]
@@ -107,7 +109,7 @@ def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, 
                 data=grids_np[b], depth_map=depth_maps[b],
                 max_depth=max_depth, min_depth=min_depth, offset=offset)
             token_lists.append(leaves)
-            all_tokens.append(torch.from_numpy(nodes_to_token_array(leaves, H, W, C)))
+            all_tokens.append(torch.from_numpy(nodes_to_token_array(leaves, H, W, C, affine_input)))
             tokens_per_sample.append(len(leaves))
 
         packed = torch.cat(all_tokens, dim=0).to(device)

@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.oracle_depth import calibrate_global_tolerance
+from src.amr.quadtree import token_feature_width
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn, VitCollateFn
 from src.data.dataset_factory import build_dataset
 from src.data.split import split_by_group_id
@@ -47,7 +48,8 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
             refinement_criteria=CRITERIA_REGISTRY[refinement_criteria],
             min_depth=min_depth,
             max_depth=max_depth,
-            affine=args["affine_output"],
+            affine_input=args["affine_input"],
+            affine_output=args["affine_output"],
         )
 
     # Learned-scorer training: oracle depth targets from a calibrated tolerance.
@@ -73,7 +75,8 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
         scorer = RefinementNet(input_channels=input_channels)
         load_checkpoint(scorer, checkpoint_file, device)
         return LearnedCollateFn(scorer, min_depth=min_depth, max_depth=max_depth,
-                                offset=args["offset"], affine=args["affine_output"])
+                                offset=args["offset"], affine_input=args["affine_input"],
+                                affine_output=args["affine_output"])
 
     raise SystemExit(f"No collate defined for model_trained {model_trained!r}")
 
@@ -256,7 +259,9 @@ def main(args=None):
             print(f"Scorer parameters: {sum(p.numel() for p in model.parameters()):,}")
         else:
             model = AMRTransformer(
-                input_channels=input_channels,
+                # Under affine_input a token carries (mean, gx, gy) per channel
+                # instead of the mean alone
+                input_channels=token_feature_width(input_channels) if args["affine_input"] else input_channels,
                 output_channels=output_channels,
                 d_model=args["d_model"],
                 n_layers=args["n_layers"],

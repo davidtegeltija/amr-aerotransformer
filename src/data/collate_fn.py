@@ -153,24 +153,27 @@ class DeterministicCollateFn:
         packed_targets    : [total_N, output_channels] per-token averaged ground truth
         tokens_per_sample : List[int]                  token count per sample
         affine_stats      : Dict[str, Tensor]          per-leaf stats for the affine
-                                                       per-pixel loss (only when affine)
+                                                       per-pixel loss (only when affine_output)
 
     Args:
         refinement_criteria: Thresholds driving the physics-based subdivision.
         min_depth: Depth floor; cells shallower than this always subdivide.
         max_depth: Hard depth cap; cells at this depth never subdivide.
-        affine: Whether the model uses the affine head. When True the collate
+        affine_input: Whether each token also carries its cell's (gx, gy),
+            widening it to token_feature_width(C) + 3.
+        affine_output: Whether the model uses the affine head. When True the collate
             also builds the per-leaf statistics the closed-form affine loss needs
             (see ``_affine_leaf_stats``); when False they are neither computed nor
             cached, since the constant head is scored on ``packed_targets``.
     """
 
     def __init__(self, refinement_criteria: RefinementCriteria, min_depth: int, max_depth: int,
-                 affine: bool = False):
+                 affine_input: bool = False, affine_output: bool = False):
         self.refinement_criteria = refinement_criteria
         self.min_depth = min_depth
         self.max_depth = max_depth
-        self.affine = affine
+        self.affine_input = affine_input
+        self.affine_output = affine_output
         # Per-sample cache keyed by dataset index. The quadtree build and the
         # target reductions are deterministic, so the first epoch fills this and
         # every later epoch is a lookup. Only persists with num_workers=0 (workers
@@ -198,9 +201,9 @@ class DeterministicCollateFn:
                     min_depth=self.min_depth,
                     refinement_criteria=self.refinement_criteria,
                 )
-                token_array = nodes_to_token_array(leaves, H, W, C)
+                token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
                 token_target = _per_token_targets(target, leaves)
-                stats = _affine_leaf_stats(target, leaves, H, W) if self.affine else None
+                stats = _affine_leaf_stats(target, leaves, H, W) if self.affine_output else None
                 cached = (token_array, len(leaves), token_target, stats)
                 self._cache[s["index"]] = cached
 
@@ -208,7 +211,7 @@ class DeterministicCollateFn:
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
             tokens_per_sample.append(N)
-            if self.affine:
+            if self.affine_output:
                 all_stats.append(stats)
 
         batch = {
@@ -216,7 +219,7 @@ class DeterministicCollateFn:
             "packed_targets": torch.cat(all_targets, dim=0),
             "tokens_per_sample": tokens_per_sample,
         }
-        if self.affine:
+        if self.affine_output:
             batch["affine_stats"] = _stack_affine_stats(all_stats)
         return batch
 
@@ -302,26 +305,29 @@ class LearnedCollateFn:
         packed_targets    : [total_N, output_channels] per-token averaged ground truth
         tokens_per_sample : List[int]                  token count per sample
         affine_stats      : Dict[str, Tensor]          per-leaf stats for the affine
-                                                       per-pixel loss (only when affine)
+                                                       per-pixel loss (only when affine_output)
 
     Args:
         scorer: Trained ``RefinementNet``; frozen here and used only to build meshes.
         min_depth: Depth floor; cells shallower than this always subdivide.
         max_depth: Hard depth cap; cells at this depth never subdivide.
         offset: Mesh budget offset passed to ``build_depth_guided_mesh``.
-        affine: Whether the model uses the affine head. When True the collate also
-            builds the per-leaf statistics the closed-form affine loss needs (see
+        affine_input: Whether each token also carries its cell's (gx, gy),
+            widening it to token_feature_width(C) + 3.
+        affine_output: Whether the model uses the affine head. When True the collate
+            also builds the per-leaf statistics the closed-form affine loss needs (see
             ``_affine_leaf_stats``); when False they are neither computed nor cached.
     """
 
     def __init__(self, scorer, min_depth: int, max_depth: int, offset: float = 0.0,
-                 affine: bool = False):
+                 affine_input: bool = False, affine_output: bool = False):
         # Freeze the scorer: it only builds meshes here, it is never trained.
         self.scorer = scorer.eval().requires_grad_(False)
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.offset = offset
-        self.affine = affine
+        self.affine_input = affine_input
+        self.affine_output = affine_output
         # See DeterministicCollateFn._cache: same contract, and the QuadNode leaves
         # are likewise reduced to flat arrays rather than cached as objects.
         self._cache: Dict[int, tuple] = {}
@@ -346,9 +352,9 @@ class LearnedCollateFn:
                     offset=self.offset,
                 )
                 target = np.asarray(s["target"], dtype=np.float32)
-                token_array = nodes_to_token_array(leaves, H, W, C)
+                token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
                 token_target = _per_token_targets(target, leaves)
-                stats = _affine_leaf_stats(target, leaves, H, W) if self.affine else None
+                stats = _affine_leaf_stats(target, leaves, H, W) if self.affine_output else None
                 self._cache[s["index"]] = (token_array, len(leaves), token_target, stats)
 
         all_tokens, all_targets, tokens_per_sample, all_stats = [], [], [], []
@@ -357,7 +363,7 @@ class LearnedCollateFn:
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
             tokens_per_sample.append(N)
-            if self.affine:
+            if self.affine_output:
                 all_stats.append(stats)
 
         batch = {
@@ -365,7 +371,7 @@ class LearnedCollateFn:
             "packed_targets": torch.cat(all_targets, dim=0),
             "tokens_per_sample": tokens_per_sample,
         }
-        if self.affine:
+        if self.affine_output:
             batch["affine_stats"] = _stack_affine_stats(all_stats)
         return batch
 

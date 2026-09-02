@@ -29,7 +29,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.amr.refinement_criteria import GEOMETRY_ONLY_COMBINED_CONFIG, RefinementCriteria
-from src.amr.quadtree import QuadNode, build_tree, collect_leaves
+from src.amr.quadtree import QuadNode, build_tree, cell_affine_features, collect_leaves
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +138,7 @@ def _build_uniform_mesh(data: np.ndarray, cell_size: int) -> List[QuadNode]:
             c1 = min(c + cell_size, W)
             node = QuadNode(bbox=(r, c, r1, c1), depth=depth)
             node.is_leaf = True
-            region = data[r:r1, c:c1, :]
-            node.features = region.mean(axis=(0, 1))
+            node.features = cell_affine_features(data[r:r1, c:c1, :], H, W)
             node.metrics = {}
             leaves.append(node)
             c = c1

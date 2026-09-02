@@ -7,6 +7,7 @@ d_ff: 512                                     # Feed-forward inner width
 dropout: 0.2                  
 min_patch_size: 1                             # Smallest allowed leaf patch (pixels). Fine cap -> hard limit on the deepest refinement
 max_patch_size: 16                            # Largest allowed leaf patch (pixels). Coarse floor -> every region is refined at least this far
+affine_input: true                            # Per-token mean + gx + gy of the geometry channels, instead of the mean alone
 affine_output: true                           # Per-token value + gx + gy, dense per-pixel loss
 refinement_criteria: AERODYNAMIC_CRITERIA_2   # Key in CRITERIA_REGISTRY (src/amr/refinement_criteria.py)
 

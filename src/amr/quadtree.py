@@ -16,6 +16,7 @@ Coordinate convention (row-major, matching numpy/image layout):
 from __future__ import annotations
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, List, Optional, Tuple
 import numpy as np
 
@@ -36,6 +37,7 @@ class QuadNode:
         Four children produced after subdivision (empty if leaf).
     features : np.ndarray or None
         Per-channel mean values inside this cell.  Shape: (C,)
+        If affine_input=True this also includes the cell's x, y gradient
     metrics : dict
         Dictionary of computed physics metrics (for inspection / debugging).
     is_leaf : bool
@@ -190,6 +192,86 @@ def collect_nodes_at_depth(root: QuadNode, target_depth: int) -> List[QuadNode]:
 
 
 # ---------------------------------------------------------------------------
+# Per-cell input features: the local affine fit, not just the mean
+# ---------------------------------------------------------------------------
+# With affine_input=True a cell stores (mean, gx, gy) per channel. The mean of
+# the (x, y, z) coordinates is only the cell's centroid, a point with no
+# orientation, while surface pressure is set to first order by the local normal
+# -- which is what the gradients carry. Measured on the learned n=2000 mesh the
+# surface inside a leaf is 99.97-99.99% affine, so those three numbers are very
+# nearly the whole cell.
+#
+# dx/dy are offsets from the cell centre in normalised DOMAIN units (col/W,
+# row/H), like the x_c/y_c meta columns below. The affine output head instead
+# divides by the cell extent, so its coefficients mean "change across this cell".
+# That is right for painting a cell and wrong here: it would make one physical
+# slope read 4.2x differently per depth, leaving the model to undo the scale. In
+# domain units the same slope reads the same at every depth.
+#
+# Only the leading (x, y, z) geometry channels get gradients. The rest are
+# broadcast scalars (AoA and Mach on the wing) constant over every cell, so their
+# gx/gy would be guaranteed zeros. On a dataset whose channels all vary, set 
+# GRADIENT_CHANNELS to the channel count.
+
+
+TOKEN_FEATURES_PER_CHANNEL = 3   # (mean, gx, gy) for a channel that gets gradients
+GRADIENT_CHANNELS = 3            # leading channels that do
+
+
+def token_feature_width(input_channels: int) -> int:
+    """Feature columns an affine_input token carries: a mean per channel plus
+    gx/gy per gradient channel.
+
+    The one definition of that width, so the model built in src/main.py and the
+    tokens built here cannot disagree. Without affine_input a token carries
+    input_channels columns instead.
+    """
+    return input_channels + (TOKEN_FEATURES_PER_CHANNEL - 1) * GRADIENT_CHANNELS
+
+
+@lru_cache(maxsize=None)
+def _cell_ramps(h: int, w: int, H: int, W: int) -> tuple:
+    """Centred domain-unit offsets for an h x w cell, and their squared sums.
+
+    Cached because a quadtree has only one cell shape per depth, so a handful of
+    entries covers every leaf of every sample.
+
+    Returns:
+        (dx, dy, sum_xx, sum_yy), the sums taken over the whole cell.
+    """
+    dx = (np.arange(w) + 0.5 - w / 2.0) / W                  # [w]
+    dy = (np.arange(h) + 0.5 - h / 2.0) / H                  # [h]
+    return dx, dy, h * float((dx ** 2).sum()), w * float((dy ** 2).sum())
+
+
+def cell_affine_features(region: np.ndarray, H: int, W: int) -> np.ndarray:
+    """Cell mean per channel, plus (gx, gy) for the geometry channels.
+
+    gx/gy are least-squares slopes against the centred domain-unit offsets. Those
+    offsets sum to zero over a rectangle, so each slope is a single ratio rather
+    than a solve.
+
+    Args:
+        region: [h, w, C] slice of the input grid covered by the cell.
+        H: Full grid height, putting the row offsets in domain units.
+        W: Full grid width, likewise for the columns.
+
+    Returns:
+        [mean (C) | gx (3) | gy (3)]. A cell one pixel wide (or tall) has no
+        slope along that axis and gets zeros.
+    """
+    h, w, _ = region.shape
+    dx, dy, xx, yy = _cell_ramps(h, w, H, W)
+    geometry = region[:, :, :GRADIENT_CHANNELS]
+
+    mean = region.mean(axis=(0, 1))
+    zero = np.zeros(GRADIENT_CHANNELS, dtype=mean.dtype)
+    gx = (geometry * dx[None, :, None]).sum(axis=(0, 1)) / xx if xx > 0 else zero
+    gy = (geometry * dy[:, None, None]).sum(axis=(0, 1)) / yy if yy > 0 else zero
+    return np.concatenate([mean, gx, gy])
+
+
+# ---------------------------------------------------------------------------
 # Shared recursive builder
 # ---------------------------------------------------------------------------
 
@@ -201,7 +283,7 @@ def build_tree(
     """Recursively build the quadtree rooted at ``node``, in place.
 
     The skeleton shared by the deterministic (criteria) and learned (depth-map)
-    builders: extract the cell region, guard zero-area cells, store the mean
+    builders: extract the cell region, guard zero-area cells, store the cell's
     features, then delegate the split/stop decision to ``should_subdivide`` and
     recurse. The predicate owns everything mode-specific — metric computation,
     storing ``node.metrics``, and the actual threshold/depth test; it reads the
@@ -213,14 +295,14 @@ def build_tree(
     Steps
     -----
     1. Extract the data region for this cell.
-    2. Compute mean features for storage.
+    2. Compute the cell's affine features for storage.
     3. Decide whether to subdivide (delegated to ``should_subdivide``, which
        also computes and stores any mode-specific metrics).
     4. If subdividing: create children and recurse; else mark as leaf.
 
     Args:
-        data: ``[H, W, C]`` field. Each cell's per-channel mean over its bbox
-            becomes ``node.features``.
+        data: ``[H, W, C]`` field. cell_affine_features over each cell's bbox
+            becomes its node.features.
         node: Cell to process; call with the seeded root (bbox covering the
             whole grid, depth 0) to build the full tree.
         should_subdivide: Callable ``(node) -> bool`` invoked on each
@@ -234,11 +316,13 @@ def build_tree(
     if region.size == 0:
         # Zero-area cell: not marked as leaf, so collect_leaves drops it
         # (a degenerate token would yield NaN per-token targets downstream).
-        node.features = np.zeros(data.shape[2], dtype=data.dtype)
+        node.features = np.zeros(token_feature_width(data.shape[2]), dtype=data.dtype)
         return
 
-    # 2. Compute per-channel mean features (Storage AVG step, Fig. 2 of the AMR-Transformer paper)
-    node.features = region.mean(axis=(0, 1))  # (C,)
+    # 2. Compute the cell's features (the Storage AVG step of Fig. 2 in the
+    #    AMR-Transformer paper, extended from the mean to a local plane)
+    H, W, _ = data.shape
+    node.features = cell_affine_features(region, H, W)
 
     # 3. and 4. Subdivide into four children and recurse, or mark as leaf
     if should_subdivide(node):
@@ -252,14 +336,17 @@ def build_tree(
 # Quadtree leaves -> token array
 # ---------------------------------------------------------------------------
 
-def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int) -> np.ndarray:
+def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int,
+                         affine_input: bool = False) -> np.ndarray:
     """Stack leaf QuadNodes into a ``[N, C+3]`` float32 token array.
 
     Columns:
-        0..C-1  : per-channel mean features (from node.features)
-        C       : x_center   -- normalised column centre = x_center / W
-        C+1     : y_center   -- normalised row centre    = y_center / H
-        C+2     : cell_level -- refinement depth = -log2(max(width/W, height/H))
+        0..C-1  : per-channel mean features. If affine_input=True it also includes gx and gy
+        C       : x_center, normalised column centre = x_center / W
+        C+1     : y_center, normalised row centre    = y_center / H
+        C+2     : cell_level, refinement depth = -log2(max(width/W, height/H))
+
+    The means lead node.features, so dropping the gradients is just a slice.
 
     The size channel is stored as a log2 level rather than the raw normalised
     extent because cell size is inherently a power of two. A leaf at quadtree
@@ -282,16 +369,20 @@ def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int) -> np.nd
         nodes: Leaf ``QuadNode`` s to tokenize.
         H: Grid height (rows), used to normalise the row centre.
         W: Grid width (columns), used to normalise the column centre.
-        C: Number of feature channels.
+        C: Number of input channels.
+        affine_input: Also give the model each cell's (gx, gy). Defaults to
+            False, matching every checkpoint trained before the flag existed.
 
     Returns:
         ``[N, C+3]`` float32 array, one row per node.
     """
     N = len(nodes)
+    if affine_input:
+        C = token_feature_width(C)
     arr = np.empty((N, C + 3), dtype=np.float32)
     for i, node in enumerate(nodes):
         y_center, x_center = node.center
-        arr[i, :C] = node.features if node.features is not None else 0.0
+        arr[i, :C] = node.features[:C] if node.features is not None else 0.0
         arr[i, C] = x_center / W
         arr[i, C + 1] = y_center / H
         arr[i, C + 2] = -math.log2(max(node.width / W, node.height / H))
