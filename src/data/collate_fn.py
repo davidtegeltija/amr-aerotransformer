@@ -200,8 +200,8 @@ class DeterministicCollateFn:
         refinement_criteria: Thresholds driving the physics-based subdivision.
         min_depth: Depth floor; cells shallower than this always subdivide.
         max_depth: Hard depth cap; cells at this depth never subdivide.
-        affine_input: Whether each token also carries its cell's (gx, gy),
-            widening it to token_feature_width(C) + 3.
+        affine_input: 1 if each token also carries its cell's (gx, gy), which
+            widens it to token_feature_width(C) + 3; 0 for the mean alone.
         affine_output: The model's output order (0, 1 or 2). Non-zero means the
             affine head, so the collate also builds the per-leaf statistics the
             closed-form affine loss needs at that order (see ``_affine_leaf_stats``).
@@ -210,7 +210,7 @@ class DeterministicCollateFn:
     """
 
     def __init__(self, refinement_criteria: RefinementCriteria, min_depth: int, max_depth: int,
-                 affine_input: bool = False, affine_output: int = 0):
+                 affine_input: int = 0, affine_output: int = 0):
         self.refinement_criteria = refinement_criteria
         self.min_depth = min_depth
         self.max_depth = max_depth
@@ -354,8 +354,8 @@ class LearnedCollateFn:
         min_depth: Depth floor; cells shallower than this always subdivide.
         max_depth: Hard depth cap; cells at this depth never subdivide.
         offset: Mesh budget offset passed to ``build_depth_guided_mesh``.
-        affine_input: Whether each token also carries its cell's (gx, gy),
-            widening it to token_feature_width(C) + 3.
+        affine_input: 1 if each token also carries its cell's (gx, gy), which
+            widens it to token_feature_width(C) + 3; 0 for the mean alone.
         affine_output: The model's output order (0, 1 or 2). Non-zero means the
             affine head, so the collate also builds the per-leaf statistics the
             closed-form affine loss needs at that order (see ``_affine_leaf_stats``).
@@ -363,7 +363,7 @@ class LearnedCollateFn:
     """
 
     def __init__(self, scorer, min_depth: int, max_depth: int, offset: float = 0.0,
-                 affine_input: bool = False, affine_output: int = 0):
+                 affine_input: int = 0, affine_output: int = 0):
         # Freeze the scorer: it only builds meshes here, it is never trained.
         self.scorer = scorer.eval().requires_grad_(False)
         self.min_depth = min_depth

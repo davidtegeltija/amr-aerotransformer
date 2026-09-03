@@ -37,7 +37,7 @@ class QuadNode:
         Four children produced after subdivision (empty if leaf).
     features : np.ndarray or None
         Per-channel mean values inside this cell.  Shape: (C,)
-        If affine_input=True this also includes the cell's x, y gradient
+        If affine_input=1 this also includes the cell's x, y gradient
     metrics : dict
         Dictionary of computed physics metrics (for inspection / debugging).
     is_leaf : bool
@@ -194,7 +194,7 @@ def collect_nodes_at_depth(root: QuadNode, target_depth: int) -> List[QuadNode]:
 # ---------------------------------------------------------------------------
 # Per-cell input features: the local affine fit, not just the mean
 # ---------------------------------------------------------------------------
-# With affine_input=True a cell stores (mean, gx, gy) per channel. The mean of
+# With affine_input=1 a cell stores (mean, gx, gy) per channel. The mean of
 # the (x, y, z) coordinates is only the cell's centroid, a point with no
 # orientation, while surface pressure is set to first order by the local normal
 # -- which is what the gradients carry. Measured on the learned n=2000 mesh the
@@ -219,11 +219,10 @@ GRADIENT_CHANNELS = 3            # leading channels that do
 
 
 def token_feature_width(input_channels: int) -> int:
-    """Feature columns an affine_input token carries: a mean per channel plus
-    gx/gy per gradient channel.
+    """Feature columns an affine_input=1 token carries a mean per channel + gx/gy per gradient channel.
 
     The one definition of that width, so the model built in src/main.py and the
-    tokens built here cannot disagree. Without affine_input a token carries
+    tokens built here cannot disagree. At affine_input=0 a token carries
     input_channels columns instead.
     """
     return input_channels + (TOKEN_FEATURES_PER_CHANNEL - 1) * GRADIENT_CHANNELS
@@ -245,7 +244,7 @@ def _cell_ramps(h: int, w: int, H: int, W: int) -> tuple:
 
 
 def cell_affine_features(region: np.ndarray, H: int, W: int) -> np.ndarray:
-    """Cell mean per channel, plus (gx, gy) for the geometry channels.
+    """Cell mean per channel + (gx, gy) for the geometry channels.
 
     gx/gy are least-squares slopes against the centred domain-unit offsets. Those
     offsets sum to zero over a rectangle, so each slope is a single ratio rather
@@ -337,11 +336,11 @@ def build_tree(
 # ---------------------------------------------------------------------------
 
 def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int,
-                         affine_input: bool = False) -> np.ndarray:
+                         affine_input: int = 0) -> np.ndarray:
     """Stack leaf QuadNodes into a ``[N, C+3]`` float32 token array.
 
     Columns:
-        0..C-1  : per-channel mean features. If affine_input=True it also includes gx and gy
+        0..C-1  : per-channel mean features. If affine_input=1 it also includes gx and gy
         C       : x_center, normalised column centre = x_center / W
         C+1     : y_center, normalised row centre    = y_center / H
         C+2     : cell_level, refinement depth = -log2(max(width/W, height/H))
@@ -370,8 +369,9 @@ def nodes_to_token_array(nodes: List[QuadNode], H: int, W: int, C: int,
         H: Grid height (rows), used to normalise the row centre.
         W: Grid width (columns), used to normalise the column centre.
         C: Number of input channels.
-        affine_input: Also give the model each cell's (gx, gy). Defaults to
-            False, matching every checkpoint trained before the flag existed.
+        affine_input: 1 to also give the model each cell's (gx, gy), 0 for the
+            per-channel mean alone. Defaults to 0, matching every checkpoint
+            trained before it existed.
 
     Returns:
         ``[N, C+3]`` float32 array, one row per node.
