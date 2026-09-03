@@ -17,6 +17,7 @@ Two modes are provided:
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import List, Literal, Optional
 
 import numpy as np
@@ -83,17 +84,110 @@ def tokens_to_grid_torch(
 
 
 # ---------------------------------------------------------------------------
-# Affine (value + gradient) reconstruction
+# Per-cell polynomial reconstruction (the affine_output path)
 # ---------------------------------------------------------------------------
+# The head emits a few coefficients per channel and a cell's pixels are painted
+# with their weighted sum of basis functions. How many is the model's
+# ``affine_output``, which is an order rather than a flag:
+#
+#   0  {1}                                            the plain constant head
+#   1  {1, dx, dy}                                    the original affine head
+#   2  {1, dx, dy, dx^2, dx*dy, dy^2}                 the quadratic head
+#
+# Order 2 is the one to train: the target inside a leaf is only ~7-dimensional
+# and its three strongest modes are almost exactly the first three of these
+# terms, so going up one order lowers the reconstruction floor 2.7x and shrinks
+# the visible seam artefact from +54% to +11% at no token cost. The lower orders
+# stay reachable so a new run can be compared against the older heads on the same
+# code, and so old checkpoints (which stored affine_output as the bool True, i.e.
+# order 1) still rebuild into the head they were trained with.
+#
+# The terms are mutually orthogonal over a cell, which is what keeps the training
+# loss closed-form: every cross term drops, so the cell's squared error is one
+# independent term per coefficient, cached per leaf by
+# src/data/collate_fn.py:_affine_leaf_stats. The affine head already relied on this
+# -- sum_xx / sum_yy are the term norms -- and it carries over to order 2 unchanged,
+# except that dx^2 and dy^2 are not orthogonal to the constant until they are
+# centred on their cell mean. cell_basis is where that centring is defined, and the
+# collate reads its columns from here so the two paths cannot disagree.
+
+# One name per basis column, in the order cell_basis builds them. Only used for
+# logging, but it is the single place that says what coefficient k means.
+OUTPUT_BASIS_TERMS = ("value", "gx", "gy", "gxx", "gxy", "gyy")
+OUTPUT_BASIS_SIZE = len(OUTPUT_BASIS_TERMS)          # the full order-2 basis
+
+
+def basis_size(order: int) -> int:
+    """Coefficients per channel emitted by an ``affine_output`` head of this order.
+
+    Order 0 is one term because a degree-0 polynomial is the constant alone, which
+    is exactly the single number per channel the plain head predicts.
+
+    Args:
+        order: The model's ``affine_output``: 0, 1 or 2
+
+    Returns:
+        How many leading columns of ``cell_basis`` the head predicts: 1, 3 or 6.
+
+    Raises:
+        ValueError: for any other order.
+    """
+    sizes = {0: 1, 1: 3, 2: OUTPUT_BASIS_SIZE}
+    if order not in sizes:
+        raise ValueError(f"affine_output must be 0, 1 or 2, got {order!r}")
+    return sizes[order]
+
+
+@lru_cache(maxsize=None)
+def cell_basis(h: int, w: int, n_taylor_terms: int = OUTPUT_BASIS_SIZE) -> np.ndarray:
+    """Quadratic basis over an ``h x w`` cell, with mutually orthogonal columns.
+
+    ``dx``/``dy`` are pixel offsets from the cell centre in units of the cell's own
+    width/height, matching what the affine head's ``gx``/``gy`` already meant: a
+    coefficient is the change across this cell, and reads the same at every
+    refinement depth.
+
+    Because the offsets are symmetric about the centre, every pair of columns is
+    orthogonal already except ``(1, dx^2)`` and ``(1, dy^2)``. Subtracting each
+    squared term's own cell mean fixes both, and makes ``dx^2`` orthogonal to
+    ``dy^2`` too, so no orthogonalisation step is needed.
+
+    A cell too small to resolve a term gets an exact zero column -- a 4x2 cell has
+    two ``dx`` values, so ``dx^2`` is constant and centring it gives zero -- which
+    drops that term out of the reconstruction and the loss on its own.
+
+    A quadtree has one cell shape per depth, so the cache holds a handful of
+    matrices for the whole dataset.
+
+    Args:
+        h: Cell height in pixels.
+        w: Cell width in pixels.
+        n_taylor_terms: How many terms of the expansion the head predicts for one
+            cell, per channel (3 is exactly the affine head's 1, dx, dy). 
+            Defaults to the full basis.
+
+    Returns:
+        ``[h*w, n_taylor_terms]`` float64 array, one column per term in
+        ``OUTPUT_BASIS_TERMS``. float64 so ``_affine_leaf_stats`` can accumulate its
+        target products in double precision; the painting path casts to float32.
+    """
+    dx = (np.arange(w) + 0.5 - w / 2.0) / max(w, 1)
+    dy = (np.arange(h) + 0.5 - h / 2.0) / max(h, 1)
+    DX, DY = np.meshgrid(dx, dy)
+    DXX = DX ** 2 - (DX ** 2).mean()
+    DYY = DY ** 2 - (DY ** 2).mean()
+    terms = [np.ones_like(DX), DX, DY, DXX, DX * DY, DYY][:n_taylor_terms]
+    return np.stack([t.ravel() for t in terms], axis=1)       # [h*w, n_taylor_terms]
+
 
 def precompute_affine_geometry(
     token_lists: List[List[QuadNode]],
     tokens_per_sample: List[int],
     H: int,
     W: int,
+    n_taylor_terms: int = OUTPUT_BASIS_SIZE,
 ) -> tuple:
-    """Precompute the packed owner map and per-pixel scaled offsets for the
-    affine reconstruction.
+    """Precompute the packed owner map and the per-pixel basis values.
 
     Pure geometry (no latents) so the result carries no gradient. Indices are into
     the PACKED token axis (offset by tokens_per_sample), matching
@@ -105,64 +199,33 @@ def precompute_affine_geometry(
         tokens_per_sample: Per-sample token counts; prefix sums give packed offsets.
         H: Grid height (rows).
         W: Grid width (columns).
+        n_taylor_terms: How many terms of the expansion the head predicts for one
+            cell, per channel. It must match, or the painting broadcast fails.
 
     Returns:
         owner: LongTensor [B, H, W] packed token index owning each pixel.
-        dxdy:  FloatTensor [B, H, W, 2] pixel-minus-centre offset (x then y),
-            each divided by the owning leaf's normalised size.
+        basis: FloatTensor [B, H, W, n_taylor_terms] the owning cell's basis
+            functions evaluated at that pixel.
 
-    Note:
-        Both mesh builders tile the grid exactly, so every pixel has an owner and
-        the nearest-leaf-centre fallback below is a no-op. It is kept as a safety
-        net so the dense grid stays fully defined if a leaf list ever has holes.
+    Raises:
+        ValueError: if the leaves leave any pixel unowned.
     """
     B = len(token_lists)
     owners = np.full((B, H, W), -1, dtype=np.int64)
-    dxdy = np.zeros((B, H, W, 2), dtype=np.float32)
-
-    # Normalised pixel-centre coordinates along each axis (matches the meta
-    # layout in nodes_to_token_array: x=col/W, y=row/H).
-    xs = (np.arange(W, dtype=np.float32) + 0.5) / W      # [W]
-    ys = (np.arange(H, dtype=np.float32) + 0.5) / H      # [H]
+    basis = np.zeros((B, H, W, n_taylor_terms), dtype=np.float32)
 
     offset = 0
     for b, leaves in enumerate(token_lists):
-        # Per-leaf normalised centres and linear extents, reused for both the box
-        # fill and the nearest-leaf fallback. The centres match the meta layout in
-        # nodes_to_token_array; the extent deliberately does not -- that column is
-        # stored as a log2 level for the positional encoding, while the ramp below
-        # needs the linear extent it divides by.
-        centres = np.empty((len(leaves), 2), dtype=np.float32)   # (x_c, y_c)
-        sizes = np.empty(len(leaves), dtype=np.float32)
         for i, leaf in enumerate(leaves):
             r0, c0, r1, c1 = leaf.r0, leaf.c0, leaf.r1, leaf.c1
             owners[b, r0:r1, c0:c1] = offset + i
-
-            x_c = ((c0 + c1) / 2.0) / W
-            y_c = ((r0 + r1) / 2.0) / H
-            size = max((r1 - r0) / H, (c1 - c0) / W)
-            centres[i] = (x_c, y_c)
-            sizes[i] = size
-
-            # (dx, dy) order aligned with (gx, gy) from the affine head.
-            dxdy[b, r0:r1, c0:c1, 0] = (xs[c0:c1][None, :] - x_c) / size
-            dxdy[b, r0:r1, c0:c1, 1] = (ys[r0:r1][:, None] - y_c) / size
-
-        # Safety net: assign any unowned pixel to the nearest leaf centre.
-        # No-op when the leaves tile the grid (both builders guarantee this).
-        holes = np.argwhere(owners[b] < 0)
-        if holes.size:
-            px = xs[holes[:, 1]]                          # [M] normalised x
-            py = ys[holes[:, 0]]                          # [M] normalised y
-            d2 = (px[:, None] - centres[None, :, 0]) ** 2 + \
-                 (py[:, None] - centres[None, :, 1]) ** 2
-            nearest = d2.argmin(axis=1)                   # [M] local leaf index
-            owners[b, holes[:, 0], holes[:, 1]] = offset + nearest
-            dxdy[b, holes[:, 0], holes[:, 1], 0] = (px - centres[nearest, 0]) / sizes[nearest]
-            dxdy[b, holes[:, 0], holes[:, 1], 1] = (py - centres[nearest, 1]) / sizes[nearest]
+            basis[b, r0:r1, c0:c1] = cell_basis(r1 - r0, c1 - c0, n_taylor_terms).reshape(r1 - r0, c1 - c0, -1)
         offset += tokens_per_sample[b]
 
-    return torch.from_numpy(owners), torch.from_numpy(dxdy)
+    if (owners < 0).any():
+        raise ValueError("leaves leave pixels unowned; they must tile the grid")
+
+    return torch.from_numpy(owners), torch.from_numpy(basis)
 
 
 def tokens_to_grid_affine_torch(
@@ -172,16 +235,15 @@ def tokens_to_grid_affine_torch(
     W: int,
     output_channels: int,
 ) -> torch.Tensor:
-    """Differentiable affine (value + gradient) reconstruction.
+    """Differentiable per-cell polynomial reconstruction.
 
-    Paints each leaf's box with a linear ramp decoded from its (value, gx, gy)
-    params. This is the affine, loss-side counterpart of tokens_to_grid_torch.
+    Paints each leaf's box with the weighted sum of its basis functions. This is
+    the loss-side counterpart of tokens_to_grid_torch.
 
     Args:
-        affine_params: [total_N, C, 3] packed per-token (value, gx, gy), graph
-            attached.
-        geom: (owner, dxdy) from precompute_affine_geometry; owner [B,H,W] long,
-            dxdy [B,H,W,2] float.
+        affine_params: [total_N, C, K] packed per-token coefficients, graph attached.
+        geom: (owner, basis) from precompute_affine_geometry; owner [B,H,W] long,
+            basis [B,H,W,K] float. Its K must match affine_params'.
         H: Grid height (rows).
         W: Grid width (columns).
         output_channels: C.
@@ -189,16 +251,11 @@ def tokens_to_grid_affine_torch(
     Returns:
         [B, H, W, C] dense predictions on affine_params' device.
     """
-    owner, dxdy = geom
+    owner, basis = geom
     owner = owner.to(affine_params.device)
-    dxdy = dxdy.to(affine_params.device)
-    flat = owner.reshape(-1)                          # [B*H*W]
-    p = affine_params[flat]                           # [B*H*W, C, 3] (gather, keeps grad)
-    value = p[..., 0]                                 # [B*H*W, C]
-    gx, gy = p[..., 1], p[..., 2]
-    dx = dxdy[..., 0].reshape(-1, 1)                  # [B*H*W, 1]
-    dy = dxdy[..., 1].reshape(-1, 1)
-    dense = value + gx * dx + gy * dy                 # [B*H*W, C]
+    basis = basis.to(affine_params.device)
+    p = affine_params[owner.reshape(-1)]              # [B*H*W, C, K] (gather, keeps grad)
+    dense = (p * basis.reshape(-1, 1, basis.shape[-1])).sum(dim=-1)     # [B*H*W, C]
     return dense.view(-1, H, W, output_channels)
 
 
@@ -209,14 +266,15 @@ def tokens_to_grid_affine(
     W: int,
     output_channels: int,
 ) -> torch.Tensor:
-    """Non-differentiable affine reconstruction for a single sample (viz path).
+    """Non-differentiable polynomial reconstruction for a single sample (viz path).
 
     Thin wrapper over precompute_affine_geometry + tokens_to_grid_affine_torch
     under no_grad, so the example script and prediction_visualization reuse one
-    code path for the affine head.
+    code path for the polynomial head.
 
     Args:
-        affine_params: [N, C, 3] per-token (value, gx, gy) for one sample.
+        affine_params: [N, C, K] per-token coefficients for one sample. K says which
+            order produced them, so the basis is built to match.
         token_list: The sample's QuadNode leaves (tile the full H x W grid).
         H: Grid height (rows).
         W: Grid width (columns).
@@ -226,7 +284,7 @@ def tokens_to_grid_affine(
         [H, W, C] float32 tensor on CPU.
     """
     with torch.no_grad():
-        geom = precompute_affine_geometry([token_list], [len(token_list)], H, W)
+        geom = precompute_affine_geometry([token_list], [len(token_list)], H, W, affine_params.shape[-1])
         dense = tokens_to_grid_affine_torch(
             affine_params, geom, H, W, output_channels
         )                                            # [1, H, W, C]

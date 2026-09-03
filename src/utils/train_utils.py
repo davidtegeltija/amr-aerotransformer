@@ -115,8 +115,9 @@ def evaluate_end_to_end(scorer, model, loader, device, *, min_depth, max_depth, 
         packed = torch.cat(all_tokens, dim=0).to(device)
         out = model(packed, tokens_per_sample)
 
-        if getattr(model, "affine_output", False):
-            geom = precompute_affine_geometry(token_lists, tokens_per_sample, H, W)
+        if getattr(model, "affine_output", 0):
+            geom = precompute_affine_geometry(token_lists, tokens_per_sample, H, W,
+                                              out["token_preds"].shape[-1])
             dense = tokens_to_grid_affine_torch(
                 out["token_preds"], geom, H, W, model.output_channels)
         else:

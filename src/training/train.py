@@ -53,6 +53,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from src.models.amr_model import AMRTransformer
+from src.models.reconstruction import OUTPUT_BASIS_TERMS
 from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
 from src.training.scheduler import WarmupCosineScheduler, WarmupScheduler
@@ -202,9 +203,10 @@ def train_transformer(
         epoch_loss = 0.0
         epoch_token_total = 0
         epoch_sample_count = 0
-        # Quick probe (affine mode): mean |gx|, |gy| over the epoch. If these
-        # stay ~0 the gradient terms are dead
-        grad_abs_sum = torch.zeros(2)
+        # Quick probe (affine mode): mean |coefficient| of each non-constant basis
+        # term over the epoch. If one stays ~0 that term is dead. Empty at order 0,
+        # whose only term is the constant, and there the probe never runs anyway.
+        grad_abs_sum = torch.zeros(model.basis_size - 1)
         grad_abs_steps = 0
         t0 = time.time()
         reset_peak_gpu(device)
@@ -264,14 +266,17 @@ def train_transformer(
         gpu_gb = peak_gpu_gb(device)
         max_gpu_gb = max(max_gpu_gb, gpu_gb)
 
-        # Affine probe: mean |gx|, |gy| over the epoch (empty in non-affine mode)
+        # Affine probe: mean |coefficient| per basis term (empty in non-affine mode)
         grad_str = ""
         if grad_abs_steps > 0:
-            mean_gx, mean_gy = (grad_abs_sum / grad_abs_steps).tolist()
-            grad_str = f"  mean_gx={mean_gx:.4f}  mean_gy={mean_gy:.4f}"
+            term_means = (grad_abs_sum / grad_abs_steps).tolist()
+            grad_str = "".join(f"  mean_{name}={m:.4f}"
+                               for name, m in zip(OUTPUT_BASIS_TERMS[1:], term_means))
 
         # Log the metrics
-        tag = "transformer - affine" if model.affine_output else "transformer"
+        # The order is in the tag because runs of different orders are meant to be
+        # read side by side.
+        tag = f"transformer - affine order {model.affine_output}" if model.affine_output else "transformer"
         print(f"[{tag}] epoch {epoch:03d}/{epochs}"
             f"  train_loss={train_loss_history[-1]:.6f}"
             f"  val_loss={val_loss:.6f}"
@@ -288,8 +293,8 @@ def train_transformer(
             writer.add_scalar("Time/epoch_s", elapsed, epoch)
             writer.add_scalar("GPU/peak_mem_GiB", gpu_gb, epoch)
             if grad_abs_steps > 0:
-                writer.add_scalar("Affine/mean_abs_gx", mean_gx, epoch)
-                writer.add_scalar("Affine/mean_abs_gy", mean_gy, epoch)
+                for name, m in zip(OUTPUT_BASIS_TERMS[1:], term_means):
+                    writer.add_scalar(f"Affine/mean_abs_{name}", m, epoch)
 
         # Save the best model
         if val_loss < best_val_loss:

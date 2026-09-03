@@ -48,10 +48,12 @@ Architecture:
     encoder:         Stack of pre-norm TransformerBlock layers (src/model/transformer.py, shared with the ViT baseline).
     final_norm:      LayerNorm before the prediction head.
     prediction_head: MLP(d_model -> output_channels) producing per-token predictions.
-                     With affine_output=True it instead emits output_channels*3
-                     numbers per token, reshaped to [N, C, 3] = (value, gx, gy),
-                     a per-token affine (value + 2D gradient) field decoded into a
-                     linear ramp across each cell by tokens_to_grid_affine_torch.
+                     With affine_output > 0 it instead emits
+                     output_channels*basis_size(affine_output) numbers per token,
+                     reshaped to [N, C, K] = (value, gx, gy) at order 1 and
+                     (value, gx, gy, gxx, gxy, gyy) at order 2, the coefficients of
+                     the per-cell polynomial that tokens_to_grid_affine_torch paints
+                     across each cell.
 
 Batching strategy (pad to per-batch max around the encoder):
     The model boundary stays packed: all samples' token sequences arrive
@@ -80,6 +82,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 
+from src.models.reconstruction import basis_size
 from src.models.transformer import TransformerBlock
 
 
@@ -174,7 +177,11 @@ class AMRTransformer(nn.Module):
         d_ff: Feedforward inner dimension.
         dropout: Dropout probability.
         n_fourier: Number of Fourier features per positional meta channel.
-        affine_output: Predict (value, gx, gy) per token instead of a constant.
+        affine_output: Order of the per-cell polynomial the head predicts —
+            0 a single constant per token, 1 value + gx + gy, 2 additionally
+            gxx + gxy + gyy. A bool means what it always did (False -> 0,
+            True -> 1), so a checkpoint written before this was an order rebuilds
+            into the head it was trained with.
     """
 
     def __init__(
@@ -187,12 +194,13 @@ class AMRTransformer(nn.Module):
         d_ff: int = 1024,
         dropout: float = 0.1,
         n_fourier: int = 64,
-        affine_output: bool = False,
+        affine_output: int = 0,
     ):
         super().__init__()
         self.input_channels = input_channels
         self.output_channels = output_channels
         self.affine_output = affine_output
+        self.basis_size = basis_size(affine_output)   # 1, 3 or 6 coefficients
         self.d_model = d_model
         self.pos_dim = 3
         self.token_dim = input_channels + self.pos_dim  # C + (x_center, y_center, cell_level)
@@ -248,10 +256,11 @@ class AMRTransformer(nn.Module):
         self.final_norm = nn.LayerNorm(d_model)
 
         # --- Prediction head ---
-        # In affine mode the head emits (value, gx, gy) per channel; the gradient
-        # components start near 0 under trunc_normal init, so the model begins as
-        # ~constant-per-cell and learns the ramps from the dense per-pixel loss.
-        head_out = output_channels * 3 if affine_output else output_channels
+        # One coefficient per basis function per channel: the value alone at order 0,
+        # (value, gx, gy) at order 1, plus (gxx, gxy, gyy) at order 2. All but the
+        # value start near 0 under trunc_normal init, so the model begins as
+        # ~constant-per-cell and learns the shape terms from the dense per-pixel loss.
+        head_out = output_channels * self.basis_size
         self.prediction_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
@@ -294,12 +303,11 @@ class AMRTransformer(nn.Module):
             tokens_per_sample: per-sample token counts (``len == B``).
 
         Returns:
-            Per-token predictions of shape [total_N, output_channels], or
-            [total_N, output_channels, 3] = (value, gx, gy) when affine_output.
-            in a dict with keys:
+            A dict with keys:
                 token_preds:       ``[total_N, output_channels]``, or
-                    ``[total_N, output_channels, 3]`` = (value, gx, gy) when
-                    ``affine_output`` (decoded into a per-cell ramp by the loss).
+                    ``[total_N, output_channels, basis_size(affine_output)]`` basis
+                    coefficients when ``affine_output`` (decoded into a per-cell
+                    polynomial by the loss).
                 tokens_per_sample: the input ``tokens_per_sample`` (echoed back).
         """
         assert packed_tokens.shape[-1] == self.token_dim, (
@@ -348,8 +356,8 @@ class AMRTransformer(nn.Module):
         # Per-token predictions
         preds = self.prediction_head(x)                # [total_N, head_out]
         if self.affine_output:
-            # [total_N, C, 3] = (value, gx, gy) per channel
-            preds = preds.view(-1, self.output_channels, 3)
+            # [total_N, C, basis_size] basis coefficients per channel
+            preds = preds.view(-1, self.output_channels, self.basis_size)
 
         return {
             "token_preds": preds,

@@ -8,6 +8,7 @@ from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
 from src.amr.oracle_depth import compute_oracle_depth
 from src.amr.quadtree import QuadNode, nodes_to_token_array
 from src.amr.refinement_criteria import RefinementCriteria
+from src.models.reconstruction import basis_size, cell_basis
 
 
 # ---------------------------------------------------------------------------
@@ -27,29 +28,40 @@ def _per_token_targets(target: np.ndarray, leaves: List[QuadNode]) -> np.ndarray
     return token_target
 
 
-def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: int) -> Dict[str, np.ndarray]:
-    """Per-leaf sufficient statistics for the closed-form affine dense NMSE.
+def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: int,
+                       order: int) -> Dict[str, np.ndarray]:
+    """Per-leaf sufficient statistics for the closed-form quadratic dense NMSE.
 
-    The affine head paints leaf ``i`` with the ramp ``v + gx*dx + gy*dy`` over its
-    pixels. Because ``dx``/``dy`` are offsets from the cell centre, ``sum(dx)``,
-    ``sum(dy)`` and ``sum(dx*dy)`` over a cell are all exactly zero, so the cell's
-    squared error collapses to
+    The head paints leaf ``i`` with ``v + gx*dx + gy*dy + gxx*dxx + gxy*dxy + gyy*dyy``
+    over its pixels. The six terms are mutually orthogonal over a cell (``cell_basis``
+    centres ``dxx``/``dyy`` to make that true), so every cross term drops and the
+    cell's squared error collapses to
 
         SSE = num_pixels*(v - mean_target)^2
-              + sum_xx*gx^2 - 2*gx*sum_target_dx
-              + sum_yy*gy^2 - 2*gy*sum_target_dy
+              + sum_xx*gx^2     - 2*gx*sum_target_dx
+              + sum_yy*gy^2     - 2*gy*sum_target_dy
+              + sum_xxxx*gxx^2  - 2*gxx*sum_target_dxx
+              + sum_xyxy*gxy^2  - 2*gxy*sum_target_dxy
+              + sum_yyyy*gyy^2  - 2*gyy*sum_target_dyy
               + sum_sq_resid
 
     in which every term that touches the target is a constant of ``(mesh, target)``.
     Those constants are what this function returns, so ``affine_nmse_loss`` can
     evaluate the dense per-pixel loss without ever building the ``[B,H,W,C]`` grid
-    (see src/training/loss.py:affine_nmse_loss).
+    (see src/training/loss.py:affine_nmse_loss). This is the affine version of the
+    same expression with three more terms.
 
-    ``dx``/``dy`` use the same normalisation as
-    ``src/models/reconstruction.py:precompute_affine_geometry`` -- offsets from the
-    cell centre divided by ``size = max(h/H, w/W)`` -- so the two paths compute the
-    same function. Accumulation is float64 and ``sum_sq_resid`` is centred on the
-    cell mean, which keeps the subtraction out of float32.
+    The terms come from ``src/models/reconstruction.py:cell_basis``, which is also
+    what paints the pixels, so the two paths cannot disagree about what ``dxx``
+    means. A term the cell is too small to resolve is an all-zero column, so its
+    norm and its target product are both zero and it leaves the sum untouched --
+    the same way ``sum_xx = 0`` handled a one-pixel-wide cell before.
+
+    At order 1 the last three terms do not exist, so their statistics are neither
+    computed nor returned and the expression stops after ``gy``.
+
+    Accumulation is float64 and ``sum_sq_resid`` is centred on the cell mean, which
+    keeps the subtraction out of float32.
 
     Args:
         target: ``[H, W, output_channels]`` dense ground truth for one sample.
@@ -57,58 +69,81 @@ def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: in
             tile the full grid.
         H: Grid height (rows).
         W: Grid width (columns).
+        order: The head's ``affine_output`` order, 1 or 2.
 
     Returns:
         Dict of float32 arrays, rows aligned with ``leaves``:
         ``num_pixels`` [N] pixel count,
-        ``sum_xx``/``sum_yy`` [N] ramp norms (cell-shape only),
+        ``sum_xx``/``sum_yy``/``sum_xxxx``/``sum_xyxy``/``sum_yyyy`` [N] term norms
+        (cell-shape only),
         ``mean_target`` [N, C] cell mean,
-        ``sum_target_dx``/``sum_target_dy`` [N, C] target-ramp products,
+        ``sum_target_dx``/``_dy``/``_dxx``/``_dxy``/``_dyy`` [N, C] target-term products,
         ``sum_sq_resid`` [N, C] within-cell sum of squares about the mean.
+        At order 1 the six second-order arrays are present but have no rows.
 
     Raises:
         ValueError: if the leaves do not tile the grid exactly, which would leave
             pixels out of the loss instead of merely mis-weighting them.
     """
     N, C = len(leaves), target.shape[-1]
+    n_taylor_terms = basis_size(order)
+    second_order = order == 2
+    # Rows of the second-order arrays. At order 1 those terms do not exist, so the
+    # arrays are allocated with no rows and stay empty: the dict has the same keys
+    # at both orders, and nothing is computed for a term the head does not have.
+    N2 = N if second_order else 0
+
     num_pixels = np.empty(N, dtype=np.float32)
     sum_xx = np.empty(N, dtype=np.float32)
     sum_yy = np.empty(N, dtype=np.float32)
+    sum_xxxx = np.empty(N2, dtype=np.float32)
+    sum_xyxy = np.empty(N2, dtype=np.float32)
+    sum_yyyy = np.empty(N2, dtype=np.float32)
     mean_target = np.empty((N, C), dtype=np.float32)
     sum_target_dx = np.empty((N, C), dtype=np.float32)
     sum_target_dy = np.empty((N, C), dtype=np.float32)
+    sum_target_dxx = np.empty((N2, C), dtype=np.float32)
+    sum_target_dxy = np.empty((N2, C), dtype=np.float32)
+    sum_target_dyy = np.empty((N2, C), dtype=np.float32)
     sum_sq_resid = np.empty((N, C), dtype=np.float32)
 
     target = np.asarray(target, dtype=np.float64)
-    # The ramp depends only on the cell shape, and a quadtree has one shape per
-    # depth, so a handful of entries covers every leaf of every sample.
-    ramps: Dict[tuple, tuple] = {}
+    # The basis terms depend only on the cell shape, and a quadtree has one shape
+    # per depth, so a handful of entries covers every leaf of every sample.
+    terms: Dict[tuple, tuple] = {}
     covered = 0
 
     for i, node in enumerate(leaves):
         r0, c0, r1, c1 = node.r0, node.c0, node.r1, node.c1
         h, w = r1 - r0, c1 - c0
 
-        ramp = ramps.get((h, w))
-        if ramp is None:
-            size = max(h / H, w / W)
-            dx = (np.arange(w) + 0.5 - w / 2.0) / (W * size)
-            dy = (np.arange(h) + 0.5 - h / 2.0) / (H * size)
-            # sum_xx/sum_yy sum dx^2/dy^2 over the whole cell, hence the other extent.
-            ramp = (dx, dy, h * float((dx ** 2).sum()), w * float((dy ** 2).sum()))
-            ramps[(h, w)] = ramp
-        dx, dy, cell_sum_xx, cell_sum_yy = ramp
+        cached = terms.get((h, w))
+        if cached is None:
+            # cell_basis is the one definition of the terms and of the centring
+            # that makes dx^2 / dy^2 orthogonal to the constant; take the columns
+            # from it rather than rebuilding them here.
+            basis = cell_basis(h, w, n_taylor_terms)
+            cached = (basis.reshape(h, w, n_taylor_terms), (basis ** 2).sum(axis=0))
+            terms[(h, w)] = cached
+        cols, norms = cached
+        dx, dy = cols[:, :, 1], cols[:, :, 2]
 
         t = target[r0:r1, c0:c1]                  # [h, w, C]
         mean = t.mean(axis=(0, 1))
         num_pixels[i] = h * w
-        sum_xx[i] = cell_sum_xx
-        sum_yy[i] = cell_sum_yy
+        sum_xx[i], sum_yy[i] = norms[1], norms[2]
         mean_target[i] = mean
-        sum_target_dx[i] = (t * dx[None, :, None]).sum(axis=(0, 1))
-        sum_target_dy[i] = (t * dy[:, None, None]).sum(axis=(0, 1))
+        sum_target_dx[i] = (t * dx[:, :, None]).sum(axis=(0, 1))
+        sum_target_dy[i] = (t * dy[:, :, None]).sum(axis=(0, 1))
         sum_sq_resid[i] = ((t - mean) ** 2).sum(axis=(0, 1))
         covered += h * w
+
+        if second_order:
+            dxx, dxy, dyy = cols[:, :, 3], cols[:, :, 4], cols[:, :, 5]
+            sum_xxxx[i], sum_xyxy[i], sum_yyyy[i] = norms[3], norms[4], norms[5]
+            sum_target_dxx[i] = (t * dxx[:, :, None]).sum(axis=(0, 1))
+            sum_target_dxy[i] = (t * dxy[:, :, None]).sum(axis=(0, 1))
+            sum_target_dyy[i] = (t * dyy[:, :, None]).sum(axis=(0, 1))
 
     if covered != H * W:
         raise ValueError(
@@ -119,10 +154,16 @@ def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: in
         "num_pixels": num_pixels,
         "sum_xx": sum_xx,
         "sum_yy": sum_yy,
+        "sum_xxxx": sum_xxxx,
+        "sum_xyxy": sum_xyxy,
+        "sum_yyyy": sum_yyyy,
         "mean_target": mean_target,
         "sum_target_dx": sum_target_dx,
         "sum_target_dy": sum_target_dy,
-        "sum_sq_resid": sum_sq_resid
+        "sum_target_dxx": sum_target_dxx,
+        "sum_target_dxy": sum_target_dxy,
+        "sum_target_dyy": sum_target_dyy,
+        "sum_sq_resid": sum_sq_resid,
     }
 
 
@@ -161,14 +202,15 @@ class DeterministicCollateFn:
         max_depth: Hard depth cap; cells at this depth never subdivide.
         affine_input: Whether each token also carries its cell's (gx, gy),
             widening it to token_feature_width(C) + 3.
-        affine_output: Whether the model uses the affine head. When True the collate
-            also builds the per-leaf statistics the closed-form affine loss needs
-            (see ``_affine_leaf_stats``); when False they are neither computed nor
-            cached, since the constant head is scored on ``packed_targets``.
+        affine_output: The model's output order (0, 1 or 2). Non-zero means the
+            affine head, so the collate also builds the per-leaf statistics the
+            closed-form affine loss needs at that order (see ``_affine_leaf_stats``).
+            At 0 they are neither computed nor cached, since the constant head is
+            scored on ``packed_targets``.
     """
 
     def __init__(self, refinement_criteria: RefinementCriteria, min_depth: int, max_depth: int,
-                 affine_input: bool = False, affine_output: bool = False):
+                 affine_input: bool = False, affine_output: int = 0):
         self.refinement_criteria = refinement_criteria
         self.min_depth = min_depth
         self.max_depth = max_depth
@@ -203,7 +245,7 @@ class DeterministicCollateFn:
                 )
                 token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
                 token_target = _per_token_targets(target, leaves)
-                stats = _affine_leaf_stats(target, leaves, H, W) if self.affine_output else None
+                stats = _affine_leaf_stats(target, leaves, H, W, self.affine_output) if self.affine_output else None
                 cached = (token_array, len(leaves), token_target, stats)
                 self._cache[s["index"]] = cached
 
@@ -314,13 +356,14 @@ class LearnedCollateFn:
         offset: Mesh budget offset passed to ``build_depth_guided_mesh``.
         affine_input: Whether each token also carries its cell's (gx, gy),
             widening it to token_feature_width(C) + 3.
-        affine_output: Whether the model uses the affine head. When True the collate
-            also builds the per-leaf statistics the closed-form affine loss needs (see
-            ``_affine_leaf_stats``); when False they are neither computed nor cached.
+        affine_output: The model's output order (0, 1 or 2). Non-zero means the
+            affine head, so the collate also builds the per-leaf statistics the
+            closed-form affine loss needs at that order (see ``_affine_leaf_stats``).
+            At 0 they are neither computed nor cached.
     """
 
     def __init__(self, scorer, min_depth: int, max_depth: int, offset: float = 0.0,
-                 affine_input: bool = False, affine_output: bool = False):
+                 affine_input: bool = False, affine_output: int = 0):
         # Freeze the scorer: it only builds meshes here, it is never trained.
         self.scorer = scorer.eval().requires_grad_(False)
         self.min_depth = min_depth
@@ -354,7 +397,8 @@ class LearnedCollateFn:
                 target = np.asarray(s["target"], dtype=np.float32)
                 token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
                 token_target = _per_token_targets(target, leaves)
-                stats = _affine_leaf_stats(target, leaves, H, W) if self.affine_output else None
+                stats = (_affine_leaf_stats(target, leaves, H, W, self.affine_output)
+                         if self.affine_output else None)
                 self._cache[s["index"]] = (token_array, len(leaves), token_target, stats)
 
         all_tokens, all_targets, tokens_per_sample, all_stats = [], [], [], []

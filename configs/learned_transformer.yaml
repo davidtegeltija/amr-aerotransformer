@@ -8,7 +8,7 @@ dropout: 0.2
 min_patch_size: 2                       # Smallest allowed leaf patch (pixels). Fine cap -> hard limit on the deepest refinement
 max_patch_size: 16                      # Largest allowed leaf patch (pixels). Coarse floor -> every region is refined at least this far
 affine_input: true                      # Per-token mean + gx + gy of the geometry channels, instead of the mean alone
-affine_output: true                     # Per-token value + gx + gy, dense per-pixel loss
+affine_output: 2                        # Per-cell polynomial order, dense per-pixel loss: 0 constant | 1 value+gx+gy | 2 also gxx+gxy+gyy
 offset: 0.0                             # Mesh budget: split iff mean(d_pred) > d + offset. Positive coarser, negative finer
 checkpoint_file: "outputs/checkpoints/2026-07-16_scorer_supervised_cavity.pt"   # Required: the trained scorer whose depth map defines the mesh
 

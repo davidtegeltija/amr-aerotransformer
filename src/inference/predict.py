@@ -43,7 +43,7 @@ def predict_single_amr(model, sample, *, max_depth, min_depth, refinement_criter
     token_preds = out["token_preds"]
 
     if model.affine_output:
-        # token_preds is [N, C, 3] = (value, gx, gy); decode the per-cell ramps.
+        # token_preds is [N, C, K] where K defines the cell's polynomial.
         grid = tokens_to_grid_affine(token_preds, leaves, H, W, output_channels)
     else:
         grid = tokens_to_grid(token_preds, leaves, H, W, output_channels, mode="fill")
