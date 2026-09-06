@@ -8,7 +8,7 @@ from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.models.amr_model import AMRTransformer
 from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
-from src.evaluation.metrics import relative_l2, relative_mae, calculate_coefficients, coefficient_errors
+from src.evaluation.metrics import l2_error, mae_error, calculate_coefficients, coefficient_errors
 from src.inference.predict import predict_single_amr, predict_single_vit
 from src.utils.checkpoint import build_model_from_checkpoint
 
@@ -53,12 +53,15 @@ def evaluate_error_rate(
         dataset: The full dataset, before splitting.
         sample_indices: Rows to evaluate (typically the held-out test split).
         error_fn: Per-sample field error, ``(pred, target) -> [C]`` as a
-            fraction: ``relative_l2`` (default) or ``relative_mae``.
+            fraction: ``l2_error`` (default) or ``mae_error``.
 
     Returns:
         Dict with ``per_channel_error`` ``[C]`` and ``per_channel_accuracy``
-        ``[C]`` (percentages), the scalar ``error`` / ``accuracy`` averaged over
-        channels, the per-sample scalar spread ``std``, and ``n_samples``.
+        ``[C]`` (percentages), the absolute pair those percentages come from,
+        ``per_channel_absolute_error`` ``[C]`` and ``per_channel_reference``
+        ``[C]`` (units depend on ``error_fn``, see the two metric functions),
+        the scalar ``error`` / ``accuracy`` averaged over channels, the
+        per-sample scalar spread ``std``, and ``n_samples``.
     """
     if len(sample_indices) == 0:
         raise ValueError("no samples to evaluate; check val_split and the dataset")
@@ -66,7 +69,7 @@ def evaluate_error_rate(
     refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
     scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
 
-    per_sample = []
+    per_sample_relative, per_sample_absolute, per_sample_reference = [], [], []
     for index in tqdm(sample_indices, unit=" sample", desc="Evaluating", disable=not sys.stderr.isatty()):
         if isinstance(model, ViT):
             result = predict_single_vit(model, dataset[index])
@@ -84,33 +87,43 @@ def evaluate_error_rate(
             raise ValueError(f"Cannot evaluate {type(model).__name__}; expected **ViT** or **AMRTransformer**")
 
         if error_fn == "l2":
-            error = relative_l2(result["prediction"], result["ground_truth"])
+            relative, absolute, reference = l2_error(result["prediction"], result["ground_truth"])
         elif error_fn == "mae":
-            error = relative_mae(result["prediction"], result["ground_truth"])
+            relative, absolute, reference = mae_error(result["prediction"], result["ground_truth"])
         else:
             raise ValueError(f"Only **l2** or **mae** are valid error functions")
-        
-        per_sample.append(error)
 
-    per_sample = np.stack(per_sample)                     # [n_samples, C]
-    per_channel_error = 100.0 * per_sample.mean(axis=0)   # [C]
+        per_sample_relative.append(relative)
+        per_sample_absolute.append(absolute)
+        per_sample_reference.append(reference)
+
+    per_sample_relative = np.stack(per_sample_relative)             # [n_samples, C]
+    per_channel_error = 100.0 * per_sample_relative.mean(axis=0)    # [C]
 
     metrics = {
         "per_channel_error": per_channel_error,
         "per_channel_accuracy": 100.0 - per_channel_error,
+        "per_channel_absolute_error": np.stack(per_sample_absolute).mean(axis=0),
+        "per_channel_reference": np.stack(per_sample_reference).mean(axis=0),
         "error": float(per_channel_error.mean()),
         "accuracy": float(100.0 - per_channel_error.mean()),
-        "std": float(100.0 * per_sample.mean(axis=1).std()),
+        "std": float(100.0 * per_sample_relative.mean(axis=1).std()),
         "n_samples": len(sample_indices),
     }
 
+    # The l2 normalizer is this sample's own target norm, so the two absolute
+    # columns are themselves averages and their ratio only approximates the
+    # error column. The mae normalizer is a constant, so there the ratio is exact.
+    absolute_label, reference_label = ("RMSE", "RMS |ref|") if error_fn == "l2" else ("MAE", "mean |ref|")
+
     print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  {error_fn}")
-    print(f"{'channel':>10}  {'error':>14}  {'accuracy':>10}")
+    print(f"{'channel':>10}  {absolute_label:>12}  {reference_label:>12}  {'error':>14}  {'accuracy':>10}")
 
-    for c, (err, acc) in enumerate(zip(metrics["per_channel_error"], metrics["per_channel_accuracy"])):
-        print(f"{c:>10}  {err:>13.2f}%  {acc:>9.2f}%")
+    for c, (abs_err, ref, err, acc) in enumerate(zip(metrics["per_channel_absolute_error"], metrics["per_channel_reference"],
+                                                     metrics["per_channel_error"], metrics["per_channel_accuracy"])):
+        print(f"{c:>10}  {abs_err:>12.6f}  {ref:>12.6f}  {err:>13.2f}%  {acc:>9.2f}%")
 
-    print(f"{'overall':>10}  {metrics['error']:>13.2f}%  {metrics['accuracy']:>9.2f}%"
+    print(f"{'overall':>10}  {'':>12}  {'':>12}  {metrics['error']:>13.2f}%  {metrics['accuracy']:>9.2f}%"
             f"   (per-sample std {metrics['std']:.2f}%)")
 
     return metrics
@@ -210,8 +223,8 @@ def evaluate_aero_coefficients(
 
     metrics = {
         "prediction_vs_solver": coefficient_errors(predicted, solver),
-        "truth_vs_solver": coefficient_errors(true, solver),
-        "prediction_vs_truth": coefficient_errors(predicted, true),
+        # "truth_vs_solver": coefficient_errors(true, solver),
+        # "prediction_vs_truth": coefficient_errors(predicted, true),
         "coefficients_solver": solver,
         "coefficients_true": true,
         "coefficients_pred": predicted,
@@ -220,8 +233,8 @@ def evaluate_aero_coefficients(
 
     print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  aero coefficients")
     print_coefficient_errors("prediction vs solver  (the model, integration error included)", metrics["prediction_vs_solver"])
-    print_coefficient_errors("ground truth vs solver  (the integrator's own error floor)", metrics["truth_vs_solver"])
-    print_coefficient_errors("prediction vs ground truth  (the model, integration cancelled)", metrics["prediction_vs_truth"])
+    # print_coefficient_errors("ground truth vs solver  (the integrator's own error floor)", metrics["truth_vs_solver"])
+    # print_coefficient_errors("prediction vs ground truth  (the model, integration cancelled)", metrics["prediction_vs_truth"])
 
     return metrics
 

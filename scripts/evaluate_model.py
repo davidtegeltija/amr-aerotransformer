@@ -25,6 +25,8 @@ if __name__ == "__main__":
     data_config = "configs/data/wing.yaml"
     checkpoint_file = "outputs/checkpoints/transformer_on_learned_mesh.pt"
 
+    print(f"\nEvaluating checkpoint: {checkpoint_file}\n")
+
     args = load_config(model_config, data_config)
     dataset, dataset_type = build_dataset(args)
 

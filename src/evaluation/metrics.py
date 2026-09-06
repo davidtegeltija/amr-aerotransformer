@@ -29,7 +29,7 @@ COEFFICIENT_COUNT_SCALES = np.array([1e-3, 1e-4, 1e-3], dtype=np.float32)
 # ---------------------------------------------------------------------------
 # Relative L2 error — per-channel, dimensionless, reads as a percentage
 # ---------------------------------------------------------------------------
-def relative_l2(pred: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+def l2_error(pred: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> tuple:
     """Per-channel relative L2 error of one reconstructed prediction.
 
     Args:
@@ -39,27 +39,36 @@ def relative_l2(pred: np.ndarray, target: np.ndarray, eps: float = 1e-8) -> np.n
             identically zero over the grid.
 
     Returns:
-        Array ``[C]`` holding ``||pred - target|| / ||target||`` per channel,
-        as a fraction (multiply by 100 for a percentage).
+        Tuple of three ``[C]`` arrays: ``||pred - target|| / ||target||`` per
+        channel as a fraction (multiply by 100 for a percentage), followed by
+        the two sides that ratio is built from — the RMS error and the RMS of
+        the target — so a percentage can be read back as an absolute size.
+        Both stay in the stored (pre-scaled) units the model works in: the
+        scaling cancels in the ratio, and unscaling would tie this function to
+        the three surface channels, which it is otherwise free of.
     """
     if pred.shape != target.shape:
         raise ValueError(f"shape mismatch: pred {pred.shape} vs target {target.shape}")
 
     err_norm = np.sqrt(((pred - target) ** 2).sum(axis=(0, 1)))
     target_norm = np.sqrt((target ** 2).sum(axis=(0, 1)))
-    return err_norm / (target_norm + eps)
+
+    # Both norms grow with the grid, so they are quoted per cell to read as a
+    # magnitude rather than a total. The ratio itself is unaffected.
+    per_cell = np.sqrt(pred.shape[0] * pred.shape[1])
+    return err_norm / (target_norm + eps), err_norm / per_cell, target_norm / per_cell
 
 
 # ---------------------------------------------------------------------------
 # Relative MAE — mean absolute error against each channel's own magnitude
 # ---------------------------------------------------------------------------
-def relative_mae(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
+def mae_error(pred: np.ndarray, target: np.ndarray) -> tuple:
     """Per-channel relative mean absolute error of one reconstructed prediction.
 
     The field error the original postprocessing reports: the mean absolute
     error of a channel, unscaled back to physical units and divided by that
     channel's reference magnitude. Same shape of answer as
-    ``relative_l2``, but normalized by a constant instead of by the norm
+    ``l2_error``, but normalized by a constant instead of by the norm
     of this particular target, so a case with a nearly flat field cannot
     inflate its own error — the price is that the three channels are only
     comparable to each other as far as the reference magnitudes are
@@ -71,8 +80,14 @@ def relative_mae(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
         target: Ground-truth grid ``[H, W, C]``, same shape and units.
 
     Returns:
-        Array ``[C]`` holding ``mean|pred - target| / reference`` per channel,
-        as a fraction (multiply by 100 for a percentage).
+        Tuple of three ``[C]`` arrays: ``mean|pred - target| / reference`` per
+        channel as a fraction (multiply by 100 for a percentage), followed by
+        the two sides that ratio is built from — the mean absolute error,
+        unscaled back to physical units, and the reference magnitude it was
+        divided by. The reference is the constant
+        ``SURFACE_REFERENCE_MAGNITUDES``, identical for every sample, so
+        printing it alongside the error shows what the percentage is measured
+        against.
     """
     if pred.shape != target.shape:
         raise ValueError(f"shape mismatch: pred {pred.shape} vs target {target.shape}")
@@ -80,8 +95,8 @@ def relative_mae(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
     if pred.shape[-1] != len(SURFACE_REFERENCE_MAGNITUDES):
         raise ValueError(f"expected the {len(SURFACE_REFERENCE_MAGNITUDES)} surface channels (cp, cf_tau, cf_z), got {pred.shape[-1]}")
 
-    absolute_error = np.abs(pred - target).mean(axis=(0, 1))
-    return absolute_error / (SOLUTION_CHANNEL_SCALES * SURFACE_REFERENCE_MAGNITUDES)
+    absolute_error = np.abs(pred - target).mean(axis=(0, 1)) / SOLUTION_CHANNEL_SCALES
+    return absolute_error / SURFACE_REFERENCE_MAGNITUDES, absolute_error, SURFACE_REFERENCE_MAGNITUDES
 
 
 # ---------------------------------------------------------------------------
