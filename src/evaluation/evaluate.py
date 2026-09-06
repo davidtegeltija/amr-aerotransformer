@@ -4,13 +4,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.models.amr_model import AMRTransformer
-from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
 from src.evaluation.metrics import l2_error, mae_error, calculate_coefficients, coefficient_errors
-from src.inference.predict import predict_single_amr, predict_single_vit
-from src.utils.checkpoint import build_model_from_checkpoint
+from src.inference.predict import resolve_mesh_source, predict_single_amr, predict_single_vit
 
 
 # Order of the coefficients returned by ``aero_coefficients``.
@@ -32,7 +29,8 @@ def evaluate_error_rate(
     args,
     dataset,
     sample_indices,
-    error_fn="l2"
+    error_fn="l2",
+    mesh_source=None
 ):
     """Mean per-channel field error of a model over the given dataset rows.
 
@@ -54,6 +52,10 @@ def evaluate_error_rate(
         sample_indices: Rows to evaluate (typically the held-out test split).
         error_fn: Per-sample field error, ``(pred, target) -> [C]`` as a
             fraction: ``l2_error`` (default) or ``mae_error``.
+        mesh_source: The (refinement_criteria, scorer) pair the AMR path
+            builds its mesh with. Resolved from args when omitted; pass the
+            pair from resolve_mesh_source to load the scorer once across
+            several evaluations. Unused for a ViT.
 
     Returns:
         Dict with ``per_channel_error`` ``[C]`` and ``per_channel_accuracy``
@@ -66,8 +68,9 @@ def evaluate_error_rate(
     if len(sample_indices) == 0:
         raise ValueError("no samples to evaluate; check val_split and the dataset")
 
-    refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
-    scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
+    refinement_criteria, scorer = mesh_source or resolve_mesh_source(args)
+
+    print()
 
     per_sample_relative, per_sample_absolute, per_sample_reference = [], [], []
     for index in tqdm(sample_indices, unit=" sample", desc="Evaluating", disable=not sys.stderr.isatty()):
@@ -116,14 +119,14 @@ def evaluate_error_rate(
     # error column. The mae normalizer is a constant, so there the ratio is exact.
     absolute_label, reference_label = ("RMSE", "RMS |ref|") if error_fn == "l2" else ("MAE", "mean |ref|")
 
-    print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  {error_fn}")
-    print(f"{'channel':>10}  {absolute_label:>12}  {reference_label:>12}  {'error':>14}  {'accuracy':>10}")
+    print(f"Test split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  {error_fn}")
+    print(f"{'channel':>10}  {absolute_label:>12}  {reference_label:>12}  {'error':>10}  {'accuracy':>10}")
 
     for c, (abs_err, ref, err, acc) in enumerate(zip(metrics["per_channel_absolute_error"], metrics["per_channel_reference"],
                                                      metrics["per_channel_error"], metrics["per_channel_accuracy"])):
-        print(f"{c:>10}  {abs_err:>12.6f}  {ref:>12.6f}  {err:>13.2f}%  {acc:>9.2f}%")
+        print(f"{c:>10}  {abs_err:>12.6f}  {ref:>12.6f}  {err:>9.2f}%  {acc:>9.2f}%")
 
-    print(f"{'overall':>10}  {'':>12}  {'':>12}  {metrics['error']:>13.2f}%  {metrics['accuracy']:>9.2f}%"
+    print(f"{'overall':>10}  {'':>12}  {'':>12}  {metrics['error']:>9.2f}%  {metrics['accuracy']:>9.2f}%"
             f"   (per-sample std {metrics['std']:.2f}%)")
 
     return metrics
@@ -136,7 +139,8 @@ def evaluate_aero_coefficients(
     dataset,
     sample_indices,
     index_array,
-    geometry_array
+    geometry_array,
+    mesh_source=None
 ):
     """Accuracy of the predicted lift, drag and pitching moment over a set of rows.
 
@@ -174,6 +178,8 @@ def evaluate_aero_coefficients(
         geometry_array: The original geometry file (``origingeom.npy``), one row
             per wing, holding the node grid the solution cells span. Indexed by
             column 0 of ``index_array``, not by the dataset row.
+        mesh_source: The (refinement_criteria, scorer) pair, exactly as in
+            evaluate_error_rate.
 
     Returns:
         Dict with one ``coefficient_errors`` block per comparison
@@ -184,8 +190,9 @@ def evaluate_aero_coefficients(
     if len(sample_indices) == 0:
         raise ValueError("no samples to evaluate; check val_split and the dataset")
 
-    refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
-    scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
+    refinement_criteria, scorer = mesh_source or resolve_mesh_source(args)
+
+    print()
 
     solver, true, predicted = [], [], []
     for index in tqdm(sample_indices, unit=" sample", desc="Integrating", disable=not sys.stderr.isatty()):
@@ -231,7 +238,7 @@ def evaluate_aero_coefficients(
         "n_samples": len(sample_indices),
     }
 
-    print(f"\nTest split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  aero coefficients")
+    print(f"Test split: {metrics['n_samples']} samples  |  {type(model).__name__}  |  aero coefficients")
     print_coefficient_errors("prediction vs solver  (the model, integration error included)", metrics["prediction_vs_solver"])
     # print_coefficient_errors("ground truth vs solver  (the integrator's own error floor)", metrics["truth_vs_solver"])
     # print_coefficient_errors("prediction vs ground truth  (the model, integration cancelled)", metrics["prediction_vs_truth"])
@@ -249,7 +256,7 @@ def print_coefficient_errors(title: str, errors: dict) -> None:
         title: Line printed above the table, naming what is compared to what.
         errors: The dict returned by ``coefficient_errors``.
     """
-    print(f"\n{title}")
+    print(f"{title}")
     print(f"{'coef.':>10}  {'MAE':>12}  {'MAE (counts)':>13}  {'mean |ref|':>12}  {'error':>10}  {'accuracy':>10}")
 
     for name, err_abs, counts, ref, err, acc in zip(COEFFICIENT_NAMES, errors["mae"], errors["mae_counts"],
@@ -257,4 +264,4 @@ def print_coefficient_errors(title: str, errors: dict) -> None:
                                                     errors["per_coefficient_accuracy"]):
         print(f"{name:>10}  {err_abs:>12.5f}  {counts:>13.1f}  {ref:>12.5f}  {err:>9.2f}%  {acc:>9.2f}%")
 
-    print(f"{'overall':>10}  {'':>12}  {'':>13}  {'':>12}  {errors['error']:>9.2f}%  {errors['accuracy']:>9.2f}%")
+    print(f"{'overall':>10}  {'':>12}  {'':>13}  {'':>12}  {errors['error']:>9.2f}%  {errors['accuracy']:>9.2f}%\n")

@@ -5,14 +5,12 @@ sys.path.insert(0, PROJECT_ROOT)
 
 import numpy as np
 
-from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.data.dataset_factory import build_dataset
 from src.data.split import test_row_indices
 from src.models.amr_model import AMRTransformer
-from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
 from src.evaluation.evaluate import evaluate_aero_coefficients
-from src.inference.predict import predict_single_amr, predict_single_vit
+from src.inference.predict import resolve_mesh_source, predict_single_amr, predict_single_vit
 from src.utils.config import load_config, resolve_depth_bounds
 from src.utils.checkpoint import build_model_from_checkpoint
 from src.utils.plot import plot_coefficient_correlation, plot_channel_sections
@@ -30,13 +28,12 @@ def build_model(args, checkpoint_file, dataset):
     return model, resolve_depth_bounds(args, dataset)
 
 
-def predict_sample(model, args, sample):
+def predict_sample(model, args, sample, mesh_source):
     """Predict a single sample on whichever inference path the model selects."""
     if isinstance(model, ViT):
         return predict_single_vit(model, sample)
 
-    refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
-    scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
+    refinement_criteria, scorer = mesh_source
 
     return predict_single_amr(
         model,
@@ -85,12 +82,17 @@ if __name__ == "__main__":
         model_args = load_config(model_config, data_config)
         model, model_args = build_model(model_args, checkpoint_file, dataset)
 
-        predictions[name] = predict_sample(model, model_args, sample)["prediction"]
+        # Resolved once per model: the sample plot and the coefficients below
+        # both predict with it, and a ViT config resolves to (None, None).
+        mesh_source = resolve_mesh_source(model_args)
+
+        predictions[name] = predict_sample(model, model_args, sample, mesh_source)["prediction"]
 
         # Both sides of the plot go through the same integral, so the gap it
         # shows is the model's rather than the integrator's. The target is the
         # same for every model, hence the single array kept from the last run.
-        metrics = evaluate_aero_coefficients(model, model_args, dataset, coefficient_idx, index_array, geometry_array)
+        metrics = evaluate_aero_coefficients(model, model_args, dataset, coefficient_idx, index_array,
+                                             geometry_array, mesh_source)
         coefficients[name] = metrics["coefficients_pred"]
         coefficients_target = metrics["coefficients_true"]
 

@@ -4,9 +4,38 @@ import torch
 from src.amr.adaptive_mesh import build_adaptive_mesh
 from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
 from src.amr.quadtree import nodes_to_token_array, token_feature_width
+from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.models.reconstruction import tokens_to_grid, tokens_to_grid_affine
+from src.models.refinement_net import RefinementNet
+from src.utils.checkpoint import build_model_from_checkpoint
 
 
+# ---------------------------------------------------------------------------
+# Mesh source
+# ---------------------------------------------------------------------------
+def resolve_mesh_source(args):
+    """Build the pair of mesh arguments ``predict_single_amr`` chooses between.
+
+    Loading the scorer reads its checkpoint from disk, so a caller that predicts
+    the same config more than once resolves the pair once here and passes it on
+    rather than calling this per prediction.
+
+    Args:
+        args: Merged config. ``refinement_criteria`` selects the deterministic
+            path, ``checkpoint_file`` the learned one; a config carries one.
+
+    Returns:
+        ``(refinement_criteria, scorer)``, with the unused one ``None``.
+    """
+    refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
+    scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
+
+    return refinement_criteria, scorer
+
+
+# ---------------------------------------------------------------------------
+# Single-sample prediction
+# ---------------------------------------------------------------------------
 @torch.no_grad()
 def predict_single_amr(model, sample, *, max_depth, min_depth, refinement_criteria, scorer, offset):
     """Run one forward pass on a single sample and reconstruct the full-grid prediction.

@@ -7,14 +7,12 @@ import numpy as np
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.data.dataset_factory import build_dataset
 from src.data.split import test_row_indices
 from src.models.amr_model import AMRTransformer
-from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
 from src.evaluation.evaluate import evaluate_aero_coefficients, evaluate_error_rate
-from src.inference.predict import predict_single_amr, predict_single_vit
+from src.inference.predict import resolve_mesh_source, predict_single_amr, predict_single_vit
 from src.utils.config import load_config, resolve_depth_bounds
 from src.utils.checkpoint import build_model_from_checkpoint
 from src.utils.plot import plot_mesh, plot_flow_comparison
@@ -35,7 +33,10 @@ if __name__ == "__main__":
     sample_index = test_idx[-1]
     sample = dataset[sample_index]
 
-    # Build a model from a checkpoint
+    # Build a model from a checkpoint. The mesh source is resolved once here and
+    # handed to every prediction below, so the scorer loaded once
+    mesh_source = None
+
     if args.get("model_trained") == "vit":
         model = build_model_from_checkpoint(ViT, checkpoint_file).eval()
         result = predict_single_vit(model, sample)
@@ -43,11 +44,11 @@ if __name__ == "__main__":
         model = build_model_from_checkpoint(AMRTransformer, checkpoint_file).eval()
 
         # Add min_depth/max_depth to args. Only the AMR path builds a quadtree,
-        # and only its configs carry the patch sizes the bounds come from.
+        # and only its configs carry the patch sizes the bounds come from
         args = resolve_depth_bounds(args, dataset)
 
-        refinement_criteria = CRITERIA_REGISTRY[args["refinement_criteria"]] if args.get("refinement_criteria") else None
-        scorer = build_model_from_checkpoint(RefinementNet, args["checkpoint_file"]).eval() if args.get("checkpoint_file") else None
+        mesh_source = resolve_mesh_source(args)
+        refinement_criteria, scorer = mesh_source
 
         result = predict_single_amr(
             model,
@@ -77,12 +78,12 @@ if __name__ == "__main__":
     # Model Accuracy
     # ------------------------
     # --- Prediction --- 
-    metrics_l2 = evaluate_error_rate(model, args, dataset, test_idx, "l2")
-    metrics_cae = evaluate_error_rate(model, args, dataset, test_idx, "mae")
+    metrics_l2 = evaluate_error_rate(model, args, dataset, test_idx, "l2", mesh_source)
+    metrics_cae = evaluate_error_rate(model, args, dataset, test_idx, "mae", mesh_source)
 
     # --- Aero Coefficients ---
     index_array = np.load(args["index_file"])
     geometry_array = np.load("/mnt/data/tegeltija/origingeom.npy", mmap_mode="r")
 
-    metrics_coef = evaluate_aero_coefficients(model, args, dataset, test_idx, index_array, geometry_array)
+    metrics_coef = evaluate_aero_coefficients(model, args, dataset, test_idx, index_array, geometry_array, mesh_source)
     
