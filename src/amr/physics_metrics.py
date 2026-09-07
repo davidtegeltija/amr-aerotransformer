@@ -30,15 +30,13 @@ Design decisions
 
 RefinementCriteria
 ----------------
-A single dataclass that holds the threshold for each metric.  Set a
-threshold to None to disable that metric entirely.
- 
-    cfg = RefinementCriteria(grad_threshold=0.05, vorticity_threshold=None)
- 
-Two ready-made configs are provided as module-level constants:
- 
-    AERODYNAMIC_CONFIG  -- tuned for steady aero fields
-    DEFAULT_CONFIG      -- balanced generic config
+A single dataclass, in refinement_criteria.py, holding the threshold for each
+metric.  Every threshold defaults to None, which disables that metric, so a
+preset names only the ones it wants:
+
+    cfg = RefinementCriteria(grad_threshold=0.05)
+
+The ready-made presets live there too, in CRITERIA_REGISTRY.
 """
 
 from __future__ import annotations

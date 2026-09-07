@@ -24,12 +24,19 @@ from src.amr.geometry_metrics import (
 class RefinementCriteria:
     """
     Thresholds that control which cells get subdivided.
- 
-    Set a field to "None" to disable that metric entirely (it will not be computed or checked).
- 
+
+    Every threshold defaults to "None", which disables that metric entirely (it
+    is neither computed nor checked). A RefinementCriteria that names
+    nothing subdivides nothing and collapses to the "min_depth" mesh.
+
     OR-logic applies: a cell is subdivided if *any* enabled metric exceeds
     its threshold.
- 
+
+    Note the metrics are evaluated on the first three input channels, which on
+    the wing dataset are the (x, y, z) surface coordinates in metres -- not a
+    normalised flow field. Thresholds calibrated for normalised fields are one to
+    three orders of magnitude off there.
+
     Geometry thresholds
     ---------------------------------------
     curvature_threshold      : mean discrete curvature magnitude.
@@ -63,33 +70,26 @@ class RefinementCriteria:
  
     Examples
     --------
-    # Use only velocity gradient and vorticity:
-    cfg = RefinementCriteria(
-        grad_threshold=0.05,
-        vorticity_threshold=0.04,
-        momentum_threshold=None,
-        kh_shear_threshold=None,
-        variance_threshold=None,
-        entropy_threshold=None,
-    )
- 
-    # Coarser mesh (raise all thresholds by 2x):
-    cfg = AERODYNAMIC_CRITERIA.scale(2.0)
+    # Use only velocity gradient and vorticity; the other eight stay disabled:
+    cfg = RefinementCriteria(grad_threshold=0.05, vorticity_threshold=0.04)
+
+    # Coarser mesh (raise all enabled thresholds by 2x):
+    cfg = GEOMETRY_BALANCED_CRITERIA.scale(2.0)
     """
 
     # Geometry thresholds
-    curvature_threshold:      Optional[float] = 0.10
-    le_te_threshold:          Optional[float] = 0.15
-    thickness_grad_threshold: Optional[float] = 0.08
-    wall_distance_threshold:  Optional[float] = 5.00
- 
+    curvature_threshold:      Optional[float] = None
+    le_te_threshold:          Optional[float] = None
+    thickness_grad_threshold: Optional[float] = None
+    wall_distance_threshold:  Optional[float] = None
+
     # Physics thresholds
-    grad_threshold:      Optional[float] = 0.08
-    vorticity_threshold: Optional[float] = 0.06
-    momentum_threshold:  Optional[float] = 0.80
-    kh_shear_threshold:  Optional[float] = 0.60
-    variance_threshold:  Optional[float] = 0.02
-    entropy_threshold:   Optional[float] = 2.50
+    grad_threshold:      Optional[float] = None
+    vorticity_threshold: Optional[float] = None
+    momentum_threshold:  Optional[float] = None
+    kh_shear_threshold:  Optional[float] = None
+    variance_threshold:  Optional[float] = None
+    entropy_threshold:   Optional[float] = None
  
     def scale(self, factor: float) -> "RefinementCriteria":
         """
@@ -195,93 +195,64 @@ class RefinementCriteria:
 # ---------------------------------------------------------------------------
 # higher threshold = fewer patches
 # lower threshold  = more patches
-AERODYNAMIC_CRITERIA = RefinementCriteria(
-    grad_threshold      = 0.08,   # primary: catches shocks, BL, wakes
-    vorticity_threshold = 0.06,   # secondary: vortex cores
-    momentum_threshold  = 0.80,   # conservative: avoid over-refining fast flow
-    kh_shear_threshold  = 0.60,   # conservative
-    variance_threshold  = 0.02,   # general fallback
-    entropy_threshold   = 2.50,   # general fallback
+
+
+# ~1390 tokens. The best geometry-only criterion found: beats a uniform mesh of
+# the same size on 88% of wings
+GEOMETRY_BALANCED_CRITERIA = RefinementCriteria(
+    entropy_threshold        = 4.10,     # uniform depth-5 floor
+    wall_distance_threshold  = 450.0,    # one extra level at LE/TE
+    le_te_threshold          = 3.0e-4,   # and at chordwise curvature peaks
 )
 
-AERODYNAMIC_CRITERIA_2 = RefinementCriteria(
-    curvature_threshold=None,
-    le_te_threshold=None,
-    thickness_grad_threshold=None,
-    wall_distance_threshold=None,
-    grad_threshold      = 0.15,   # primary: catches shocks, BL, wakes
-    vorticity_threshold = 0.10,   # secondary: vortex cores
-    momentum_threshold  = 1.20,   # conservative: avoid over-refining fast flow
-    kh_shear_threshold  = 0.80,   # conservative
-    variance_threshold  = 0.05,   # general fallback
-    entropy_threshold   = 7.50,   # general fallback
+# ~1070 tokens. Same family, cheapest setting that still beats uniform
+GEOMETRY_BALANCED_LIGHT = RefinementCriteria(
+    entropy_threshold        = 4.10,
+    wall_distance_threshold  = 800.0,
 )
 
-DEFAULT_CRITERIA = RefinementCriteria(
-    grad_threshold      = 0.05,
-    vorticity_threshold = 0.035,
-    momentum_threshold  = 0.40,
-    kh_shear_threshold  = 0.25,
-    variance_threshold  = 0.015,
-    entropy_threshold   = 2.50,
+# ~3730 tokens (cap is 4096). Dense: 97% of leaves at the finest depth
+GEOMETRY_BALANCED_DENSE = RefinementCriteria(
+    entropy_threshold        = 3.95,
+    wall_distance_threshold  = 90.0,
+    le_te_threshold          = 1.2e-4,
 )
 
-FIRST_DEFAULT_CRITERIA = RefinementCriteria(
-    # Individual metric thresholds — calibrated for normalised physical fields
-    # in range ~[-2, 2].  Tune these to control coarseness vs. fine resolution.
-    grad_threshold      = 1.15,   # mean velocity-gradient magnitude
-    vorticity_threshold = 0.10,   # mean vorticity magnitude
-    momentum_threshold  = 0.50,   # momentum per unit area
-    kh_shear_threshold  = 0.80,   # max KH shear strength
-    variance_threshold  = 0.05,   # mean per-channel variance
-    entropy_threshold   = 4.5,    # mean Shannon entropy (bits)
+# ~264 tokens (floor is 256). Coarse: 97% of leaves at the coarsest depth
+GEOMETRY_COARSE_CRITERIA = RefinementCriteria(
+    wall_distance_threshold  = 450.0,
 )
 
-GEOMETRY_DEFAULT_CONFIG = RefinementCriteria()
-"""Balanced geometry-only config suitable for generic wing meshes."""
-
-
-GEOMETRY_FINE_CONFIG = RefinementCriteria().scale(0.5)
-"""Aggressive geometry refinement (more tokens near geometric features)."""
-
-AERODYNAMIC_COMBINED_CONFIG = RefinementCriteria(
-    # geometry — emphasise LE/TE and curvature
-    curvature_threshold=0.08,
-    le_te_threshold=0.10,
-    thickness_grad_threshold=0.06,
-    wall_distance_threshold=8.00,
-    # physics — tuned for steady transonic aero
-    grad_threshold=0.05,
-    vorticity_threshold=0.04,
-    momentum_threshold=0.80,
-    kh_shear_threshold=0.60,
-    variance_threshold=0.02,
-    entropy_threshold=2.50,
+# Unstable on purpose: the same threshold gives 256 tokens on one wing and 3673
+# on another
+GEOMETRY_FRAGILE_CRITERIA = RefinementCriteria(
+    grad_threshold           = 0.016,
 )
 
-GEOMETRY_ONLY_COMBINED_CONFIG = RefinementCriteria(
-    # geometry defaults
-    curvature_threshold=0.001,
-    le_te_threshold=0.005,
-    thickness_grad_threshold=0.001,
-    wall_distance_threshold=1.00,
-    # disable physics
-    grad_threshold=None,
-    vorticity_threshold=None,
-    momentum_threshold=None,
-    kh_shear_threshold=None,
-    variance_threshold=None,
-    entropy_threshold=None,
+# Wrong on purpose: refines the flat mid-chord and coarsens the leading edge
+GEOMETRY_MISALIGNED_CRITERIA = RefinementCriteria(
+    vorticity_threshold      = 0.0094,
+)
+
+# ~850 tokens. Stable budget but the mesh quality swings 7x between wings
+GEOMETRY_LETE_CRITERIA = RefinementCriteria(
+    le_te_threshold = 2.2e-4
+)
+
+# ~800 tokens. The best single metric by rank correlation and still 0.57x 
+# a uniform mesh, because it can only ever build a two-level mesh
+GEOMETRY_WALL_CRITERIA = RefinementCriteria(
+    wall_distance_threshold = 150.0
 )
 
 
 CRITERIA_REGISTRY: Dict[str, RefinementCriteria] = {
-    "AERODYNAMIC_CRITERIA":          AERODYNAMIC_CRITERIA,
-    "AERODYNAMIC_CRITERIA_2":        AERODYNAMIC_CRITERIA_2,
-    "DEFAULT_CRITERIA":              DEFAULT_CRITERIA,
-    "FIRST_DEFAULT_CRITERIA":        FIRST_DEFAULT_CRITERIA,
-    "GEOMETRY_DEFAULT_CONFIG":       GEOMETRY_DEFAULT_CONFIG,
-    "GEOMETRY_FINE_CONFIG":          GEOMETRY_FINE_CONFIG,
-    "AERODYNAMIC_COMBINED_CONFIG":   AERODYNAMIC_COMBINED_CONFIG,
-    "GEOMETRY_ONLY_COMBINED_CONFIG": GEOMETRY_ONLY_COMBINED_CONFIG,
+    "GEOMETRY_BALANCED_CRITERIA":   GEOMETRY_BALANCED_CRITERIA,
+    "GEOMETRY_BALANCED_LIGHT":      GEOMETRY_BALANCED_LIGHT,
+    "GEOMETRY_BALANCED_DENSE":      GEOMETRY_BALANCED_DENSE,
+    "GEOMETRY_COARSE_CRITERIA":     GEOMETRY_COARSE_CRITERIA,
+    "GEOMETRY_FRAGILE_CRITERIA":    GEOMETRY_FRAGILE_CRITERIA,
+    "GEOMETRY_MISALIGNED_CRITERIA": GEOMETRY_MISALIGNED_CRITERIA,
+    "GEOMETRY_LETE_CRITERIA":       GEOMETRY_LETE_CRITERIA,
+    "GEOMETRY_WALL_CRITERIA":       GEOMETRY_WALL_CRITERIA,
 }

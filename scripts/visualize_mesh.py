@@ -53,11 +53,11 @@ def create_mesh(data, sample_index, max_depth, min_depth, refinement_criteria: R
 
 
 if __name__ == "__main__":
-    data = np.load("data/crmmdata.npy")
+    data = np.load("data/crmmgeom.npy")
     sample_index = 0
     max_depth = 6
     min_depth = 2
-    criteria_name = "AERODYNAMIC_CRITERIA_2"
+    criteria_name = "GEOMETRY_BALANCED_CRITERIA"
 
     sample, mesh = create_mesh(data=data, sample_index=sample_index, max_depth=max_depth, min_depth=min_depth, refinement_criteria=CRITERIA_REGISTRY[criteria_name])
 

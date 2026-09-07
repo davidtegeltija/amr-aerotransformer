@@ -28,7 +28,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from src.amr.refinement_criteria import GEOMETRY_ONLY_COMBINED_CONFIG, RefinementCriteria
+from src.amr.refinement_criteria import RefinementCriteria
 from src.amr.quadtree import QuadNode, build_tree, cell_affine_features, collect_leaves
 
 
@@ -59,10 +59,10 @@ def build_adaptive_mesh(
         Depth floor: cells shallower than this always subdivide, regardless
         of the criteria, so the leaves tile the grid at depth >= min_depth
         (matching build_depth_guided_mesh in the learned path).
-    refinement_criteria : RefinementCriteria, optional
-        Thresholds controlling subdivision.  Defaults to AERODYNAMIC_CONFIG.
-        Use config.scale(factor) to uniformly loosen or tighten the mesh.
-        Set individual thresholds to None to disable specific metrics.
+    refinement_criteria : RefinementCriteria
+        Thresholds controlling subdivision; required, typically a preset from
+        CRITERIA_REGISTRY. Only the metrics it names are computed and checked.
+        Use criteria.scale(factor) to uniformly loosen or tighten the mesh.
     uniform_cell_size : int, optional
         When set, skip adaptive refinement and return a regular grid of
         cells of exactly this pixel size (e.g. 4 for a 4x4 uniform mesh).
