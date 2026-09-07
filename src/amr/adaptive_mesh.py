@@ -163,18 +163,23 @@ def _should_subdivide(
     Criteria-based subdivision test for a single cell (the ``build_tree``
     predicate; ``functools.partial`` binds the field, criteria and depth bounds).
 
-    Computes only the metrics whose thresholds are enabled, for the x, y, z
-    channels (Storage AVG step, Fig. 2 of the AMR-Transformer paper), stores them on the
-    node for inspection, then returns True iff the cell should subdivide:
+    Returns True iff the cell should subdivide:
       * forced stop when the cell is at ``max_depth``;
       * forced split below ``min_depth``;
       * otherwise OR-logic: subdivide iff any enabled metric exceeds its
         threshold, matching Eq. 6 of the AMR-Transformer paper. A metric is
         disabled by setting its threshold to None in the criteria.
 
+    The two depth bounds are tested *first*, so the metrics are computed only for
+    the cells that actually get a vote -- those at depth ``[min_depth, max_depth)``,
+    for the x, y, z channels (Storage AVG step, Fig. 2 of the AMR-Transformer
+    paper). A forced cell now keeps an empty node.metrics which means 
+    plot_metric_heatmap therefore leaves such cells blank.
+
     Parameters
     ----------
-    node : QuadNode  candidate cell (``node.metrics`` is populated here)
+    node : QuadNode  candidate cell (node.metrics is populated here only when
+        the criteria are consulted, i.e. ``min_depth <= node.depth < max_depth``)
     data : np.ndarray  (H, W, C) field; the cell region is sliced by node.bbox
     refinement_criteria  : RefinementCriteria thresholds and scaling flags
     min_depth : int  depth floor (cells shallower than this always subdivide)
@@ -184,15 +189,16 @@ def _should_subdivide(
     -------
     bool  True -> subdivide this cell.
     """
-    region = data[node.r0:node.r1, node.c0:node.c1, :]
-    metrics = refinement_criteria.compute_enabled_metrics(region[:, :, :3])
-    node.metrics = metrics
-
     depth = node.depth
     if depth >= max_depth:
         return False
     if depth < min_depth:
         return True
+
+    region = data[node.r0:node.r1, node.c0:node.c1, :]
+    metrics = refinement_criteria.compute_enabled_metrics(region[:, :, :3])
+    node.metrics = metrics
+
     for metric_name, threshold in refinement_criteria.threshold_checks():
         if metrics.get(metric_name, 0.0) > threshold:
             return True

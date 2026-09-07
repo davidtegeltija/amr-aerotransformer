@@ -216,12 +216,21 @@ class DeterministicCollateFn:
         self.max_depth = max_depth
         self.affine_input = affine_input
         self.affine_output = affine_output
-        # Per-sample cache keyed by dataset index. The quadtree build and the
-        # target reductions are deterministic, so the first epoch fills this and
-        # every later epoch is a lookup. Only persists with num_workers=0 (workers
-        # get their own copy that is discarded after each batch). The QuadNode
-        # leaves are deliberately NOT kept: everything downstream needs is reduced
-        # to flat arrays here, and the objects cost ~10x more memory than they do.
+        # Two caches, because the two halves of the work do not vary together.
+        # Both only persist with num_workers=0 (workers get their own copy that is
+        # discarded after each batch), and neither keeps the QuadNode leaves:
+        # everything downstream needs is reduced to flat arrays here, and the
+        # objects cost ~10x more memory than they do.
+        #
+        # The mesh is keyed by the sample's 'mesh_key' where the dataset offers
+        # one, and by its dataset index otherwise. The criteria read only the
+        # leading geometry channels, so on the wing data every simulation of a
+        # wing yields the same quadtree -- 6.8 rows per geometry, i.e. 85% of the
+        # first epoch's builds were rebuilding a mesh already held under another
+        # row's key. Value: (token array, [N, 4] leaf bboxes).
+        self._mesh_cache: Dict[Any, tuple] = {}
+        # The target reductions are per row and stay keyed by dataset index.
+        # Value: (per-token targets, affine stats or None).
         self._cache: Dict[int, tuple] = {}
 
     def __call__(self, samples: List[Dict]) -> Dict:
@@ -231,28 +240,62 @@ class DeterministicCollateFn:
         all_stats = []
 
         for s in samples:
-            input = s["input"]   # [H, W, C]
-            target = s["target"]  # [H, W, output_channels]
+            input = np.asarray(s["input"])   # [H, W, C]
+            target = s["target"]             # [H, W, output_channels]
 
-            cached = self._cache.get(s["index"])
-            if cached is None:
-                H, W, C = np.asarray(input).shape
+            # A mesh_key marks rows that share a mesh; without one the mesh is
+            # this row's alone and the cache degenerates to the per-row one.
+            mesh_key = s.get("mesh_key")
+            shared = mesh_key is not None
+            if not shared:
+                mesh_key = s["index"]
+
+            mesh = self._mesh_cache.get(mesh_key)
+            if mesh is None:
+                H, W, C = input.shape
                 leaves = build_adaptive_mesh(
                     input,
                     max_depth=self.max_depth,
                     min_depth=self.min_depth,
                     refinement_criteria=self.refinement_criteria,
                 )
-                token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
-                token_target = _per_token_targets(target, leaves)
-                stats = _affine_leaf_stats(target, leaves, H, W, self.affine_output) if self.affine_output else None
-                cached = (token_array, len(leaves), token_target, stats)
-                self._cache[s["index"]] = cached
+                # Only the bboxes outlive the build. The reductions below read
+                # nothing else off a leaf, and a [N, 4] int32 row costs 16 bytes
+                # against ~1370 for the QuadNode it came from -- keeping the nodes
+                # for every geometry would cost more memory than the per-row token
+                # arrays this cache removes.
+                boxes = np.array([node.bbox for node in leaves], dtype=np.int32)
+                mesh = (nodes_to_token_array(leaves, H, W, C, self.affine_input), boxes)
+                self._mesh_cache[mesh_key] = mesh
+            token_array, boxes = mesh
 
-            token_array, N, token_target, stats = cached
+            cached = self._cache.get(s["index"])
+            if cached is None:
+                H, W = input.shape[:2]
+                # Every row but the first of a geometry reaches here without having
+                # built a tree of its own, so rebuild the throwaway nodes the
+                # reductions expect. ~1-4 ms, paid once per row (<1% of epoch 1).
+                nodes = [QuadNode(bbox=bbox) for bbox in map(tuple, boxes.tolist())]
+                cached = (_per_token_targets(target, nodes),
+                          _affine_leaf_stats(target, nodes, H, W, self.affine_output)
+                          if self.affine_output else None)
+                self._cache[s["index"]] = cached
+            token_target, stats = cached
+
+            if shared:
+                # The cached token array carries the channel means of whichever
+                # row built the mesh. Rows sharing a mesh_key differ only in
+                # channels the dataset holds constant over the grid (the wing
+                # data's angle-of-attack and Mach), and a constant channel's cell
+                # mean is that constant, so rewriting those columns -- which lead
+                # the token, one per input channel -- is the whole correction.
+                token_array = token_array.copy()
+                constant = (input == input[0, 0]).all(axis=(0, 1))
+                token_array[:, np.flatnonzero(constant)] = input[0, 0, constant]
+
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
-            tokens_per_sample.append(N)
+            tokens_per_sample.append(len(boxes))
             if self.affine_output:
                 all_stats.append(stats)
 

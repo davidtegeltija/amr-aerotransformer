@@ -173,6 +173,12 @@ class WingDataset(Dataset):
 
         return {
             "index":  index,
+            # Rows that share a geometry share a deterministic mesh: the refinement
+            # criteria read only the leading (x, y, z) channels, and the two appended
+            # condition channels are constant over the grid. Naming the geometry lets
+            # DeterministicCollateFn build that mesh once per wing instead of once per
+            # simulation -- 6.8 rows per geometry on the full SuperWing set.
+            "mesh_key": int(self._geometry_rows[index]),
             "input":  np.concatenate([geometry, conditions], axis=-1),          # [H, W, C+2]
             "target": self._targets[index],
         }
