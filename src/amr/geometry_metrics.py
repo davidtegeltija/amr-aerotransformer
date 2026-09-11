@@ -95,10 +95,10 @@ def compute_leading_trailing_edge(region: np.ndarray) -> float:
         return 0.0
 
     # Second derivative along chordwise direction (axis 0) for each
-    # coordinate component, then magnitude.
-    d2r = np.zeros((H, W, 3))
-    for c in range(3):
-        d2r[:, :, c] = np.gradient(np.gradient(region[:, :, c], axis=0), axis=0)
+    # coordinate component, then magnitude. np.gradient takes the three
+    # components in one call: on cells this small its per-call overhead is most
+    # of the cost, so a loop of six scalar calls pays it six times over.
+    d2r = np.gradient(np.gradient(region[:, :, :3], axis=0), axis=0)
 
     curvature_chord = np.sqrt(np.sum(d2r ** 2, axis=-1))  # (H, W)
 

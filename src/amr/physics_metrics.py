@@ -160,23 +160,28 @@ def compute_channel_entropy(region: np.ndarray, bins: int = 64) -> float:
         return 0.0
 
     H, W, C = region.shape
-    entropies = []
+    if H * W < 2:
+        return 0.0
 
-    for c in range(C):
-        channel = region[:, :, c].ravel()
-        if channel.size < 2:
-            entropies.append(0.0)
-            continue
+    # One bincount over every channel at once. The cells being binned hold a few
+    # hundred values, where np.histogram's per-call setup (bin edges, dtype
+    # checks) costs several times the binning itself; offsetting channel c's
+    # indices by c * bins keeps the C histograms in a single flat count array.
+    # The result is the mean over channels, so those histograms never have to be
+    # separated again -- summing every bin and dividing by C is the same number.
+    flat = region.reshape(-1, C)
+    lo = flat.min(axis=0)
+    hi = flat.max(axis=0)
+    span = np.where(hi > lo, hi - lo, 1.0)                    # a flat channel lands in bin 0
+    idx = ((flat - lo) * (bins / span)).astype(np.intp)
+    np.clip(idx, 0, bins - 1, out=idx)                        # the value at hi closes the last bin
+    idx += np.arange(C, dtype=np.intp) * bins
 
-        counts, _ = np.histogram(channel, bins=bins)
-        probs = counts.astype(float) / counts.sum()
-
-        mask = probs > 0
-        ent = -float(np.sum(probs[mask] * np.log2(probs[mask])))
-        entropies.append(ent)
+    counts = np.bincount(idx.ravel(), minlength=C * bins)
+    probs = counts[counts > 0] / (H * W)                      # each channel's bins sum to H * W
 
     # entropy in [0, log2(bins)]
-    return float(np.mean(entropies))
+    return float(-(probs * np.log2(probs)).sum() / C)
 
 
 # ---------------------------------------------------------------------------

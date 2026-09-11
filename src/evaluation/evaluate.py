@@ -72,6 +72,10 @@ def evaluate_error_rate(
 
     print()
 
+    # One deterministic mesh per geometry rather than per row, for the length of
+    # this sweep only (see predict_single_amr). The learned path ignores it.
+    mesh_cache = {}
+
     per_sample_relative, per_sample_absolute, per_sample_reference = [], [], []
     for index in tqdm(sample_indices, unit=" sample", desc="Evaluating", disable=not sys.stderr.isatty()):
         if isinstance(model, ViT):
@@ -84,7 +88,8 @@ def evaluate_error_rate(
                 min_depth=args["min_depth"],
                 refinement_criteria=refinement_criteria,
                 scorer=scorer,
-                offset=args.get("offset", 0.0)
+                offset=args.get("offset", 0.0),
+                mesh_cache=mesh_cache,
             )
         else:
             raise ValueError(f"Cannot evaluate {type(model).__name__}; expected **ViT** or **AMRTransformer**")
@@ -194,6 +199,10 @@ def evaluate_aero_coefficients(
 
     print()
 
+    # One deterministic mesh per geometry rather than per row, for the length of
+    # this sweep only (see predict_single_amr). The learned path ignores it.
+    mesh_cache = {}
+
     solver, true, predicted = [], [], []
     for index in tqdm(sample_indices, unit=" sample", desc="Integrating", disable=not sys.stderr.isatty()):
         if isinstance(model, ViT):
@@ -206,7 +215,8 @@ def evaluate_aero_coefficients(
                 min_depth=args["min_depth"],
                 refinement_criteria=refinement_criteria,
                 scorer=scorer,
-                offset=args.get("offset", 0.0)
+                offset=args.get("offset", 0.0),
+                mesh_cache=mesh_cache,
             )
         else:
             raise ValueError(f"Cannot evaluate {type(model).__name__}; expected ViT or AMRTransformer")
