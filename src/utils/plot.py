@@ -5,6 +5,7 @@ Functions
 ---------
 plot_mesh           : Overlay the adaptive quadtree mesh on a 2D grid channel
 plot_mesh_by_depth  : Show one subplot per depth level with patches at that depth highlighted
+plot_mesh_by_depth_cumulative : Show one subplot per depth level, each including all shallower depths
 plot_metric_heatmap : Show a heatmap of a chosen physics metric on the original grid
 plot_patch_features : Reconstruct and display the field from averaged patch features
 plot_score_map      : Render a per-pixel refinement score as a heatmap (optionally over geometry)
@@ -24,7 +25,7 @@ plot_3d_prediction    : 3D surface rendering of predicted fields over wing geome
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from matplotlib.collections import PatchCollection
 from matplotlib.colors import Normalize
@@ -95,7 +96,7 @@ def plot_mesh(
     fig, ax = plt.subplots(figsize=(6, 10))
 
     channel_data = channel_image(sample, channel)
-    ax.imshow(channel_data, cmap="viridis", origin="upper")
+    ax.imshow(channel_data, cmap="RdBu_r", origin="upper")
 
     depths = [p.depth for p in mesh]
     min_d = min(depths) if depths else 0
@@ -196,6 +197,106 @@ def plot_mesh_by_depth(
         axes[row][col].set_visible(False)
 
     fig.suptitle(title, fontsize=12)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+
+def plot_mesh_by_depth_cumulative(
+    sample: np.ndarray,
+    mesh: List[QuadNode],
+    *,
+    channel: int = 0,
+    title: str = "Adaptive Mesh by Cumulative Depth",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> None:
+    """Show one subplot per depth level, each holding the whole quadtree as it
+    stood after that many refinement steps -- new splits stacked on the
+    previous panel's mesh, so the row reads as the tree building itself.
+
+    ``build_adaptive_mesh`` returns only the final leaves (`collect_leaves`),
+    discarding the root, so a leaf that finalized deeper than a panel's depth
+    has no node left to represent the coarser cell it hadn't split out of yet
+    at that step. Each panel recomputes that ancestor cell by replaying the
+    same quadrant split ``QuadNode.compute_child_bboxes`` used to build the
+    tree, descending from the root toward the leaf's top-left corner. A leaf
+    that already finalized at or above the panel's depth keeps its own bbox,
+    since it never splits again. Several leaves under the same unsplit
+    ancestor collapse to one cell, so every panel tiles the whole domain with
+    no gaps or overlaps, and the next panel shows exactly that cell split
+    into four wherever it refined further. Cells are colored by depth, using
+    the same colormap and normalization across all subplots so colors stay
+    comparable, as in `plot_mesh`.
+    """
+    depths = sorted(set(p.depth for p in mesh))
+    n_depths = len(depths)
+    min_d, max_d = depths[0], depths[-1]
+
+    channel_data = channel_image(sample, channel)
+    H, W = channel_data.shape
+    root_bbox = (0, 0, H, W)
+
+    # Size each subplot to the image's own aspect ratio (rather than a fixed
+    # square), so imshow's equal-aspect axes hug the data with no left/right
+    # padding; a taller panel_height keeps neighboring panels clearly separated.
+    panel_height = 6
+    panel_width = panel_height * (W / H)
+    fig, axes = plt.subplots(1, n_depths, figsize=(n_depths * panel_width, panel_height), squeeze=False)
+    axes = axes[0]
+
+    cmap, norm, _ = color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
+
+    pc = None
+    for ax_idx, depth in enumerate(depths):
+        ax = axes[ax_idx]
+        ax.imshow(channel_data, cmap="RdBu_r", origin="upper")
+
+        frontier: Dict[Tuple[int, int, int, int], int] = {}
+        for leaf in mesh:
+            if leaf.depth <= depth:
+                frontier[leaf.bbox] = leaf.depth
+                continue
+
+            bbox = root_bbox
+            for _ in range(depth):
+                for child_bbox in QuadNode(bbox=bbox).compute_child_bboxes():
+                    cr0, cc0, cr1, cc1 = child_bbox
+                    if cr0 <= leaf.r0 < cr1 and cc0 <= leaf.c0 < cc1:
+                        bbox = child_bbox
+                        break
+            frontier[bbox] = depth
+
+        rects = []
+        cell_depths = []
+        for bbox, cell_depth in frontier.items():
+            r0, c0, r1, c1 = bbox
+            height = r1 - r0
+            width  = c1 - c0
+            # imshow places pixel (0,0) centered at coordinate 0.5
+            rects.append(patches.Rectangle((c0 - 0.5, r0 - 0.5), width, height))
+            cell_depths.append(cell_depth)
+
+        pc = PatchCollection(rects, cmap=cmap, norm=norm, linewidth=0.75, alpha=1)
+        pc.set_array(np.array(cell_depths))
+        pc.set_facecolor("none")
+        ax.add_collection(pc)
+
+        ax.set_title(f"Depth = {depth}  ({len(frontier)} cells)", fontsize=12)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    if pc is not None:
+        cbar = fig.colorbar(pc, ax=axes.tolist(), fraction=0.02, pad=0.02)
+        cbar.set_label("Quadtree depth")
+        cbar.set_ticks(range(min_d, max_d + 1))
+
+    fig.suptitle(title, fontsize=12)
+
     plt.tight_layout()
 
     if save_path:

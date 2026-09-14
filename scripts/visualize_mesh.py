@@ -12,6 +12,7 @@ from src.amr.adaptive_mesh import build_adaptive_mesh, mesh_statistics
 from src.utils.plot import (
     plot_mesh,
     plot_mesh_by_depth,
+    plot_mesh_by_depth_cumulative,
     plot_metric_heatmap,
     plot_patch_features,
 )
@@ -53,11 +54,11 @@ def create_mesh(data, sample_index, max_depth, min_depth, refinement_criteria: R
 
 
 if __name__ == "__main__":
-    data = np.load("data/crmmgeom.npy")
+    data = np.load("data/crmmdata.npy")
     sample_index = 0
     max_depth = 6
     min_depth = 2
-    criteria_name = "GEOMETRY_BALANCED_CRITERIA"
+    criteria_name = "AERODYNAMIC_CRITERIA_2"
 
     sample, mesh = create_mesh(data=data, sample_index=sample_index, max_depth=max_depth, min_depth=min_depth, refinement_criteria=CRITERIA_REGISTRY[criteria_name])
 
@@ -69,13 +70,30 @@ if __name__ == "__main__":
 
     # Main mesh overlay
     save_path_mesh = f"{prefix}_adaptive_mesh.png" if save_path else None
-    title_mesh = "Adaptive Mesh (threshold=0.15, max_depth=6)"
-    plot_mesh(sample, mesh, title=title_mesh, show=show_plots, save_path=save_path_mesh)
+    title_mesh = f"Adaptive Mesh ({len(mesh)} patches)"
+    plot_mesh(sample, mesh, channel=0, title=title_mesh, show=show_plots, save_path=save_path_mesh)
+
+    # Token-matched uniform mesh: the single depth whose uniform patch count
+    # is closest to the adaptive mesh's actual patch count.
+    H, W, _ = sample.shape
+    candidate_depths = range(max_depth + 1)
+    cell_sizes = [max(H, W) // (2 ** d) for d in candidate_depths]
+    uniform_meshes = [build_adaptive_mesh(sample, refinement_criteria=CRITERIA_REGISTRY[criteria_name], uniform_cell_size=cs) for cs in cell_sizes]
+    mesh_uniform = min(uniform_meshes, key=lambda m: abs(len(m) - len(mesh)))
+
+    save_path_uniform = f"{prefix}_uniform_mesh.png" if save_path else None
+    title_uniform = f"Uniform Mesh ({len(mesh_uniform)} patches)"
+    plot_mesh(sample, mesh_uniform, channel=0, title=title_uniform, show=show_plots, save_path=save_path_uniform)
 
     # Per-depth subplot
     save_path_depth = f"{prefix}_mesh_by_depth.png" if save_path else None
     title_depth = "Adaptive Mesh by Depth"
     plot_mesh_by_depth(sample, mesh, title=title_depth, show=show_plots, save_path=save_path_depth)
+
+    # Cumulative per-depth subplot
+    save_path_depth_cumulative = f"{prefix}_mesh_by_depth_cumulative.png" if save_path else None
+    title_depth_cumulative = "Adaptive Mesh by Cumulative Depth"
+    plot_mesh_by_depth_cumulative(sample, mesh, title=title_depth_cumulative, show=show_plots, save_path=save_path_depth_cumulative)
 
     # Metric heatmap
     save_path_heatmap = f"{prefix}_velocity_gradient.png" if save_path else None
