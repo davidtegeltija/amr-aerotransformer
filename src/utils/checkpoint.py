@@ -3,11 +3,12 @@ Checkpoint I/O shared by every entry point.
 
 ``save_checkpoint`` and ``load_checkpoint`` are exact inverses: the state dict is
 stored under ``"model"`` with the model's own parameter names and nothing
-prepended, next to two metadata keys describing what the checkpoint is and how to
+prepended, next to three metadata keys describing what the checkpoint is and how to
 rebuild it:
 
     "model_class"   the saving model's class name
     "model_config"  its ``init_kwargs`` — every constructor argument it was built with
+    "mesh_bounds"   the ``(min_depth, max_depth)`` a scorer was trained under, else None
 
 The identity lives in metadata rather than in a key prefix because a prefix is
 only a label the tensors carry: the older checkpoints here have ``scorer.`` /
@@ -24,8 +25,16 @@ from pathlib import Path
 import torch
 
 
-def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None, val_loss=None):
-    """Save model, optimizer, and scheduler at their current state."""
+def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None, val_loss=None,
+                    mesh_bounds=None):
+    """Save model, optimizer, and scheduler at their current state.
+
+    Args:
+        mesh_bounds: ``(min_depth, max_depth)`` for a scorer, whose oracle labels
+            and calibrated tolerance are only meaningful between those bounds.
+            They are not constructor arguments, so ``init_kwargs`` cannot carry
+            them. ``None`` for every other model.
+    """
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -33,6 +42,7 @@ def save_checkpoint(save_path, model, optimizer=None, scheduler=None, epoch=None
         "model": model.state_dict() if model else None,
         "model_class": type(model).__name__ if model else None,
         "model_config": getattr(model, "init_kwargs", None) if model else None,
+        "mesh_bounds": mesh_bounds,
         "optimizer": optimizer.state_dict() if optimizer else None,
         "scheduler": scheduler.state_dict() if scheduler else None,
         "epoch": epoch,

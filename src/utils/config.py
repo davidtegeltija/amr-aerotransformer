@@ -7,6 +7,7 @@ Contents
 --------
 load_config          - merge a model config with a data config and validate the result
 resolve_depth_bounds - turn the configured patch sizes into quadtree depth bounds
+check_mesh_bounds    - warn when those bounds disagree with the scorer the config names
 
 A run is described by two YAML files: a model config (``configs/*.yaml``,
 what to train and with which hyperparameters) and a data config
@@ -22,6 +23,8 @@ offending file named, rather than failing deep inside a DataLoader worker.
 from pathlib import Path
 from typing import Dict
 import yaml
+
+import torch
 
 from src.amr.mesh_bounds import patch_sizes_to_depth_bounds
 
@@ -106,4 +109,39 @@ def resolve_depth_bounds(args: Dict, dataset) -> Dict:
     min_depth, max_depth = patch_sizes_to_depth_bounds(H, W, args.get("min_patch_size"), args.get("max_patch_size"))
     args["min_depth"] = min_depth
     args["max_depth"] = max_depth
+
+    # A config naming a scorer is checked against the bounds that scorer trained
+    # under here, rather than at each mesh builder, because this is where the
+    # bounds come into existence.
+    if args.get("checkpoint_file"):
+        check_mesh_bounds(args["checkpoint_file"], min_depth, max_depth)
+
     return args
+
+
+# ---------------------------------------------------------------------------
+# Scorer checkpoint bounds — the config against the mesh its scorer trained on
+# ---------------------------------------------------------------------------
+def check_mesh_bounds(path, min_depth, max_depth, device="cpu"):
+    """Warn when a scorer is about to build a mesh between bounds it did not train under.
+
+    The scorer's oracle labels and its calibrated tolerance were both built against
+    the depth bounds it trained under, and neither travels with the weights — the
+    config is what hands bounds to the mesh builder. Bounds that disagree still
+    build a mesh, just not one of the size the scorer's ``n_target`` names, so this
+    warns rather than raises. A checkpoint written before ``mesh_bounds`` existed
+    carries none, as does any non-scorer checkpoint; both are passed over, the same
+    way a missing ``model_class`` is.
+
+    Args:
+        path: The scorer checkpoint the config names.
+        min_depth, max_depth: The bounds the current config resolved to.
+    """
+    checkpoint = torch.load(path, map_location=device)
+    bounds = checkpoint.get("mesh_bounds") if isinstance(checkpoint, dict) else None
+
+    if bounds is not None and tuple(bounds) != (min_depth, max_depth):
+        print(f"WARNING: {path} was trained with (min_depth, max_depth)={tuple(bounds)}, but this "
+              f"config resolves to {(min_depth, max_depth)}. The mesh built here will not match the "
+              f"scorer's n_target. Set min_patch_size / max_patch_size to the values in the scorer "
+              f"config that produced this checkpoint.")

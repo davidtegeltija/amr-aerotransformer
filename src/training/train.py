@@ -494,7 +494,8 @@ def train_scorer_supervised(
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             if save_path:
-                saved = save_checkpoint(save_path, scorer, epoch=epoch, val_loss=val_loss)
+                saved = save_checkpoint(save_path, scorer, epoch=epoch, val_loss=val_loss,
+                                        mesh_bounds=(min_depth, max_depth))
                 pad = " " * len(f"[{tag}] ")
                 print(f"{pad}Saved best model to {saved.name}")
 
