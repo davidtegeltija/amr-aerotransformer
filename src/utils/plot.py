@@ -6,6 +6,7 @@ Functions
 plot_mesh           : Overlay the adaptive quadtree mesh on a 2D grid channel
 plot_mesh_by_depth  : Show one subplot per depth level with patches at that depth highlighted
 plot_mesh_by_depth_cumulative : Show one subplot per depth level, each including all shallower depths
+plot_reconstruction_by_depth_cumulative : The same panels painted with what the mesh reconstructs the target as, one row per affine_output order
 plot_metric_heatmap : Show a heatmap of a chosen physics metric on the original grid
 plot_patch_features : Reconstruct and display the field from averaged patch features
 plot_score_map      : Render a per-pixel refinement score as a heatmap (optionally over geometry)
@@ -25,7 +26,7 @@ plot_3d_prediction    : 3D surface rendering of predicted fields over wing geome
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from matplotlib.collections import PatchCollection
 from matplotlib.colors import Normalize
@@ -35,9 +36,12 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
+import torch
 
 from src.amr.quadtree import QuadNode
 from src.evaluation.metrics import SOLUTION_CHANNEL_SCALES
+from src.models.reconstruction import basis_size, cell_basis
+from src.training.loss import nmse_loss
 
 # Axis labels for the coefficients ``calculate_coefficients`` returns, in its order.
 COEFFICIENT_LABELS = ("$C_L$", "$C_D$", "$C_{Mz}$")
@@ -206,6 +210,60 @@ def plot_mesh_by_depth(
         plt.show()
 
 
+# ---------------------------------------------------------------------------
+# The quadtree as it stood partway through its build
+# ---------------------------------------------------------------------------
+
+def cumulative_frontier(
+    mesh: List[QuadNode],
+    depth: int,
+    H: int,
+    W: int,
+) -> Dict[Tuple[int, int, int, int], int]:
+    """The cells tiling the grid after ``depth`` refinement steps of the build.
+
+    ``build_adaptive_mesh`` returns only the final leaves (``collect_leaves``),
+    discarding the root, so a leaf that finalized deeper than ``depth`` has no node
+    left to represent the coarser cell it had not split out of yet at that step.
+    That ancestor is recomputed by replaying the same quadrant split
+    ``QuadNode.compute_child_bboxes`` used to build the tree, descending from the
+    root toward the leaf's top-left corner. A leaf that already finalized at or
+    above ``depth`` keeps its own bbox, since it never splits again.
+
+    Several leaves under the same unsplit ancestor collapse to one entry, so the
+    result tiles the whole domain with no gaps or overlaps, and the frontier one
+    step deeper shows exactly that cell split into four wherever it refined
+    further.
+
+    Args:
+        mesh: The final leaf ``QuadNode`` s, which must tile the ``H x W`` grid.
+        depth: How many refinement steps to replay (0 = the root cell alone).
+        H: Grid height (rows), bounding the root cell.
+        W: Grid width (columns), likewise.
+
+    Returns:
+        ``{bbox: cell_depth}``, one entry per cell of the frontier.
+    """
+    root_bbox = (0, 0, H, W)
+    frontier: Dict[Tuple[int, int, int, int], int] = {}
+
+    for leaf in mesh:
+        if leaf.depth <= depth:
+            frontier[leaf.bbox] = leaf.depth
+            continue
+
+        bbox = root_bbox
+        for _ in range(depth):
+            for child_bbox in QuadNode(bbox=bbox).compute_child_bboxes():
+                cr0, cc0, cr1, cc1 = child_bbox
+                if cr0 <= leaf.r0 < cr1 and cc0 <= leaf.c0 < cc1:
+                    bbox = child_bbox
+                    break
+        frontier[bbox] = depth
+
+    return frontier
+
+
 def plot_mesh_by_depth_cumulative(
     sample: np.ndarray,
     mesh: List[QuadNode],
@@ -219,19 +277,10 @@ def plot_mesh_by_depth_cumulative(
     stood after that many refinement steps -- new splits stacked on the
     previous panel's mesh, so the row reads as the tree building itself.
 
-    ``build_adaptive_mesh`` returns only the final leaves (`collect_leaves`),
-    discarding the root, so a leaf that finalized deeper than a panel's depth
-    has no node left to represent the coarser cell it hadn't split out of yet
-    at that step. Each panel recomputes that ancestor cell by replaying the
-    same quadrant split ``QuadNode.compute_child_bboxes`` used to build the
-    tree, descending from the root toward the leaf's top-left corner. A leaf
-    that already finalized at or above the panel's depth keeps its own bbox,
-    since it never splits again. Several leaves under the same unsplit
-    ancestor collapse to one cell, so every panel tiles the whole domain with
-    no gaps or overlaps, and the next panel shows exactly that cell split
-    into four wherever it refined further. Cells are colored by depth, using
-    the same colormap and normalization across all subplots so colors stay
-    comparable, as in `plot_mesh`.
+    Each panel's cells come from `cumulative_frontier`, which reconstructs the
+    coarser ancestors the final leaf list no longer carries. Cells are colored
+    by depth, using the same colormap and normalization across all subplots so
+    colors stay comparable, as in `plot_mesh`.
     """
     depths = sorted(set(p.depth for p in mesh))
     n_depths = len(depths)
@@ -239,7 +288,6 @@ def plot_mesh_by_depth_cumulative(
 
     channel_data = channel_image(sample, channel)
     H, W = channel_data.shape
-    root_bbox = (0, 0, H, W)
 
     # Size each subplot to the image's own aspect ratio (rather than a fixed
     # square), so imshow's equal-aspect axes hug the data with no left/right
@@ -256,20 +304,7 @@ def plot_mesh_by_depth_cumulative(
         ax = axes[ax_idx]
         ax.imshow(channel_data, cmap="RdBu_r", origin="upper")
 
-        frontier: Dict[Tuple[int, int, int, int], int] = {}
-        for leaf in mesh:
-            if leaf.depth <= depth:
-                frontier[leaf.bbox] = leaf.depth
-                continue
-
-            bbox = root_bbox
-            for _ in range(depth):
-                for child_bbox in QuadNode(bbox=bbox).compute_child_bboxes():
-                    cr0, cc0, cr1, cc1 = child_bbox
-                    if cr0 <= leaf.r0 < cr1 and cc0 <= leaf.c0 < cc1:
-                        bbox = child_bbox
-                        break
-            frontier[bbox] = depth
+        frontier = cumulative_frontier(mesh, depth, H, W)
 
         rects = []
         cell_depths = []
@@ -304,6 +339,164 @@ def plot_mesh_by_depth_cumulative(
 
     if show:
         plt.show()
+
+
+# ---------------------------------------------------------------------------
+# What the mesh can represent: the target projected onto the per-cell basis
+# ---------------------------------------------------------------------------
+# The head emits basis_size(affine_output) coefficients per channel per cell and
+# tokens_to_grid_affine_torch paints the cell with their weighted sum of
+# cell_basis columns. Those columns are mutually orthogonal over a cell -- the
+# property that makes affine_nmse_loss closed-form -- so the best field any head
+# of that order can produce on a given mesh is the target's orthogonal projection
+# onto them, one coefficient per column:
+#
+#     c_j = sum(target * phi_j) / sum(phi_j ** 2)
+#
+# which are the quantities src/data/collate_fn.py:_affine_leaf_stats caches
+# (mean_target, sum_target_dx / sum_xx, ...). Painting that projection is
+# therefore the picture of what the transformer is trained to produce: the
+# target as seen through (mesh, basis), with no checkpoint involved and no
+# coefficient error mixed in. Its residual is the reconstruction floor of that
+# (mesh, order) pair.
+
+
+def project_cells(target: np.ndarray, cells, order: int) -> np.ndarray:
+    """Paint each cell with the best fit an ``affine_output=order`` head can reach.
+
+    Args:
+        target: ``[H, W, C]`` dense field to project (the ground truth the loss
+            scores against).
+        cells: Iterable of ``(r0, c0, r1, c1)`` bboxes tiling the grid — the leaf
+            bboxes, or one of `cumulative_frontier`'s partway-through frontiers.
+        order: The head's ``affine_output``: 0 the cell mean, 1 mean + two slopes,
+            2 additionally the three curvature terms.
+
+    Returns:
+        ``[H, W, C]`` float64 projection. A term the cell is too small to resolve
+        has a zero-norm basis column and simply drops out, exactly as it does in
+        the loss.
+    """
+    n_taylor_terms = basis_size(order)
+    out = np.zeros(target.shape, dtype=np.float64)
+
+    for r0, c0, r1, c1 in cells:
+        h, w = r1 - r0, c1 - c0
+        basis = cell_basis(h, w, n_taylor_terms)                   # [h*w, K]
+        norms = (basis ** 2).sum(axis=0)[:, None]                  # [K, 1]
+        region = target[r0:r1, c0:c1].reshape(h * w, -1)           # [h*w, C]
+        coefficients = np.divide(basis.T @ region, norms,
+                                 out=np.zeros((n_taylor_terms, region.shape[1])),
+                                 where=norms > 0)                  # [K, C]
+        out[r0:r1, c0:c1] = (basis @ coefficients).reshape(h, w, -1)
+
+    return out
+
+
+def plot_reconstruction_by_depth_cumulative(
+    target: np.ndarray,
+    mesh: List[QuadNode],
+    *,
+    orders: Sequence[int] = (0, 1, 2),
+    channel: int = 0,
+    title: str = "Mesh Reconstruction by Cumulative Depth",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Show what the mesh reconstructs the target as, per depth and per output order.
+
+    The value-side twin of `plot_mesh_by_depth_cumulative`: same cumulative
+    frontiers, but each panel is painted with the field of `project_cells` rather
+    than the underlying data with the cells outlined over it. Read across a row the
+    tree builds itself and the field it can carry sharpens; read down a column the
+    mesh is fixed and only the per-cell basis grows, which is the ``affine_output``
+    comparison. The leftmost column is the dense ground truth, the same in every
+    row, so both readings start from it.
+
+    Every panel shares the ground truth's color scale, and each is annotated with
+    its NMSE against the dense target -- ``nmse_loss``, the quantity the
+    transformer is trained on -- so the figure also reads as the reconstruction
+    floor of each (mesh, order) pair.
+
+    Args:
+        target: ``[H, W, C]`` dense ground truth (the solution field, not the
+            geometry input).
+        mesh: Leaf ``QuadNode`` s tiling the grid, from either mesh builder.
+        orders: The ``affine_output`` orders to give a row each.
+        channel: Which solution channel to display; the NMSE stays over all of them.
+        title: Figure suptitle.
+        show: Whether to ``plt.show()`` the figure.
+        save_path: Where to write it, under a date subfolder.
+
+    Returns:
+        The figure, so a caller can adjust it before saving.
+    """
+    # A copy, not a view: the target often arrives as a read-only slice of a
+    # memory-mapped array, which torch.from_numpy below will not take.
+    target = np.array(target, dtype=np.float64)
+    H, W, _ = target.shape
+    depths = sorted(set(p.depth for p in mesh))
+    n_cols = len(depths) + 1                       # + the ground-truth column
+
+    # Shared color scale, so a panel's colors mean the same thing in every cell of
+    # the figure and a coarse panel cannot flatter itself by rescaling.
+    truth = target[:, :, channel]
+    vmin, vmax = float(truth.min()), float(truth.max())
+
+    # Panels carry the image's own aspect ratio, so a tall grid gives narrow
+    # columns; constrained layout keeps their titles from colliding.
+    panel_height = 4
+    panel_width = panel_height * (W / H)
+    fig, axes = plt.subplots(len(orders), n_cols,
+                             figsize=(n_cols * panel_width, len(orders) * panel_height),
+                             squeeze=False, layout="constrained")
+
+    # One frontier per column, shared down the rows: within a column the mesh is
+    # identical and the basis is the only thing that varies.
+    frontiers = [cumulative_frontier(mesh, depth, H, W) for depth in depths]
+
+    for row, order in enumerate(orders):
+        ax = axes[row][0]
+        im = ax.imshow(truth, cmap="RdBu_r", origin="upper", vmin=vmin, vmax=vmax)
+        ax.set_ylabel(f"affine_output = {order}\n({basis_size(order)} coeff/channel)", fontsize=11)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        if row == 0:
+            ax.set_title("Ground truth\n(dense)", fontsize=11)
+
+        for col, (depth, frontier) in enumerate(zip(depths, frontiers), start=1):
+            ax = axes[row][col]
+            reconstruction = project_cells(target, frontier, order)
+            ax.imshow(reconstruction[:, :, channel], cmap="RdBu_r", origin="upper", vmin=vmin, vmax=vmax)
+
+            # Cell outlines, so the faceting can be told from the mesh that caused it.
+            rects = [patches.Rectangle((c0 - 0.5, r0 - 0.5), c1 - c0, r1 - r0)
+                     for r0, c0, r1, c1 in frontier]
+            ax.add_collection(PatchCollection(rects, facecolor="none",
+                                              edgecolor="black", linewidth=0.3, alpha=0.4))
+
+            nmse = float(nmse_loss(torch.from_numpy(reconstruction), torch.from_numpy(target)))
+            ax.text(0.03, 0.03, f"NMSE {nmse:.2e}", transform=ax.transAxes, fontsize=9,
+                    va="bottom", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.75, linewidth=0))
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if row == 0:
+                ax.set_title(f"Depth = {depth}\n({len(frontier)} cells)", fontsize=11)
+
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
+    cbar.set_label(SOLUTION_CHANNEL_LABELS[channel] if channel < len(SOLUTION_CHANNEL_LABELS)
+                   else f"Channel {channel}")
+
+    fig.suptitle(title, fontsize=13)
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
 
 
 def plot_metric_heatmap(
