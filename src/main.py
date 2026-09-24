@@ -56,7 +56,9 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
     if model_trained == "scorer":
         n_target = args["n_target"]
         n_calib = min(args["calib_samples"], len(train_dataset))
-        calib_targets = [np.asarray(train_dataset[i]["target"], dtype=np.float32) for i in range(n_calib)]
+        # Select random "calib_samples", not the first n_calib rows (rows are grouped by geometry)
+        calib_idx = np.random.default_rng(args["seed"]).choice(len(train_dataset), n_calib, replace=False)
+        calib_targets = [np.asarray(train_dataset[i]["target"], dtype=np.float32) for i in calib_idx]
         tol = calibrate_global_tolerance(calib_targets, n_target=n_target, min_depth=min_depth, max_depth=max_depth)
         # max_depth is already the reachable depth (derived from min_patch_size by
         # patch_sizes_to_depth_bounds), so it is the reachable cap directly.
