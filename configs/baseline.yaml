@@ -12,7 +12,7 @@ d_model: 256                                  # Token embedding width. It also s
 n_layers: 4                                   # Encoder blocks
 n_heads: 8                                    # Attention heads (must divide d_model)
 d_ff: 512                                     # Feed-forward inner width
-dropout: 0.2                  
+dropout: 0.2
 min_patch_size: 1                             # Smallest allowed leaf patch (pixels). Fine cap — sole limit on the deepest refinement
 max_patch_size: 16                            # Largest allowed leaf patch (pixels). Coarse floor — every region is refined at least this far
 affine_input: 1                               # Per-token geometry features: 0 the channel means alone | 1 also their gx + gy

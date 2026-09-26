@@ -1,0 +1,22 @@
+# ---- Model ----
+model_trained: learned_transformer      # deterministic_transformer | learned_transformer | scorer | vit
+d_model: 256                            # Token embedding width; also sets the LR schedule scale under schedule=noam
+n_layers: 5                             # Encoder blocks
+n_heads: 8                              # Attention heads; must divide d_model
+d_ff: 512                               # Feed-forward inner width
+dropout: 0.2
+min_patch_size: 2                       # Smallest allowed leaf patch (pixels). Fine cap -> hard limit on the deepest refinement
+max_patch_size: 64                      # Largest allowed leaf patch (pixels). Coarse floor. Must match scorer_n=2048.yaml
+affine_input: 1                         # Per-token geometry features: 0 the channel means alone | 1 also their gx + gy
+affine_output: 2                        # Per-cell polynomial order, dense per-pixel loss: 0 constant | 1 value+gx+gy | 2 also gxx+gxy+gyy
+offset: 0.0                             # Mesh budget: split iff mean(d_pred) > d + offset. Positive coarser, negative finer
+checkpoint_file: "outputs/checkpoints/2026-09-26_scorer_n=2048.pt"   # Required: the scorer trained from configs/scorer/scorer_n=2048.yaml
+
+# ---- Training ----
+epochs: 200
+batch_size: 32
+warmup_steps: 4000                      # LR warm-up steps (transformer branches only)
+schedule: cosine                        # cosine (AdamW + warmup + cosine decay) | noam (Adam + inverse-sqrt)
+lr: 0.001                               # Peak learning rate. Ignored under schedule=noam, whose peak is fixed by d_model
+weight_decay: 0.01                      # AdamW decay, matrix params only. Ignored under schedule=noam
+num_workers: 0                          # DataLoader workers; only 0 keeps the AMR collates' per-sample mesh cache across epochs
