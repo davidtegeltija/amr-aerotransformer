@@ -96,9 +96,9 @@ from src.models.transformer import TransformerBlock
 #
 #   x_center, y_center are normalised to [0, 1], so a frequency f completes
 #   f / (2*pi) cycles across the whole domain. Without the 2*pi the highest
-#   frequency (2**8) completes only ~40 cycles over a 128-column grid -- a ~3 px
+#   frequency (2**5) completes only ~5 cycles over a 128-column grid -- a ~25 px
 #   period, which leaves adjacent leaf centres at the finest refinement nearly
-#   collinear in feature space -- and the lowest seven frequencies sweep under
+#   collinear in feature space -- and the lowest eight frequencies sweep under
 #   pi radians across the entire domain, i.e. they are still on the near-linear
 #   arc of sin/cos and add nothing the following MLP could not get from
 #   x_center itself. The 2*pi reads them as cycles-per-domain instead of
@@ -193,7 +193,7 @@ class AMRTransformer(nn.Module):
         n_heads: int = 4,
         d_ff: int = 1024,
         dropout: float = 0.1,
-        n_fourier: int = 64,
+        n_fourier: int = 48,
         affine_output: int = 0,
     ):
         super().__init__()
@@ -234,7 +234,7 @@ class AMRTransformer(nn.Module):
         # Fixed log-spaced frequencies, not learned. One shared set, scaled per
         # meta channel by POS_FREQ_SCALE (see the note at the top of this module
         # for why x/y and cell_level cannot share one unscaled set).
-        freqs = 2.0 ** torch.linspace(0, 8, n_fourier // 2)                 # [F/2]
+        freqs = 2.0 ** torch.linspace(0, 5, n_fourier // 2)                 # [F/2]
         scale = torch.tensor(POS_FREQ_SCALE).unsqueeze(-1)                  # [pos_dim, 1]
         self.register_buffer("pos_freqs", scale * freqs.unsqueeze(0))       # [pos_dim, F/2]
         fourier_dim = self.pos_dim * n_fourier
@@ -253,6 +253,17 @@ class AMRTransformer(nn.Module):
             TransformerBlock(d_model, n_heads, d_ff, dropout)
             for _ in range(n_layers)
         ])
+        # Stock-PyTorch equivalent. Not bit-identical to TransformerBlock since it
+        # adds a dropout on the attention residual branch, biases the qkv/out
+        # projections, and inits them with xavier_uniform_.
+        # self.layers = nn.TransformerEncoder(
+        #     nn.TransformerEncoderLayer(
+        #         d_model, n_heads, d_ff, dropout,
+        #         activation="gelu", batch_first=True, norm_first=True,
+        #     ),
+        #     num_layers=n_layers,
+        #     enable_nested_tensor=False,
+        # )
         self.final_norm = nn.LayerNorm(d_model)
 
         # --- Prediction head ---
@@ -346,6 +357,9 @@ class AMRTransformer(nn.Module):
         # Transformer encoder
         for layer in self.layers:
             x = layer(x, attn_mask=attn_mask)
+        # nn.TransformerEncoder variant but its key-padding mask is inverted
+        # (True = ignore) relative to `valid` (True = attend).
+        # x = self.layers(x, src_key_padding_mask=~valid if has_padding else None)
 
         # Drop pad rows -> back to packed [total_N, d_model]; row order is
         # sample 0's tokens, then sample 1's, ..., identical to the input
