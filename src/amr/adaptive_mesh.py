@@ -42,7 +42,6 @@ def build_adaptive_mesh(
     *,
     max_depth: int = 6,
     min_depth: int = 1,
-    uniform_cell_size: Optional[int] = None,
 ) -> List[QuadNode]:
     """
     Build an adaptive mesh over a single physical field.
@@ -63,10 +62,9 @@ def build_adaptive_mesh(
         Thresholds controlling subdivision; required, typically a preset from
         CRITERIA_REGISTRY. Only the metrics it names are computed and checked.
         Use criteria.scale(factor) to uniformly loosen or tighten the mesh.
-    uniform_cell_size : int, optional
-        When set, skip adaptive refinement and return a regular grid of
-        cells of exactly this pixel size (e.g. 4 for a 4x4 uniform mesh).
-        Cells at the right/bottom edge are clamped to the grid boundary.
+        If its uniform_cell_size is set, adaptive refinement is skipped and a
+        regular grid of cells of exactly that pixel size is returned. Cells at
+        the right/bottom edge are clamped to the grid boundary.
 
     Returns
     -------
@@ -88,8 +86,8 @@ def build_adaptive_mesh(
     data = data.astype(np.float64)
     H, W, C = data.shape
 
-    if uniform_cell_size is not None:
-        return _build_uniform_mesh(data, uniform_cell_size)
+    if refinement_criteria.uniform_cell_size is not None:
+        return _build_uniform_mesh(data, refinement_criteria.uniform_cell_size)
 
     # Build the quadtree starting with the whole field. partial binds the
     # per-build config, leaving the (node) predicate build_tree expects.

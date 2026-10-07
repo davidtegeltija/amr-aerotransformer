@@ -90,7 +90,10 @@ class RefinementCriteria:
     kh_shear_threshold:  Optional[float] = None
     variance_threshold:  Optional[float] = None
     entropy_threshold:   Optional[float] = None
- 
+
+    # When set, create a uniform grid with square cells of this size
+    uniform_cell_size: Optional[int] = None
+
     def scale(self, factor: float) -> "RefinementCriteria":
         """
         Return a new config with all enabled thresholds multiplied by factor.
@@ -112,6 +115,8 @@ class RefinementCriteria:
             kh_shear_threshold=       _s(self.kh_shear_threshold),
             variance_threshold=       _s(self.variance_threshold),
             entropy_threshold=        _s(self.entropy_threshold),
+
+            uniform_cell_size=        self.uniform_cell_size,
         )
  
     def geometry_kwargs(self) -> Dict:
@@ -193,9 +198,33 @@ class RefinementCriteria:
 # ---------------------------------------------------------------------------
 # Available RefinementCriteria
 # ---------------------------------------------------------------------------
+
+# 128 tokens of 16x16 cells
+UNIFORM_128 = RefinementCriteria(uniform_cell_size=16)
+
+# 512 tokens of 8x8 cells
+UNIFORM_512 = RefinementCriteria(uniform_cell_size=8)
+
+# 2048 tokens of 4x4 cells
+UNIFORM_2048 = RefinementCriteria(uniform_cell_size=4)
+
+# 8192 tokens of 2x2 cells
+UNIFORM_8192 = RefinementCriteria(uniform_cell_size=2)
+
 # higher threshold = fewer patches
 # lower threshold  = more patches
-
+AERODYNAMIC_CRITERIA_2 = RefinementCriteria(
+    curvature_threshold=None,
+    le_te_threshold=None,
+    thickness_grad_threshold=None,
+    wall_distance_threshold=None,
+    grad_threshold      = 0.15,   # primary: catches shocks, BL, wakes
+    vorticity_threshold = 0.10,   # secondary: vortex cores
+    momentum_threshold  = 1.20,   # conservative: avoid over-refining fast flow
+    kh_shear_threshold  = 0.80,   # conservative
+    variance_threshold  = 0.05,   # general fallback
+    entropy_threshold   = 7.50,   # general fallback
+)
 
 # ~1390 tokens. The best geometry-only criterion found: beats a uniform mesh of
 # the same size on 88% of wings
@@ -247,6 +276,11 @@ GEOMETRY_WALL_CRITERIA = RefinementCriteria(
 
 
 CRITERIA_REGISTRY: Dict[str, RefinementCriteria] = {
+    "UNIFORM_128":                  UNIFORM_128,
+    "UNIFORM_512":                  UNIFORM_512,
+    "UNIFORM_2048":                 UNIFORM_2048,
+    "UNIFORM_8192":                 UNIFORM_8192,
+    "AERODYNAMIC_CRITERIA_2":       AERODYNAMIC_CRITERIA_2,
     "GEOMETRY_BALANCED_CRITERIA":   GEOMETRY_BALANCED_CRITERIA,
     "GEOMETRY_BALANCED_LIGHT":      GEOMETRY_BALANCED_LIGHT,
     "GEOMETRY_BALANCED_DENSE":      GEOMETRY_BALANCED_DENSE,
