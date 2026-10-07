@@ -22,10 +22,11 @@ Key design decisions
    inverse-sqrt tail never anneals.
 
 3. **NMSE loss**: per-channel normalised MSE, scale-invariant across flow
-   quantities (see src.training.loss.nmse_loss). With the affine head the loss is
-   still the dense per-pixel NMSE, but it is evaluated in closed form over
-   per-leaf sufficient statistics (src.training.loss.affine_nmse_loss), so no
-   [B, H, W, C] grid is ever reconstructed during training. Reconstruction is
+   quantities (see src.training.loss.nmse_loss). With the affine head, or with
+   dense_loss at order 0, the loss is the dense per-pixel NMSE, evaluated in
+   closed form over per-leaf sufficient statistics
+   (src.training.loss.affine_nmse_loss), so no [B, H, W, C] grid is ever
+   reconstructed during training. Reconstruction is
    still used at inference and for plots (src.models.reconstruction).
 
 4. **Tokenization is done in the DataLoader workers** (CPU) so the GPU
@@ -224,17 +225,19 @@ def train_transformer(
 
                 out = model(packed_tokens, tokens_per_sample)
 
-                if model.affine_output:
+                if "affine_stats" in batch:
                     # Dense per-pixel NMSE in closed form over the per-leaf statistics
                     # the collate cached. Same loss and same gradients as painting the
                     # [B, H, W, C] grid and scoring that, without ever building it.
                     stats = {k: v.to(device) for k, v in batch["affine_stats"].items()}
                     loss = affine_nmse_loss(out["token_preds"], stats)
+                else:
+                    loss = nmse_loss(out["token_preds"], packed_targets)
+
+                if model.affine_output:
                     with torch.no_grad():
                         grad_abs_sum += out["token_preds"][..., 1:].abs().mean(dim=(0, 1)).detach().cpu()
                         grad_abs_steps += 1
-                else:
-                    loss = nmse_loss(out["token_preds"], packed_targets)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -322,8 +325,8 @@ def evaluate_transformer(
         packed_targets = batch["packed_targets"].to(device)
         tokens_per_sample = batch["tokens_per_sample"]
         out = model(packed_tokens, tokens_per_sample)
-        if model.affine_output:
-            # Mirror the dense affine training loss so train/val are comparable.
+        if "affine_stats" in batch:
+            # Mirror the dense training loss so train/val are comparable.
             stats = {k: v.to(device) for k, v in batch["affine_stats"].items()}
             total_loss += affine_nmse_loss(out["token_preds"], stats).item()
         else:

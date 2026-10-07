@@ -62,10 +62,11 @@ def affine_nmse_loss(
     ``B*H*W`` and the target's first two moments are the leaf moments summed.
 
     Args:
-        affine_params: ``[total_N, C, 3]`` packed per-token (value, gx, gy) from an
-            order-1 head, or ``[total_N, C, 6]`` (value, gx, gy, gxx, gxy, gyy) from
-            an order-2 one; graph attached. Its width is what says which order this
-            is, so the order does not have to be passed in separately.
+        affine_params: ``[total_N, C]`` packed per-token values from an order-0
+            head, ``[total_N, C, 3]`` (value, gx, gy) from an order-1 head, or
+            ``[total_N, C, 6]`` (value, gx, gy, gxx, gxy, gyy) from an order-2 one;
+            graph attached. Its width is what says which order this is, so the order
+            does not have to be passed in separately.
         stats: Batch-concatenated ``_affine_leaf_stats`` output, on the same device
             as ``affine_params`` and with rows in the same packed order. It must
             hold the same order's terms.
@@ -75,8 +76,11 @@ def affine_nmse_loss(
     Returns:
         Scalar loss tensor.
     """
+    # The order-0 head returns the constant term alone, without a basis axis.
+    if affine_params.dim() == 2:
+        affine_params = affine_params.unsqueeze(-1)                      # [N, C, 1]
+
     value = affine_params[..., 0]
-    gx, gy = affine_params[..., 1], affine_params[..., 2]
     num_pixels = stats["num_pixels"].unsqueeze(1)                        # [N, 1]
     mean_target = stats["mean_target"]                                   # [N, C]
     sum_sq_resid = stats["sum_sq_resid"]                                 # [N, C]
@@ -84,12 +88,16 @@ def affine_nmse_loss(
     # One independent term per basis function, because they are orthogonal over a
     # cell. A term the cell cannot resolve has a zero norm and a zero product, so it
     # contributes nothing and its coefficient is simply unused.
-    sse = (num_pixels * (value - mean_target) ** 2
-           + stats["sum_xx"].unsqueeze(1) * gx * gx - 2.0 * gx * stats["sum_target_dx"]
-           + stats["sum_yy"].unsqueeze(1) * gy * gy - 2.0 * gy * stats["sum_target_dy"]
-           + sum_sq_resid)                                               # [N, C]
+    sse = num_pixels * (value - mean_target) ** 2 + sum_sq_resid        # [N, C]
 
-    # Order 1 is complete above; order 2 adds three more terms of the same form.
+    # Order 0 is complete above; order 1 adds the two slopes.
+    if affine_params.shape[-1] >= basis_size(1):
+        gx, gy = affine_params[..., 1], affine_params[..., 2]
+        sse = (sse
+               + stats["sum_xx"].unsqueeze(1) * gx * gx - 2.0 * gx * stats["sum_target_dx"]
+               + stats["sum_yy"].unsqueeze(1) * gy * gy - 2.0 * gy * stats["sum_target_dy"])
+
+    # Order 2 adds three more terms of the same form.
     if affine_params.shape[-1] == basis_size(2):
         gxx, gxy, gyy = affine_params[..., 3], affine_params[..., 4], affine_params[..., 5]
         sse = (sse

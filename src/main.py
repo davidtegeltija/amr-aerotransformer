@@ -36,6 +36,9 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
 
     min_depth = args["min_depth"]
     max_depth = args["max_depth"]
+    # The polynomial heads can only be trained on the dense loss. The constant head
+    # keeps the per-token loss unless the config sets dense_loss.
+    dense_loss = args["affine_output"] > 0 or bool(args.get("dense_loss", 0))
 
     # Deterministic mesh: physics-based AMR criterion.
     if model_trained == "deterministic_transformer":
@@ -50,6 +53,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
             max_depth=max_depth,
             affine_input=args["affine_input"],
             affine_output=args["affine_output"],
+            dense_loss=dense_loss,
         )
 
     # Learned-scorer training: oracle depth targets from a calibrated tolerance.
@@ -78,7 +82,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
         load_checkpoint(scorer, checkpoint_file, device)
         return LearnedCollateFn(scorer, min_depth=min_depth, max_depth=max_depth,
                                 offset=args["offset"], affine_input=args["affine_input"],
-                                affine_output=args["affine_output"])
+                                affine_output=args["affine_output"], dense_loss=dense_loss)
 
     raise SystemExit(f"No collate defined for model_trained {model_trained!r}")
 

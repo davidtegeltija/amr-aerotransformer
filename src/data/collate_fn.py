@@ -58,7 +58,8 @@ def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: in
     the same way ``sum_xx = 0`` handled a one-pixel-wide cell before.
 
     At order 1 the last three terms do not exist, so their statistics are neither
-    computed nor returned and the expression stops after ``gy``.
+    computed nor returned and the expression stops after ``gy``. At order 0 it stops
+    after ``v``, which is the dense loss of the plain constant head.
 
     Accumulation is float64 and ``sum_sq_resid`` is centred on the cell mean, which
     keeps the subtraction out of float32.
@@ -69,7 +70,7 @@ def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: in
             tile the full grid.
         H: Grid height (rows).
         W: Grid width (columns).
-        order: The head's ``affine_output`` order, 1 or 2.
+        order: The head's ``affine_output`` order, 0, 1 or 2.
 
     Returns:
         Dict of float32 arrays, rows aligned with ``leaves``:
@@ -79,7 +80,8 @@ def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: in
         ``mean_target`` [N, C] cell mean,
         ``sum_target_dx``/``_dy``/``_dxx``/``_dxy``/``_dyy`` [N, C] target-term products,
         ``sum_sq_resid`` [N, C] within-cell sum of squares about the mean.
-        At order 1 the six second-order arrays are present but have no rows.
+        At order 1 the six second-order arrays are present but have no rows, and at
+        order 0 so are the four first-order ones.
 
     Raises:
         ValueError: if the leaves do not tile the grid exactly, which would leave
@@ -87,21 +89,24 @@ def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: in
     """
     N, C = len(leaves), target.shape[-1]
     n_taylor_terms = basis_size(order)
+    first_order = order >= 1
     second_order = order == 2
-    # Rows of the second-order arrays. At order 1 those terms do not exist, so the
-    # arrays are allocated with no rows and stay empty: the dict has the same keys
-    # at both orders, and nothing is computed for a term the head does not have.
+    # Rows of the first- and second-order arrays. Below their order those terms do
+    # not exist, so the arrays are allocated with no rows and stay empty: the dict
+    # has the same keys at every order, and nothing is computed for a term the head
+    # does not have.
+    N1 = N if first_order else 0
     N2 = N if second_order else 0
 
     num_pixels = np.empty(N, dtype=np.float32)
-    sum_xx = np.empty(N, dtype=np.float32)
-    sum_yy = np.empty(N, dtype=np.float32)
+    sum_xx = np.empty(N1, dtype=np.float32)
+    sum_yy = np.empty(N1, dtype=np.float32)
     sum_xxxx = np.empty(N2, dtype=np.float32)
     sum_xyxy = np.empty(N2, dtype=np.float32)
     sum_yyyy = np.empty(N2, dtype=np.float32)
     mean_target = np.empty((N, C), dtype=np.float32)
-    sum_target_dx = np.empty((N, C), dtype=np.float32)
-    sum_target_dy = np.empty((N, C), dtype=np.float32)
+    sum_target_dx = np.empty((N1, C), dtype=np.float32)
+    sum_target_dy = np.empty((N1, C), dtype=np.float32)
     sum_target_dxx = np.empty((N2, C), dtype=np.float32)
     sum_target_dxy = np.empty((N2, C), dtype=np.float32)
     sum_target_dyy = np.empty((N2, C), dtype=np.float32)
@@ -126,17 +131,19 @@ def _affine_leaf_stats(target: np.ndarray, leaves: List[QuadNode], H: int, W: in
             cached = (basis.reshape(h, w, n_taylor_terms), (basis ** 2).sum(axis=0))
             terms[(h, w)] = cached
         cols, norms = cached
-        dx, dy = cols[:, :, 1], cols[:, :, 2]
 
         t = target[r0:r1, c0:c1]                  # [h, w, C]
         mean = t.mean(axis=(0, 1))
         num_pixels[i] = h * w
-        sum_xx[i], sum_yy[i] = norms[1], norms[2]
         mean_target[i] = mean
-        sum_target_dx[i] = (t * dx[:, :, None]).sum(axis=(0, 1))
-        sum_target_dy[i] = (t * dy[:, :, None]).sum(axis=(0, 1))
         sum_sq_resid[i] = ((t - mean) ** 2).sum(axis=(0, 1))
         covered += h * w
+
+        if first_order:
+            dx, dy = cols[:, :, 1], cols[:, :, 2]
+            sum_xx[i], sum_yy[i] = norms[1], norms[2]
+            sum_target_dx[i] = (t * dx[:, :, None]).sum(axis=(0, 1))
+            sum_target_dy[i] = (t * dy[:, :, None]).sum(axis=(0, 1))
 
         if second_order:
             dxx, dxy, dyy = cols[:, :, 3], cols[:, :, 4], cols[:, :, 5]
@@ -193,8 +200,8 @@ class DeterministicCollateFn:
         packed_tokens     : [total_N, C+3]             concatenated tokenized inputs
         packed_targets    : [total_N, output_channels] per-token averaged ground truth
         tokens_per_sample : List[int]                  token count per sample
-        affine_stats      : Dict[str, Tensor]          per-leaf stats for the affine
-                                                       per-pixel loss (only when affine_output)
+        affine_stats      : Dict[str, Tensor]          per-leaf stats for the dense
+                                                       per-pixel loss (only when dense_loss)
 
     Args:
         refinement_criteria: Thresholds driving the physics-based subdivision.
@@ -202,20 +209,21 @@ class DeterministicCollateFn:
         max_depth: Hard depth cap; cells at this depth never subdivide.
         affine_input: 1 if each token also carries its cell's (gx, gy), which
             widens it to token_feature_width(C) + 3; 0 for the mean alone.
-        affine_output: The model's output order (0, 1 or 2). Non-zero means the
-            affine head, so the collate also builds the per-leaf statistics the
-            closed-form affine loss needs at that order (see ``_affine_leaf_stats``).
-            At 0 they are neither computed nor cached, since the constant head is
-            scored on ``packed_targets``.
+        affine_output: The model's output order (0, 1 or 2), which sets the terms
+            the per-leaf statistics hold (see ``_affine_leaf_stats``).
+        dense_loss: True to also build the per-leaf statistics the closed-form
+            dense loss needs. False leaves them out, and the model is scored on
+            ``packed_targets`` instead.
     """
 
     def __init__(self, refinement_criteria: RefinementCriteria, min_depth: int, max_depth: int,
-                 affine_input: int = 0, affine_output: int = 0):
+                 affine_input: int = 0, affine_output: int = 0, dense_loss: bool = False):
         self.refinement_criteria = refinement_criteria
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.affine_input = affine_input
         self.affine_output = affine_output
+        self.dense_loss = dense_loss
         # Two caches, because the two halves of the work do not vary together.
         # Both only persist with num_workers=0 (workers get their own copy that is
         # discarded after each batch), and neither keeps the QuadNode leaves:
@@ -278,7 +286,7 @@ class DeterministicCollateFn:
                 nodes = [QuadNode(bbox=bbox) for bbox in map(tuple, boxes.tolist())]
                 cached = (_per_token_targets(target, nodes),
                           _affine_leaf_stats(target, nodes, H, W, self.affine_output)
-                          if self.affine_output else None)
+                          if self.dense_loss else None)
                 self._cache[s["index"]] = cached
             token_target, stats = cached
 
@@ -296,7 +304,7 @@ class DeterministicCollateFn:
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
             tokens_per_sample.append(len(boxes))
-            if self.affine_output:
+            if self.dense_loss:
                 all_stats.append(stats)
 
         batch = {
@@ -304,7 +312,7 @@ class DeterministicCollateFn:
             "packed_targets": torch.cat(all_targets, dim=0),
             "tokens_per_sample": tokens_per_sample,
         }
-        if self.affine_output:
+        if self.dense_loss:
             batch["affine_stats"] = _stack_affine_stats(all_stats)
         return batch
 
@@ -389,8 +397,8 @@ class LearnedCollateFn:
         packed_tokens     : [total_N, C+3]             concatenated tokenized inputs
         packed_targets    : [total_N, output_channels] per-token averaged ground truth
         tokens_per_sample : List[int]                  token count per sample
-        affine_stats      : Dict[str, Tensor]          per-leaf stats for the affine
-                                                       per-pixel loss (only when affine_output)
+        affine_stats      : Dict[str, Tensor]          per-leaf stats for the dense
+                                                       per-pixel loss (only when dense_loss)
 
     Args:
         scorer: Trained ``RefinementNet``; frozen here and used only to build meshes.
@@ -399,14 +407,15 @@ class LearnedCollateFn:
         offset: Mesh budget offset passed to ``build_depth_guided_mesh``.
         affine_input: 1 if each token also carries its cell's (gx, gy), which
             widens it to token_feature_width(C) + 3; 0 for the mean alone.
-        affine_output: The model's output order (0, 1 or 2). Non-zero means the
-            affine head, so the collate also builds the per-leaf statistics the
-            closed-form affine loss needs at that order (see ``_affine_leaf_stats``).
-            At 0 they are neither computed nor cached.
+        affine_output: The model's output order (0, 1 or 2), which sets the terms
+            the per-leaf statistics hold (see ``_affine_leaf_stats``).
+        dense_loss: True to also build the per-leaf statistics the closed-form
+            dense loss needs. False leaves them out, and the model is scored on
+            ``packed_targets`` instead.
     """
 
     def __init__(self, scorer, min_depth: int, max_depth: int, offset: float = 0.0,
-                 affine_input: int = 0, affine_output: int = 0):
+                 affine_input: int = 0, affine_output: int = 0, dense_loss: bool = False):
         # Freeze the scorer: it only builds meshes here, it is never trained.
         self.scorer = scorer.eval().requires_grad_(False)
         self.min_depth = min_depth
@@ -414,6 +423,7 @@ class LearnedCollateFn:
         self.offset = offset
         self.affine_input = affine_input
         self.affine_output = affine_output
+        self.dense_loss = dense_loss
         # See DeterministicCollateFn._cache: same contract, and the QuadNode leaves
         # are likewise reduced to flat arrays rather than cached as objects.
         self._cache: Dict[int, tuple] = {}
@@ -441,7 +451,7 @@ class LearnedCollateFn:
                 token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
                 token_target = _per_token_targets(target, leaves)
                 stats = (_affine_leaf_stats(target, leaves, H, W, self.affine_output)
-                         if self.affine_output else None)
+                         if self.dense_loss else None)
                 self._cache[s["index"]] = (token_array, len(leaves), token_target, stats)
 
         all_tokens, all_targets, tokens_per_sample, all_stats = [], [], [], []
@@ -450,7 +460,7 @@ class LearnedCollateFn:
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
             tokens_per_sample.append(N)
-            if self.affine_output:
+            if self.dense_loss:
                 all_stats.append(stats)
 
         batch = {
@@ -458,7 +468,7 @@ class LearnedCollateFn:
             "packed_targets": torch.cat(all_targets, dim=0),
             "tokens_per_sample": tokens_per_sample,
         }
-        if self.affine_output:
+        if self.dense_loss:
             batch["affine_stats"] = _stack_affine_stats(all_stats)
         return batch
 
