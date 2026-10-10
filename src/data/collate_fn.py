@@ -338,10 +338,12 @@ class ScorerCollateFn:
         min_depth: int,
         max_depth: int,
         channel_scale: Optional[np.ndarray] = None,
+        split_rule: str = "variance",
     ):
         self.tol = tol
         self.min_depth = min_depth
         self.max_depth = max_depth
+        self.split_rule = split_rule
         # Optional fixed per-channel scale shared across samples; None -> each
         # sample is normalised by its own per-channel std (the default).
         self.channel_scale = channel_scale
@@ -366,6 +368,7 @@ class ScorerCollateFn:
                     min_depth=self.min_depth,
                     max_depth=self.max_depth,
                     channel_scale=self.channel_scale,
+                    split_rule=self.split_rule,
                 )
                 self._cache[s["index"]] = oracle
             oracle_maps.append(torch.from_numpy(oracle))

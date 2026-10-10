@@ -38,7 +38,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
     max_depth = args["max_depth"]
     # The polynomial heads can only be trained on the dense loss. The constant head
     # keeps the per-token loss unless the config sets dense_loss.
-    dense_loss = args["affine_output"] > 0 or bool(args.get("dense_loss", 0))
+    dense_loss = args.get("affine_output", 0) > 0 or bool(args.get("dense_loss", 0))
 
     # Deterministic mesh: physics-based AMR criterion.
     if model_trained == "deterministic_transformer":
@@ -63,12 +63,14 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
         # Select random "calib_samples", not the first n_calib rows (rows are grouped by geometry)
         calib_idx = np.random.default_rng(args["seed"]).choice(len(train_dataset), n_calib, replace=False)
         calib_targets = [np.asarray(train_dataset[i]["target"], dtype=np.float32) for i in calib_idx]
-        tol = calibrate_global_tolerance(calib_targets, n_target=n_target, min_depth=min_depth, max_depth=max_depth)
+        split_rule = args["split_rule"]
+        tol = calibrate_global_tolerance(calib_targets, n_target=n_target, min_depth=min_depth,
+                                         max_depth=max_depth, split_rule=split_rule)
         # max_depth is already the reachable depth (derived from min_patch_size by
         # patch_sizes_to_depth_bounds), so it is the reachable cap directly.
-        print(f"Oracle target: global tol={tol:.4g} (n_target={n_target}, "
+        print(f"Oracle target: global tol={tol:.4g} (split_rule={split_rule}, n_target={n_target}, "
               f"calib n={n_calib}, reachable_depth={max_depth})")
-        return ScorerCollateFn(tol=tol, min_depth=min_depth, max_depth=max_depth)
+        return ScorerCollateFn(tol=tol, min_depth=min_depth, max_depth=max_depth, split_rule=split_rule)
 
     # Learned-mesh transformer training: a frozen, pretrained scorer defines the mesh.
     if model_trained == "learned_transformer":

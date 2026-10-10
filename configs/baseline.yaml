@@ -38,6 +38,7 @@ num_workers: 0                                # DataLoader workers. Only 0 keeps
 # ---- scorer (no transformer architecture keys) ----
 # n_target: 800             # Target mean leaf count (one global tolerance is calibrated to it)
 # calib_samples: 256        # Train samples used for that calibration
+# split_rule: variance      # When a cell splits: variance (squared deviation from the cell mean) | linear_abs / quadratic_abs (absolute residual after the affine_output 1 / 2 fit)
 # tv_weight: 0.2            # Total-variation regulariser on the depth map (0 = off)
 # decision_weight: 0.0      # Decision-consistency term (0 = off, enable only if d_pred is jittery near decision boundaries)
 # decision_margin: 0.0

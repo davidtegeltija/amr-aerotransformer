@@ -10,6 +10,18 @@ while the within-cell residual (the sum-of-squared-deviations from the cell
 mean) stays above a tolerance. So the "correct" quadtree depth at each pixel
 is the SHALLOWEST depth whose CONTAINING cell already has within-cell error <= tol.
 
+What "within-cell error" means is the split rule (``SPLIT_RULES``):
+
+* ``variance``: sum of squared deviations from the cell mean, i.e. the error of a
+  constant per cell. The original rule.
+* ``linear_abs``: the same with only the first three terms (1, dx, dy), for a
+  transformer trained with ``affine_output: 1``.
+* ``quadratic_abs``: sum of absolute residuals after fitting the cell with the
+  quadratic basis the transformer paints (``cell_basis``). Smooth slopes and bends
+  the quadratic head already represents no longer demand refinement, and the
+  absolute value spreads tokens over all hard regions instead of chasing the few
+  largest peaks, which suits MAE and the integrated coefficients.
+
 Correctness notes:
 
 * Cells follow the EXACT rectangular quadtree geometry of the mesh builder
@@ -33,6 +45,11 @@ from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 
+from src.models.reconstruction import basis_size, cell_basis
+
+
+SPLIT_RULES = ("variance", "linear_abs", "quadratic_abs")
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -47,6 +64,7 @@ def calibrate_global_tolerance(
     valid_masks: Optional[Iterable[Optional[np.ndarray]]] = None,
     iters: int = 40,
     rel_tol: float = 1e-3,
+    split_rule: str = "variance",
 ) -> float:
     """Find ONE global tolerance so the mean leaf count lands near ``n_target``.
 
@@ -67,6 +85,7 @@ def calibrate_global_tolerance(
             aligned with ``targets``.
         iters: Max bisection iterations.
         rel_tol: Stop once ``|mean_count - n_target| <= rel_tol * n_target``.
+        split_rule: Within-cell error, one of ``SPLIT_RULES``.
 
     Returns:
         The calibrated global tolerance.
@@ -80,7 +99,7 @@ def calibrate_global_tolerance(
         masks = list(valid_masks)
 
     per_sample_errors = [
-        build_cell_errors(t, max_depth=max_depth, valid_mask=m)
+        build_cell_errors(t, max_depth=max_depth, valid_mask=m, split_rule=split_rule)
         for t, m in zip(targets, masks)
     ]
 
@@ -91,10 +110,11 @@ def calibrate_global_tolerance(
         ]
         return float(np.mean(counts))
 
-    # Bracket: tol = 0 -> finest (most leaves); tol = max SSD -> coarsest. The
-    # root cell's SSD (constant over ssd[0]) is the maximum over all depths by
-    # construction, since error is non-increasing with depth.
-    hi = max(float(ssd[0, 0, 0]) for ssd, _ in per_sample_errors)
+    # Bracket: tol = 0 -> finest (most leaves); tol = max error -> coarsest. Under
+    # the variance rule the root cell holds the maximum, since error never grows
+    # with depth; absolute residuals carry no such guarantee, so take the max over
+    # every depth.
+    hi = max(float(ssd.max()) for ssd, _ in per_sample_errors)
     hi = max(hi, 1e-12)
     lo = 0.0
 
@@ -141,6 +161,7 @@ def compute_oracle_depth(
     max_depth: int,
     valid_mask: Optional[np.ndarray] = None,
     channel_scale: Optional[np.ndarray] = None,
+    split_rule: str = "variance",
 ) -> np.ndarray:
     """Convenience: build the cell errors and return the oracle depth map.
 
@@ -153,6 +174,8 @@ def compute_oracle_depth(
         valid_mask: Optional ``[H, W]`` bool mask of valid pixels.
         channel_scale: Optional ``[C]`` per-channel scale (defaults to per-sample
             std).
+        split_rule: Within-cell error, one of ``SPLIT_RULES``. Must be the rule
+            ``tol`` was calibrated with.
 
     Returns:
         ``[H, W]`` int64 oracle depth map.
@@ -162,6 +185,7 @@ def compute_oracle_depth(
         max_depth=max_depth,
         valid_mask=valid_mask,
         channel_scale=channel_scale,
+        split_rule=split_rule,
     )
     return oracle_from_cell_errors(ssd, tol, min_depth)
 
@@ -176,6 +200,7 @@ def build_cell_errors(
     max_depth: int,
     valid_mask: Optional[np.ndarray] = None,
     channel_scale: Optional[np.ndarray] = None,
+    split_rule: str = "variance",
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build the per-depth within-cell errors for one dense target field.
 
@@ -192,16 +217,25 @@ def build_cell_errors(
             pixels gets SSD 0 (it never demands refinement).
         channel_scale: Optional ``[C]`` per-channel scale. Defaults to this
             sample's per-channel std over valid pixels.
+        split_rule: Within-cell error, one of ``SPLIT_RULES``:
+            - variance (sum of squared deviations from the cell mean)
+            - linear_abs (sum of absolute residuals after a least-squares fit of order-1 ``cell_basis``)
+            - quadratic_abs (sum of absolute residuals after a least-squares fit of order-2 ``cell_basis``)
 
     Returns:
         ``(ssd, area)``, two ``[max_depth + 1, H, W]`` float64 arrays.
-        ``ssd[d, r, c]`` is the within-cell sum-of-squared-deviations (over
-        scaled channels and valid pixels) of the depth-``d`` cell containing
-        pixel ``(r, c)``; it is non-increasing with depth (depth 0 = root =
+        ``ssd[d, r, c]`` is the within-cell error (over scaled channels and
+        valid pixels) of the depth-``d`` cell containing pixel ``(r, c)``;
+        under ``variance`` it is non-increasing with depth (depth 0 = root =
         largest error). ``area[d, r, c]`` is that cell's pixel area
         (height*width), used for the closed-form leaf count.
+
+    Raises:
+        ValueError: if ``split_rule`` is not one of ``SPLIT_RULES``.
     """
     assert target.ndim == 3, f"expected [H, W, C], got {target.shape}"
+    if split_rule not in SPLIT_RULES:
+        raise ValueError(f"split_rule must be one of {SPLIT_RULES}, got {split_rule!r}")
     H, W, C = target.shape
 
     if channel_scale is None:
@@ -223,7 +257,14 @@ def build_cell_errors(
             cell_ssd = 0.0
         else:
             vals = scaled[r0:r1, c0:c1, :][m]          # [n_valid, C]
-            cell_ssd = float(((vals - vals.mean(axis=0)) ** 2).sum())
+            if split_rule == "variance":
+                cell_ssd = float(((vals - vals.mean(axis=0)) ** 2).sum())
+            else:
+                # The polynomial the transformer paints, fit to the valid pixels
+                order = 1 if split_rule == "linear_abs" else 2
+                basis = cell_basis(h, w, basis_size(order))[m.ravel()]   # [n_valid, 3 or 6]
+                coef = np.linalg.lstsq(basis, vals, rcond=None)[0]
+                cell_ssd = float(np.abs(vals - basis @ coef).sum())
 
         ssd[depth, r0:r1, c0:c1] = cell_ssd
         area[depth, r0:r1, c0:c1] = float(h * w)
