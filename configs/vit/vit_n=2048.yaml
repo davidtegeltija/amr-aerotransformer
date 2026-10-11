@@ -13,4 +13,8 @@ min_patch_size: 4       # The ViT patch size (pixels); must divide H and W
 # ---- Training ----
 epochs: 200
 batch_size: 32
+warmup_steps: 4000      # LR warm-up steps
+schedule: cosine        # cosine (AdamW + warmup + cosine decay) is the only option
+lr: 0.001               # Peak learning rate
+weight_decay: 0.01      # AdamW decay, matrix params only
 num_workers: 0          # DataLoader workers; only 0 keeps the AMR collates' per-sample mesh cache across epochs

@@ -549,6 +549,10 @@ def train_vit(
     device: torch.device,
     *,
     epochs: int,
+    warmup_steps: int = 4000,
+    schedule: str = "cosine",
+    lr: float = 1e-3,
+    weight_decay: float = 1e-2,
     save_path: Optional[str] = "outputs/checkpoints/vit.pt",
     writer: Optional[SummaryWriter] = None,
 ) -> Tuple[List[float], List[float]]:
@@ -557,10 +561,26 @@ def train_vit(
     This is the non-adaptive baseline: batches come from the dense collate, so
     there is no mesh, no packed tokens and no per-token weighting — the model
     sees the full uniform grid and is scored on the dense field directly.
+    The optimizer matches the ``"cosine"`` schedule of ``train_transformer``.
+
+    Args:
+        warmup_steps: Warmup length, in optimizer steps.
+        schedule: Only ``"cosine"`` is supported.
+        lr: Peak learning rate.
+        weight_decay: AdamW weight decay on the matrix param group.
     """
     model = model.to(device)
-    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
+    if schedule != "cosine":
+        raise ValueError(f"Unknown schedule {schedule!r}; expected 'cosine'")
+
+    optimizer = AdamW(decay_param_groups(model, weight_decay), lr=lr)
+    scheduler = WarmupCosineScheduler(
+        optimizer, warmup_steps=warmup_steps,
+        total_steps=epochs * len(train_loader), eta_min=1e-6,
+    )
+    print(f"Optimizer: AdamW(lr={lr:g}, weight_decay={weight_decay:g} on matrices only), "
+          f"warmup {warmup_steps} steps -> cosine to 1e-6 over {epochs * len(train_loader):,} steps")
 
     best_val_loss = float("inf")
     max_gpu_gb = 0.0
@@ -588,9 +608,9 @@ def train_vit(
                 loss.backward()
                 clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                scheduler.step()
 
                 epoch_loss += loss.item()
-        scheduler.step()
 
         train_loss_history.append(epoch_loss / len(train_loader))
         elapsed = time.time() - t0

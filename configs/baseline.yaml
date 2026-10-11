@@ -23,7 +23,7 @@ refinement_criteria: GEOMETRY_BALANCED_CRITERIA  # Key in CRITERIA_REGISTRY (src
 # ---- Training ----
 epochs: 250
 batch_size: 8
-warmup_steps: 1000                            # LR warm-up steps (transformer branches only)
+warmup_steps: 1000                            # LR warm-up steps
 schedule: cosine                              # cosine (AdamW + warmup + cosine decay) | noam (Adam + inverse-sqrt)
 lr: 0.001                                     # Peak learning rate. Ignored under schedule=noam, whose peak is fixed by d_model
 weight_decay: 0.01                            # AdamW decay, matrix params only. Ignored under schedule=noam
@@ -45,6 +45,6 @@ num_workers: 0                                # DataLoader workers. Only 0 keeps
 # decision_temp: null       # Smooth-max temperature (null = hard max)
 
 
-# ---- vit (reuses d_model / n_layers / n_heads / d_ff / dropout above; no max_patch_size / affine_output / warmup_steps) ----
+# ---- vit (reuses d_model / n_layers / n_heads / d_ff / dropout + training keys (schedule=cosine only); no max_patch_size / affine_output) ----
 # pos_embedding: sincos     # sincos | trainable. With sincos, d_model must be divisible by 4
 # min_patch_size: 4         # On this branch: the ViT patch size (pixels). Must divide H and W

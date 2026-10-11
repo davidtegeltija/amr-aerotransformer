@@ -105,6 +105,10 @@ def train_model(args, model, train_loader, val_loader, device, writer, save_path
         return train_vit(
             model, train_loader, val_loader, device,
             epochs=args["epochs"],
+            warmup_steps=args["warmup_steps"],
+            schedule=args.get("schedule", "cosine"),
+            lr=args.get("lr", 1e-3),
+            weight_decay=args.get("weight_decay", 1e-2),
             save_path=save_path,
             writer=writer,
         )
