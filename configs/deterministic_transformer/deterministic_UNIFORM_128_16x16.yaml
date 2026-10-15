@@ -5,11 +5,11 @@ n_layers: 5                                   # Encoder blocks
 n_heads: 8                                    # Attention heads; must divide d_model
 d_ff: 512                                     # Feed-forward inner width
 dropout: 0.2
-min_patch_size: 16                            # Unused by the uniform mesh; kept equal to its cell size
-max_patch_size: 16                            # Unused by the uniform mesh; kept equal to its cell size
+min_patch_size: 16                            # Equal to max_patch_size, so every cell is 16x16
+max_patch_size: 16
 affine_input: 1                               # Per-token geometry features: 0 the channel means alone | 1 also their gx + gy
 affine_output: 2                              # Per-cell polynomial order, dense per-pixel loss: 0 constant | 1 value+gx+gy | 2 also gxx+gxy+gyy
-refinement_criteria: UNIFORM_128              # Uniform 16x16 mesh, 128 tokens
+refinement_criteria: UNIFORM_1x1              # Uniform square cells: 16x16 mesh, 128 tokens
 
 # ---- Training ----
 epochs: 200

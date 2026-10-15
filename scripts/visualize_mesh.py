@@ -73,9 +73,10 @@ if __name__ == "__main__":
     title_mesh = f"Adaptive Mesh ({len(mesh)} patches)"
     plot_mesh(sample, mesh, channel=0, title=title_mesh, show=show_plots, save_path=save_path_mesh)
 
-    # Token-matched uniform mesh: the uniform preset whose patch count is
-    # closest to the adaptive mesh's actual patch count.
-    uniform_meshes = [build_adaptive_mesh(sample, c) for c in CRITERIA_REGISTRY.values() if c.uniform_cell_size is not None]
+    # Token-matched uniform mesh: the uniform preset and depth whose patch count
+    # is closest to the adaptive mesh's actual patch count.
+    uniform_meshes = [build_adaptive_mesh(sample, CRITERIA_REGISTRY[name], min_depth=depth, max_depth=depth)
+                      for name in ("UNIFORM", "UNIFORM_1x1", "UNIFORM_1x2") for depth in range(max_depth + 1)]
     mesh_uniform = min(uniform_meshes, key=lambda m: abs(len(m) - len(mesh)))
 
     save_path_uniform = f"{prefix}_uniform_mesh.png" if save_path else None

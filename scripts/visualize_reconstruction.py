@@ -63,6 +63,7 @@ def build_mesh(model_config: str, data_config: str, sample_idx: int = -1):
             max_depth=args["max_depth"],
             min_depth=args["min_depth"],
             offset=args.get("offset", 0.0),
+            patch_sides_ratio=scorer.patch_sides_ratio,
         )
 
     return sample, mesh, sample_index

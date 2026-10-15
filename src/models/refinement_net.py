@@ -25,19 +25,24 @@ it with nearest-neighbor upsampling and concatenative skip connections.
 GroupNorm(8, *) + ReLU throughout; raw 1x1 conv head.
 """
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class RefinementNet(nn.Module):
-    def __init__(self, input_channels: int = 3):
+    def __init__(self, input_channels: int = 3, patch_sides_ratio: Optional[float] = None):
         super().__init__()
         self.input_channels = input_channels
+        # Leaf height / width of the mesh its oracle was built on (None means the whole
+        # grid is the one root)
+        self.patch_sides_ratio = patch_sides_ratio
 
         # Constructor arguments, recorded for build_model_from_checkpoint (see
         # src/utils/model_utils.py). Keep in sync with the signature above.
-        self.init_kwargs = dict(input_channels=input_channels)
+        self.init_kwargs = dict(input_channels=input_channels, patch_sides_ratio=patch_sides_ratio)
 
         self.enc1_conv = nn.Conv2d(input_channels, 32, kernel_size=3, padding=1)
         self.enc1_norm = nn.GroupNorm(8, 32)

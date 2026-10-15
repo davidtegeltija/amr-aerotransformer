@@ -22,11 +22,11 @@ from src.models.refinement_net import RefinementNet
 from src.models.vit_model import ViT
 from src.training.train import train_transformer, train_scorer_supervised, train_vit
 from src.utils.config import load_config, resolve_depth_bounds
-from src.utils.checkpoint import load_checkpoint
+from src.utils.checkpoint import build_model_from_checkpoint
 from src.utils.plot import plot_loss_curves
 
 
-def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, device: torch.device):
+def build_collate_fn(args: Dict, train_dataset: Dataset):
     """Build the collate that supplies each training loop with its batch layout."""
     model_trained = args["model_trained"]
 
@@ -42,13 +42,8 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
 
     # Deterministic mesh: physics-based AMR criterion.
     if model_trained == "deterministic_transformer":
-        refinement_criteria = args["refinement_criteria"]
-        if refinement_criteria not in CRITERIA_REGISTRY:
-            valid = ", ".join(sorted(CRITERIA_REGISTRY))
-            raise SystemExit(f"Unknown refinement_criteria {refinement_criteria!r}.\nAvailable options are: {valid}")
-
         return DeterministicCollateFn(
-            refinement_criteria=CRITERIA_REGISTRY[refinement_criteria],
+            refinement_criteria=CRITERIA_REGISTRY[args["refinement_criteria"]],
             min_depth=min_depth,
             max_depth=max_depth,
             affine_input=args["affine_input"],
@@ -64,13 +59,15 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
         calib_idx = np.random.default_rng(args["seed"]).choice(len(train_dataset), n_calib, replace=False)
         calib_targets = [np.asarray(train_dataset[i]["target"], dtype=np.float32) for i in calib_idx]
         split_rule = args["split_rule"]
+        patch_sides_ratio = args["patch_sides_ratio"]
         tol = calibrate_global_tolerance(calib_targets, n_target=n_target, min_depth=min_depth,
-                                         max_depth=max_depth, split_rule=split_rule)
+                                         max_depth=max_depth, split_rule=split_rule, patch_sides_ratio=patch_sides_ratio)
         # max_depth is already the reachable depth (derived from min_patch_size by
         # patch_sizes_to_depth_bounds), so it is the reachable cap directly.
         print(f"Oracle target: global tol={tol:.4g} (split_rule={split_rule}, n_target={n_target}, "
-              f"calib n={n_calib}, reachable_depth={max_depth})")
-        return ScorerCollateFn(tol=tol, min_depth=min_depth, max_depth=max_depth, split_rule=split_rule)
+              f"calib n={n_calib}, reachable_depth={max_depth}, patch_sides_ratio={patch_sides_ratio})")
+        return ScorerCollateFn(tol=tol, min_depth=min_depth, max_depth=max_depth, split_rule=split_rule,
+                               patch_sides_ratio=patch_sides_ratio)
 
     # Learned-mesh transformer training: a frozen, pretrained scorer defines the mesh.
     if model_trained == "learned_transformer":
@@ -80,8 +77,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, input_channels: int, de
         if not Path(checkpoint_file).is_file():
             raise SystemExit(f"checkpoint_file {checkpoint_file!r} does not exist. It must point to a trained scorer checkpoint.")
 
-        scorer = RefinementNet(input_channels=input_channels)
-        load_checkpoint(scorer, checkpoint_file, device)
+        scorer = build_model_from_checkpoint(RefinementNet, checkpoint_file)
         return LearnedCollateFn(scorer, min_depth=min_depth, max_depth=max_depth,
                                 offset=args["offset"], affine_input=args["affine_input"],
                                 affine_output=args["affine_output"], dense_loss=dense_loss)
@@ -267,7 +263,7 @@ def main(args=None):
         
         # Model
         if model_trained == "scorer":
-            model = RefinementNet(input_channels=input_channels).to(device)
+            model = RefinementNet(input_channels=input_channels, patch_sides_ratio=args["patch_sides_ratio"]).to(device)
             print(f"Scorer parameters: {sum(p.numel() for p in model.parameters()):,}")
         else:
             model = AMRTransformer(
@@ -284,7 +280,7 @@ def main(args=None):
             )
             print(f"Model parameters: {model.count_parameters():,}")
 
-        collate_fn = build_collate_fn(args, train_dataset, input_channels, device)
+        collate_fn = build_collate_fn(args, train_dataset)
 
         # Train
         print("\n======== Training ========")
@@ -326,7 +322,7 @@ def main(args=None):
             pos_embedding=pos_embedding)
         print(f"ViT parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-        collate_fn = build_collate_fn(args, train_dataset, input_channels, device)
+        collate_fn = build_collate_fn(args, train_dataset)
 
         print("\n======== Training ========")
         train_loader = make_loader(train_dataset, args["batch_size"], True, args["num_workers"], collate_fn, device)

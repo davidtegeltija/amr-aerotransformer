@@ -2,6 +2,7 @@
 model_trained: scorer      # deterministic_transformer | learned_transformer | scorer | vit
 min_patch_size: 2          # Smallest allowed leaf patch (pixels). Fine cap -> hard limit on the deepest refinement
 max_patch_size: 64         # Largest allowed leaf patch (pixels). Coarse floor -> every region is refined at least this far
+patch_sides_ratio: null    # Patch height / width, a power of two: 1 square | 0.5 long along the span | null the whole grid is the root (2:1)
 
 # Oracle target
 n_target: 1024             # Target mean leaf count; one global tolerance is calibrated to it

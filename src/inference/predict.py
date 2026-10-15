@@ -85,7 +85,8 @@ def predict_single_amr(model, sample, *, max_depth, min_depth, refinement_criter
         input_grid = np.asarray(input_grid, dtype=np.float32)
         grid = torch.from_numpy(input_grid).unsqueeze(0)  # [1, H, W, C]
         depth_map = scorer(grid).squeeze(1)[0].numpy()    # [H, W]
-        leaves = build_depth_guided_mesh(input_grid, depth_map, max_depth=max_depth, min_depth=min_depth, offset=offset)
+        leaves = build_depth_guided_mesh(input_grid, depth_map, max_depth=max_depth, min_depth=min_depth, offset=offset,
+                                         patch_sides_ratio=scorer.patch_sides_ratio)
 
     # The model's token width is what says whether it was trained with affine_input,
     # so the checkpoint decides this rather than a config that could disagree with it.

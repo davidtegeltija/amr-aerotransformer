@@ -27,6 +27,8 @@ import yaml
 import torch
 
 from src.amr.mesh_bounds import patch_sizes_to_depth_bounds
+from src.amr.quadtree import root_shape
+from src.amr.refinement_criteria import CRITERIA_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +48,9 @@ def load_config(path: str, data_path: str) -> Dict:
         A flat dict of the merged keys, mimicking an argparse namespace.
 
     Raises:
-        SystemExit: if 'model_trained' or 'dataset' names an unknown option, or
-            a data file the chosen dataset requires is missing from disk. These
-            are unrecoverable startup errors for the entry points that call
+        SystemExit: if 'model_trained', 'dataset' or 'refinement_criteria' names
+            an unknown option, or a data file the chosen dataset requires is missing from disk.
+            These are unrecoverable startup errors for the entry points that call
             this, so they exit with a message rather than a traceback.
     """
     with open(path, "r") as f:
@@ -69,12 +71,15 @@ def load_config(path: str, data_path: str) -> Dict:
 
     model_trained = cfg.get("model_trained")
     if model_trained not in MODEL_TRAINED_OPTIONS:
-        valid = ", ".join(MODEL_TRAINED_OPTIONS)
-        raise SystemExit(f"Invalid model_trained {model_trained!r} in {path}.\nValid options are: {valid}")
+        raise SystemExit(f"Invalid model_trained {model_trained!r} in {path}.\nValid options are: {', '.join(MODEL_TRAINED_OPTIONS)}")
 
     dataset_type = cfg.get("dataset")
     if dataset_type not in DATASET_OPTIONS:
         raise SystemExit(f"Invalid dataset {dataset_type!r} in {data_path}.\nValid options are: {', '.join(DATASET_OPTIONS)}")
+
+    refinement_criteria = cfg.get("refinement_criteria")
+    if refinement_criteria is not None and refinement_criteria not in CRITERIA_REGISTRY:
+        raise SystemExit(f"Invalid refinement_criteria {refinement_criteria!r} in {path}.\nValid options are: {', '.join(sorted(CRITERIA_REGISTRY))}")
 
     # Null input_file selects the synthetic dataset; wing needs three arrays, cavity one root.
     if cfg.get("input_file") is not None:
@@ -98,14 +103,27 @@ def resolve_depth_bounds(args: Dict, dataset) -> Dict:
     all work in integer depths. This is the single conversion point, so every entry
     point gets identical bounds for a given config + grid.
 
+    The bounds are taken on the root tile, whose shape ``patch_sides_ratio`` sets. A
+    scorer config names it, a deterministic config takes its refinement criteria's
+    and a config pointing at a scorer takes the scorer's.
+
     Args:
-        args: Merged config dict; gains ``min_depth`` and ``max_depth``.
+        args: Merged config dict; gains ``min_depth``, ``max_depth`` and ``patch_sides_ratio``.
         dataset: Dataset supplying the grid dimensions ``H``, ``W``.
 
     Returns:
         The updated ``args``
     """
-    H, W = dataset.H, dataset.W
+    patch_sides_ratio = args.get("patch_sides_ratio")
+    if args.get("refinement_criteria"):
+        patch_sides_ratio = CRITERIA_REGISTRY[args["refinement_criteria"]].patch_sides_ratio
+    elif args.get("checkpoint_file"):
+        checkpoint = torch.load(args["checkpoint_file"], map_location="cpu")
+        model_config = checkpoint.get("model_config") if isinstance(checkpoint, dict) else None
+        patch_sides_ratio = (model_config or {}).get("patch_sides_ratio", patch_sides_ratio)
+    args["patch_sides_ratio"] = patch_sides_ratio
+
+    H, W = root_shape(dataset.H, dataset.W, patch_sides_ratio)
     min_depth, max_depth = patch_sizes_to_depth_bounds(H, W, args.get("min_patch_size"), args.get("max_patch_size"))
     args["min_depth"] = min_depth
     args["max_depth"] = max_depth

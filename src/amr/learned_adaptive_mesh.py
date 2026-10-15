@@ -24,6 +24,11 @@ scorer output reconstructs the oracle mesh exactly — the consistency invariant
 that ties inference to the supervised target. The scorer is now trained by 
 supervised regression, decoupled from the transformer.
 
+A quadtree split keeps the parent's aspect ratio, so the leaf shape is set by
+the root tiles (``root_bboxes``). ``patch_sides_ratio`` is the leaf height / width: on
+the 256x128 wing grid 1 gives two square roots; None keeps the whole grid as
+the one root (2:1 leaves).
+
 bbox convention (matched to ``quadtree.py``): ``(r0, c0, r1, c1)`` with
 ``r0, c0`` inclusive and ``r1, c1`` exclusive.
 """
@@ -31,12 +36,12 @@ bbox convention (matched to ``quadtree.py``): ``(r0, c0, r1, c1)`` with
 from __future__ import annotations
 
 from functools import partial
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
 
-from src.amr.quadtree import QuadNode, build_tree, collect_leaves
+from src.amr.quadtree import QuadNode, build_tree, collect_leaves, root_bboxes
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +55,7 @@ def build_depth_guided_mesh(
     max_depth: int = 5,
     min_depth: int = 2,
     offset: float = 0.0,
+    patch_sides_ratio: Optional[float] = None,
 ) -> List[QuadNode]:
     """Build a quadtree by comparing a predicted depth map against running depth.
 
@@ -65,6 +71,7 @@ def build_depth_guided_mesh(
         min_depth: Depth floor (cells shallower than this always subdivide).
         offset: Global budget offset added to the running depth in the
             comparison. Positive -> coarser mesh, negative -> finer.
+        patch_sides_ratio: Leaf height / width (see ``root_shape``).
 
     Returns:
         Flat list of leaf ``QuadNode`` s, each with ``features`` populated, that
@@ -86,7 +93,6 @@ def build_depth_guided_mesh(
 
     # partial binds the depth map and budget, leaving the (node) predicate
     # build_tree expects.
-    root = QuadNode(bbox=(0, 0, H, W), depth=0)
     should_subdivide = partial(
         _should_subdivide_depth,
         depth_map=depth_map,
@@ -94,8 +100,12 @@ def build_depth_guided_mesh(
         max_depth=max_depth,
         offset=offset,
     )
-    build_tree(data, root, should_subdivide)
-    return collect_leaves(root)
+    leaves = []
+    for bbox in root_bboxes(H, W, patch_sides_ratio):
+        root = QuadNode(bbox=bbox, depth=0)
+        build_tree(data, root, should_subdivide)
+        leaves += collect_leaves(root)
+    return leaves
 
 
 # ---------------------------------------------------------------------------
@@ -134,23 +144,18 @@ def _should_subdivide_depth(
 
 if __name__ == "__main__":
     import numpy as np
-    from src.amr.mesh_bounds import mesh_token_bounds
 
     H, W = 256, 128
-    floor, cap = mesh_token_bounds(H, W, min_depth=2, max_depth=5)
-    assert (floor, cap) == (16, 1024), f"unexpected bounds: {(floor, cap)}"
-
     data = np.random.default_rng(0).standard_normal((H, W, 3)).astype(np.float32)
 
-    # Uniform depth map at the floor -> floor leaves.
-    leaves = build_depth_guided_mesh(
-        data, np.full((H, W), 2.0), max_depth=5, min_depth=2
-    )
-    assert len(leaves) == floor, f"expected {floor} leaves, got {len(leaves)}"
-
-    # Uniform depth map above the cap -> cap leaves.
-    leaves = build_depth_guided_mesh(
-        data, np.full((H, W), 99.0), max_depth=5, min_depth=2
-    )
-    assert len(leaves) == cap, f"expected {cap} leaves, got {len(leaves)}"
-    print(f"Smoke OK: bounds=({floor},{cap}); uniform floor/cap reproduce them.")
+    # Each root holds 4**depth leaves at a uniform depth, all of the root's aspect.
+    for patch_sides_ratio in (None, 2.0, 1.0, 0.5, 4.0):
+        n_roots = len(root_bboxes(H, W, patch_sides_ratio))
+        aspect = patch_sides_ratio or H / W
+        for depth_value, depth in ((2.0, 2), (99.0, 4)):
+            leaves = build_depth_guided_mesh(
+                data, np.full((H, W), depth_value), max_depth=4, min_depth=2, patch_sides_ratio=patch_sides_ratio
+            )
+            assert len(leaves) == n_roots * 4 ** depth, f"aspect {patch_sides_ratio}: got {len(leaves)} leaves"
+            assert all(n.height == aspect * n.width for n in leaves), f"aspect {patch_sides_ratio}: wrong leaf shape"
+    print("Smoke OK: leaf counts and shapes match every patch_sides_ratio.")

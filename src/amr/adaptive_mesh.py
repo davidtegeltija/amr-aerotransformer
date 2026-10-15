@@ -29,7 +29,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.amr.refinement_criteria import RefinementCriteria
-from src.amr.quadtree import QuadNode, build_tree, cell_affine_features, collect_leaves
+from src.amr.quadtree import QuadNode, build_tree, collect_leaves, root_bboxes
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +62,9 @@ def build_adaptive_mesh(
         Thresholds controlling subdivision; required, typically a preset from
         CRITERIA_REGISTRY. Only the metrics it names are computed and checked.
         Use criteria.scale(factor) to uniformly loosen or tighten the mesh.
-        If its uniform_cell_size is set, adaptive refinement is skipped and a
-        regular grid of cells of exactly that pixel size is returned. Cells at
-        the right/bottom edge are clamped to the grid boundary.
+        Its patch_sides_ratio sets the root tiles (see root_shape). With
+        min_depth == max_depth the thresholds are never consulted and the
+        mesh is uniform.
 
     Returns
     -------
@@ -86,12 +86,8 @@ def build_adaptive_mesh(
     data = data.astype(np.float64)
     H, W, C = data.shape
 
-    if refinement_criteria.uniform_cell_size is not None:
-        return _build_uniform_mesh(data, refinement_criteria.uniform_cell_size)
-
-    # Build the quadtree starting with the whole field. partial binds the
-    # per-build config, leaving the (node) predicate build_tree expects.
-    root = QuadNode(bbox=(0, 0, H, W), depth=0)
+    # Build one quadtree per root tile. partial binds the per-build config,
+    # leaving the (node) predicate build_tree expects.
     should_subdivide = partial(
         _should_subdivide,
         data=data,
@@ -99,49 +95,11 @@ def build_adaptive_mesh(
         min_depth=min_depth,
         max_depth=max_depth,
     )
-    build_tree(data, root, should_subdivide)
-    return collect_leaves(root)
-
-
-# ---------------------------------------------------------------------------
-# Uniform mesh builder
-# ---------------------------------------------------------------------------
-
-def _build_uniform_mesh(data: np.ndarray, cell_size: int) -> List[QuadNode]:
-    """
-    Partition the grid into a regular cell_size × cell_size mesh.
-
-    Parameters
-    ----------
-    data      : (H, W, C) float64 array
-    cell_size : side length of each cell in pixels
-
-    Returns
-    -------
-    List[QuadNode]  Row-major ordered leaf nodes, one per cell.
-    """
-    H, W, _ = data.shape
-    if cell_size < 1:
-        raise ValueError(f"uniform_cell_size must be >= 1, got {cell_size}")
-
-    import math
-    depth = max(0, int(round(math.log2(max(H, W) / cell_size))))
-
-    leaves: List[QuadNode] = []
-    r = 0
-    while r < H:
-        r1 = min(r + cell_size, H)
-        c = 0
-        while c < W:
-            c1 = min(c + cell_size, W)
-            node = QuadNode(bbox=(r, c, r1, c1), depth=depth)
-            node.is_leaf = True
-            node.features = cell_affine_features(data[r:r1, c:c1, :], H, W)
-            node.metrics = {}
-            leaves.append(node)
-            c = c1
-        r = r1
-
+    leaves = []
+    for bbox in root_bboxes(H, W, refinement_criteria.patch_sides_ratio):
+        root = QuadNode(bbox=bbox, depth=0)
+        build_tree(data, root, should_subdivide)
+        leaves += collect_leaves(root)
     return leaves
 
 

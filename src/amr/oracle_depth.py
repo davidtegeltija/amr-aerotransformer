@@ -24,8 +24,8 @@ What "within-cell error" means is the split rule (``SPLIT_RULES``):
 
 Correctness notes:
 
-* Cells follow the EXACT rectangular quadtree geometry of the mesh builder
-  (on a 256x128 domain the cells are 2:1 rectangles).
+* Cells follow the EXACT quadtree geometry of the mesh builder, grown from
+  the same root tiles (``root_bboxes``), so they share its ``patch_sides_ratio``.
 * Using the containing-cell test (not a free per-pixel detector) makes the
   depth map piecewise-constant over the leaves of the mesh it induces, which is
   what makes the closed-form leaf count exact.
@@ -45,6 +45,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 
+from src.amr.quadtree import root_bboxes
 from src.models.reconstruction import basis_size, cell_basis
 
 
@@ -65,6 +66,7 @@ def calibrate_global_tolerance(
     iters: int = 40,
     rel_tol: float = 1e-3,
     split_rule: str = "variance",
+    patch_sides_ratio: Optional[float] = None,
 ) -> float:
     """Find ONE global tolerance so the mean leaf count lands near ``n_target``.
 
@@ -86,6 +88,7 @@ def calibrate_global_tolerance(
         iters: Max bisection iterations.
         rel_tol: Stop once ``|mean_count - n_target| <= rel_tol * n_target``.
         split_rule: Within-cell error, one of ``SPLIT_RULES``.
+        patch_sides_ratio: Leaf height / width (see ``root_shape``).
 
     Returns:
         The calibrated global tolerance.
@@ -99,7 +102,7 @@ def calibrate_global_tolerance(
         masks = list(valid_masks)
 
     per_sample_errors = [
-        build_cell_errors(t, max_depth=max_depth, valid_mask=m, split_rule=split_rule)
+        build_cell_errors(t, max_depth=max_depth, valid_mask=m, split_rule=split_rule, patch_sides_ratio=patch_sides_ratio)
         for t, m in zip(targets, masks)
     ]
 
@@ -162,6 +165,7 @@ def compute_oracle_depth(
     valid_mask: Optional[np.ndarray] = None,
     channel_scale: Optional[np.ndarray] = None,
     split_rule: str = "variance",
+    patch_sides_ratio: Optional[float] = None,
 ) -> np.ndarray:
     """Convenience: build the cell errors and return the oracle depth map.
 
@@ -176,6 +180,7 @@ def compute_oracle_depth(
             std).
         split_rule: Within-cell error, one of ``SPLIT_RULES``. Must be the rule
             ``tol`` was calibrated with.
+        patch_sides_ratio: Leaf height / width; must match the calibration's.
 
     Returns:
         ``[H, W]`` int64 oracle depth map.
@@ -186,6 +191,7 @@ def compute_oracle_depth(
         valid_mask=valid_mask,
         channel_scale=channel_scale,
         split_rule=split_rule,
+        patch_sides_ratio=patch_sides_ratio,
     )
     return oracle_from_cell_errors(ssd, tol, min_depth)
 
@@ -201,6 +207,7 @@ def build_cell_errors(
     valid_mask: Optional[np.ndarray] = None,
     channel_scale: Optional[np.ndarray] = None,
     split_rule: str = "variance",
+    patch_sides_ratio: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build the per-depth within-cell errors for one dense target field.
 
@@ -221,6 +228,7 @@ def build_cell_errors(
             - variance (sum of squared deviations from the cell mean)
             - linear_abs (sum of absolute residuals after a least-squares fit of order-1 ``cell_basis``)
             - quadratic_abs (sum of absolute residuals after a least-squares fit of order-2 ``cell_basis``)
+        patch_sides_ratio: Leaf height / width (see ``root_shape``).
 
     Returns:
         ``(ssd, area)``, two ``[max_depth + 1, H, W]`` float64 arrays.
@@ -279,7 +287,8 @@ def build_cell_errors(
         recurse(r_mid, c0, r1, c_mid, depth + 1)   # bottom-left
         recurse(r_mid, c_mid, r1, c1, depth + 1)   # bottom-right
 
-    recurse(0, 0, H, W, 0)
+    for bbox in root_bboxes(H, W, patch_sides_ratio):
+        recurse(*bbox, 0)
     return ssd, area
 
 

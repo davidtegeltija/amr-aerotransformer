@@ -271,6 +271,46 @@ def cell_affine_features(region: np.ndarray, H: int, W: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Root tiles — they set the leaf aspect ratio
+# ---------------------------------------------------------------------------
+
+def root_shape(H: int, W: int, patch_sides_ratio: Optional[float]) -> Tuple[int, int]:
+    """Largest ``(rows, cols)`` tile of aspect ``patch_sides_ratio`` that tiles the grid.
+
+    Args:
+        H: Grid height (rows).
+        W: Grid width (columns).
+        patch_sides_ratio: Tile height / width, a power of two on a power-of-two grid.
+            None returns the whole grid.
+
+    Returns:
+        The tile's ``(rows, cols)``.
+    """
+    if patch_sides_ratio is None:
+        return H, W
+    w = min(W, int(H / patch_sides_ratio))
+    h = int(w * patch_sides_ratio)
+    if h < 1 or H % h or W % w:
+        raise ValueError(f"patch_sides_ratio={patch_sides_ratio} does not tile a {H}x{W} grid; use a power of two")
+    return h, w
+
+
+def root_bboxes(H: int, W: int, patch_sides_ratio: Optional[float]) -> List[Tuple[int, int, int, int]]:
+    """Root tiles the quadtree grows from, shared by the mesh builders and the oracle.
+
+    Args:
+        H: Grid height (rows).
+        W: Grid width (columns).
+        patch_sides_ratio: Tile height / width (see ``root_shape``).
+
+    Returns:
+        Root bboxes ``(r0, c0, r1, c1)``, tiling the grid in row-major order.
+    """
+    h, w = root_shape(H, W, patch_sides_ratio)
+    return [(r, c, r + h, c + w) for r in range(0, H, h) for c in range(0, W, w)]
+
+
+# ---------------------------------------------------------------------------
 # Shared recursive builder
 # ---------------------------------------------------------------------------
 

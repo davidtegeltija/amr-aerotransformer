@@ -91,8 +91,9 @@ class RefinementCriteria:
     variance_threshold:  Optional[float] = None
     entropy_threshold:   Optional[float] = None
 
-    # When set, create a uniform grid with square cells of this size
-    uniform_cell_size: Optional[int] = None
+    # Patch height / width, a power of two.
+    # None keeps the whole grid as the one root
+    patch_sides_ratio: Optional[float] = None
 
     def scale(self, factor: float) -> "RefinementCriteria":
         """
@@ -116,7 +117,7 @@ class RefinementCriteria:
             variance_threshold=       _s(self.variance_threshold),
             entropy_threshold=        _s(self.entropy_threshold),
 
-            uniform_cell_size=        self.uniform_cell_size,
+            patch_sides_ratio=        self.patch_sides_ratio,
         )
  
     def geometry_kwargs(self) -> Dict:
@@ -199,17 +200,11 @@ class RefinementCriteria:
 # Available RefinementCriteria
 # ---------------------------------------------------------------------------
 
-# 128 tokens of 16x16 cells
-UNIFORM_128 = RefinementCriteria(uniform_cell_size=16)
-
-# 512 tokens of 8x8 cells
-UNIFORM_512 = RefinementCriteria(uniform_cell_size=8)
-
-# 2048 tokens of 4x4 cells
-UNIFORM_2048 = RefinementCriteria(uniform_cell_size=4)
-
-# 8192 tokens of 2x2 cells
-UNIFORM_8192 = RefinementCriteria(uniform_cell_size=2)
+# Name no metric, so nothing subdivides past min_depth. Set min_depth == max_depth
+# and the mesh is uniform (e.g. UNIFORM_1x1 with 8 / 8: 512 8x8 cells)
+UNIFORM     = RefinementCriteria()                       # 2:1 cells, e.g. 8x4
+UNIFORM_1x1 = RefinementCriteria(patch_sides_ratio=1.0)  # square cells, e.g. 8x8
+UNIFORM_1x2 = RefinementCriteria(patch_sides_ratio=0.5)  # 1:2 cells, e.g. 4x8
 
 # higher threshold = fewer patches
 # lower threshold  = more patches
@@ -276,10 +271,9 @@ GEOMETRY_WALL_CRITERIA = RefinementCriteria(
 
 
 CRITERIA_REGISTRY: Dict[str, RefinementCriteria] = {
-    "UNIFORM_128":                  UNIFORM_128,
-    "UNIFORM_512":                  UNIFORM_512,
-    "UNIFORM_2048":                 UNIFORM_2048,
-    "UNIFORM_8192":                 UNIFORM_8192,
+    "UNIFORM":                      UNIFORM,
+    "UNIFORM_1x1":                  UNIFORM_1x1,
+    "UNIFORM_1x2":                  UNIFORM_1x2,
     "AERODYNAMIC_CRITERIA_2":       AERODYNAMIC_CRITERIA_2,
     "GEOMETRY_BALANCED_CRITERIA":   GEOMETRY_BALANCED_CRITERIA,
     "GEOMETRY_BALANCED_LIGHT":      GEOMETRY_BALANCED_LIGHT,
