@@ -37,7 +37,7 @@ def build_dataset(args: Dict) -> Tuple[Dataset, str]:
 
     if dataset_type == "cavity_dataset" and input_file is not None:
         print(f"Using cavity next-step data from {input_file}")
-        return CavityDataset(input_path=input_file), dataset_type
+        return CavityDataset(input_path=input_file, predict_residual=True), dataset_type
 
     if dataset_type == "synthetic_dataset" or input_file is None:
         print("No input and target data provided -> using synthetic dataset.")

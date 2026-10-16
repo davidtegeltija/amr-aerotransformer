@@ -5,4 +5,5 @@ val_split: 0.2                               # Fraction of *cases* held out for 
 seed: 42                                     # RNG seed for the case-disjoint train/val split
 
 # Next-step (t -> t+1) cavity-flow training.
-# input = (u_t, v_t) + broadcast physics channels, target = (u_{t+1}, v_{t+1}).
+# Input = (u_t, v_t) + broadcast physics channels
+# Target = the residual (u_{t+1} - u_t, v_{t+1} - v_t)

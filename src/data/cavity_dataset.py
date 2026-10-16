@@ -63,10 +63,6 @@ class CavityDataset(Dataset):
             physics channel to zero mean / unit variance using statistics
             computed over the dataset. Stats are exposed for inversion via
             :meth:`denormalize_target`.
-        max_frames_per_case: Cap on the number of timesteps read from any single
-            case, to stop a very long simulation from dominating the pair count
-            (one cavity case has ~1000 steps). Defaults to 200; pass ``None`` to
-            read every frame.
 
     Attributes:
         H, W: Spatial grid size.
@@ -81,7 +77,6 @@ class CavityDataset(Dataset):
         param_keys: Sequence[str] = DEFAULT_PARAM_KEYS,
         predict_residual: bool = False,
         normalize: bool = True,
-        max_frames_per_case: Optional[int] = 200,
     ):
         path_input = Path(input_path)
         if not path_input.exists():
@@ -120,8 +115,6 @@ class CavityDataset(Dataset):
             v = np.load(cdir / "v.npy").astype(np.float32)
             if u.shape != v.shape or u.ndim != 3:
                 raise ValueError(f"{cdir}: expected matching [T, H, W] u/v, got {u.shape} and {v.shape}")
-            if max_frames_per_case is not None:
-                u, v = u[:max_frames_per_case], v[:max_frames_per_case]
 
             frames = np.stack([u, v], axis=-1)   # [T, H, W, 2]
             T, h, w, _ = frames.shape

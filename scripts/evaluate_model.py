@@ -14,6 +14,7 @@ from src.data.split import test_row_indices
 from src.models.amr_model import AMRTransformer
 from src.models.vit_model import ViT
 from src.evaluation.evaluate import evaluate_aero_coefficients, evaluate_error_rate
+from src.evaluation.evaluate_timestep import evaluate_next_timestep
 from src.inference.predict import resolve_mesh_source, predict_single_amr, predict_single_vit
 from src.utils.config import load_config, resolve_depth_bounds
 from src.utils.checkpoint import build_model_from_checkpoint
@@ -103,15 +104,19 @@ if __name__ == "__main__":
     
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        # --- Prediction ---
-        metrics_l2 = evaluate_error_rate(model, args, dataset, test_idx, "l2", mesh_source)
-        metrics_cae = evaluate_error_rate(model, args, dataset, test_idx, "mae", mesh_source)
+        if dataset_type == "cavity_dataset":
+            # --- Next timestep, rebuilt from the predicted residual ---
+            metrics_next_timestep = evaluate_next_timestep(model, args, dataset, test_idx, mesh_source)
+        else:
+            # --- Prediction ---
+            metrics_l2 = evaluate_error_rate(model, args, dataset, test_idx, "l2", mesh_source)
+            metrics_cae = evaluate_error_rate(model, args, dataset, test_idx, "mae", mesh_source)
 
-        # --- Aero Coefficients ---
-        index_array = np.load(args["index_file"])
-        geometry_array = np.load("/mnt/data/tegeltija/origingeom.npy", mmap_mode="r")
+            # --- Aero Coefficients ---
+            index_array = np.load(args["index_file"])
+            geometry_array = np.load("/mnt/data/tegeltija/origingeom.npy", mmap_mode="r")
 
-        metrics_coef = evaluate_aero_coefficients(model, args, dataset, test_idx, index_array, geometry_array, mesh_source)
+            metrics_coef = evaluate_aero_coefficients(model, args, dataset, test_idx, index_array, geometry_array, mesh_source)
 
     print(buffer.getvalue(), end="")
 
