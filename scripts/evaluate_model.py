@@ -9,12 +9,12 @@ import numpy as np
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.data.dataset_factory import build_dataset
+from src.data.dataset_factory import TIMESTEP_DATASETS, build_dataset
 from src.data.split import test_row_indices
 from src.models.amr_model import AMRTransformer
 from src.models.vit_model import ViT
 from src.evaluation.evaluate import evaluate_aero_coefficients, evaluate_error_rate
-from src.evaluation.evaluate_timestep import evaluate_next_timestep
+from src.evaluation.evaluate_autoregressive import evaluate_next_timestep
 from src.inference.predict import resolve_mesh_source, predict_single_amr, predict_single_vit
 from src.utils.config import load_config, resolve_depth_bounds
 from src.utils.checkpoint import build_model_from_checkpoint
@@ -104,7 +104,7 @@ if __name__ == "__main__":
     
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        if dataset_type == "cavity_dataset":
+        if dataset_type in TIMESTEP_DATASETS:
             # --- Next timestep, rebuilt from the predicted residual ---
             metrics_next_timestep = evaluate_next_timestep(model, args, dataset, test_idx, mesh_source)
         else:

@@ -1,0 +1,9 @@
+# ---- Data ----
+dataset: tube_dataset                        # wing_dataset | cavity_dataset | dam_dataset | cylinder_dataset | tube_dataset
+input_file: "/mnt/data/tegeltija/tube"       # Folder holding the group sub-folders (bc, geo, prop)
+val_split: 0.2                               # Fraction of *cases* held out for validation
+seed: 42                                     # RNG seed for the case-disjoint train/val split
+
+# Next-step (t -> t+1) tube-flow training.
+# Input = (u_t, v_t) + 5 broadcast physics channels
+# Target = the residual (u_{t+1} - u_t, v_{t+1} - v_t)

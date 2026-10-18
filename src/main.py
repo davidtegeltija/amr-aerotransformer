@@ -15,7 +15,7 @@ from src.amr.refinement_criteria import CRITERIA_REGISTRY
 from src.amr.oracle_depth import calibrate_global_tolerance
 from src.amr.quadtree import token_feature_width
 from src.data.collate_fn import DeterministicCollateFn, LearnedCollateFn, ScorerCollateFn, VitCollateFn
-from src.data.dataset_factory import build_dataset
+from src.data.dataset_factory import TIMESTEP_DATASETS, build_dataset
 from src.data.split import split_by_group_id
 from src.models.amr_model import AMRTransformer
 from src.models.refinement_net import RefinementNet
@@ -231,7 +231,7 @@ def main(args=None):
         # train and val, so val_loss measures interpolation, not generalization.
         train_dataset, val_dataset, _ = split_by_group_id(dataset, dataset.geometry_ids(), args["val_split"], seed, "Geometry")
 
-    elif dataset_type == "cavity_dataset":
+    elif dataset_type in TIMESTEP_DATASETS:
         # Split by case, not by pair. Consecutive frames of one simulation are
         # highly correlated; a pair-level split leaks a case into both train and
         # val, so val_loss would measure interpolation, not generalization.

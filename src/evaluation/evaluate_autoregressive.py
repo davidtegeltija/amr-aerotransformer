@@ -1,6 +1,6 @@
 """
 ========================================================================
-Next-frame evaluation for the time-stepping (cavity) data.
+Next-frame evaluation for the time-stepping (cavity, dam, cylinder, tube) data.
 ========================================================================
 
 Scores the rebuilt next frame in physical units with the per-sample metrics of
@@ -16,7 +16,7 @@ import torch
 from tqdm import tqdm
 
 from src.inference.predict import predict_single_amr, predict_single_vit, resolve_mesh_source
-from src.inference.predict_timestep import predict_next_timestep
+from src.inference.predict_autoregressive import predict_next_timestep
 from src.models.amr_model import AMRTransformer
 from src.models.vit_model import ViT
 
@@ -59,7 +59,7 @@ def evaluate_next_timestep(model, args, dataset, sample_indices, mesh_source=Non
         model: The loaded model itself, already restored from its checkpoint.
         args: Merged config, passed on to the AMR inference path for its mesh
             settings. Unused for a ``ViT``.
-        dataset: The full ``CavityDataset``, before splitting.
+        dataset: The full next-step dataset (cavity, dam, cylinder or tube), before splitting.
         sample_indices: Rows to evaluate (typically the held-out test split).
         mesh_source: The (refinement_criteria, scorer) pair, exactly as in
             ``evaluate_error_rate``.

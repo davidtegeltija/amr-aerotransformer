@@ -67,7 +67,14 @@ def load_config(path: str, data_path: str) -> Dict:
         "vit",                        # dense ViT baseline, no quadtree
     )
 
-    DATASET_OPTIONS = ("wing_dataset", "cavity_dataset", "synthetic_dataset")
+    DATASET_OPTIONS = (
+        "wing_dataset",
+        "cavity_dataset",
+        "dam_dataset",
+        "cylinder_dataset",
+        "tube_dataset",
+        "synthetic_dataset"
+    )
 
     model_trained = cfg.get("model_trained")
     if model_trained not in MODEL_TRAINED_OPTIONS:
@@ -81,7 +88,7 @@ def load_config(path: str, data_path: str) -> Dict:
     if refinement_criteria is not None and refinement_criteria not in CRITERIA_REGISTRY:
         raise SystemExit(f"Invalid refinement_criteria {refinement_criteria!r} in {path}.\nValid options are: {', '.join(sorted(CRITERIA_REGISTRY))}")
 
-    # Null input_file selects the synthetic dataset; wing needs three arrays, cavity one root.
+    # Null input_file selects the synthetic dataset; wing needs three arrays, the next-step datasets one root.
     if cfg.get("input_file") is not None:
         path_keys = ("input_file", "target_file", "index_file") if dataset_type == "wing_dataset" else ("input_file",)
         for key in path_keys:

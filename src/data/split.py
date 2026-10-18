@@ -3,6 +3,8 @@ from typing import List, Tuple
 import numpy as np
 from torch.utils.data import Dataset, Subset
 
+from src.data.dataset_factory import TIMESTEP_DATASETS
+
 
 def split_by_group_id(dataset: Dataset, group_ids, val_split: float, seed: int, group_name: str):
     """Split a dataset into disjoint train/val/test subsets by group id (geometry or case)."""
@@ -93,14 +95,14 @@ def test_row_indices(dataset, dataset_type: str, val_split: float, seed: int) ->
 
     Args:
         dataset      : the full dataset, before any splitting
-        dataset_type : the config's 'dataset' key ('wing_dataset' or 'cavity_dataset'),
-                       which decides whether rows group by geometry or by case
+        dataset_type : the config's 'dataset' key, which decides whether rows
+                       group by geometry (wing) or by case (TIMESTEP_DATASETS)
         val_split    : the config's val_split, so the split matches the training run
         seed         : the config's seed, likewise
 
     Returns:
         Row indices of the test split, i.e. rows the model has never seen.
     """
-    group_ids = dataset.case_ids() if dataset_type == "cavity_dataset" else dataset.geometry_ids()
+    group_ids = dataset.case_ids() if dataset_type in TIMESTEP_DATASETS else dataset.geometry_ids()
     _, _, test_idx = geometry_disjoint_split(group_ids, val_split, seed)
     return test_idx

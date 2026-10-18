@@ -2,8 +2,17 @@ from typing import Dict, Tuple
 from torch.utils.data import Dataset
 
 from src.data.wing_dataset import WingDataset
-from src.data.cavity_dataset import CavityDataset
+from src.data.autoregressive_dataset import CavityDataset, CylinderDataset, DamDataset, TubeDataset
 from src.data.synthetic_dataset import SyntheticDataset
+
+# Next-step datasets: rows are (t, t+k) frame pairs grouped by simulation case,
+# split by case and scored on the rebuilt next frame.
+TIMESTEP_DATASETS = {
+    "cavity_dataset": CavityDataset,
+    "dam_dataset": DamDataset,
+    "cylinder_dataset": CylinderDataset,
+    "tube_dataset": TubeDataset,
+}
 
 
 def build_dataset(args: Dict) -> Tuple[Dataset, str]:
@@ -35,9 +44,9 @@ def build_dataset(args: Dict) -> Tuple[Dataset, str]:
         print(f"Using wing data from {input_file}")
         return WingDataset(input_path=input_file, target_path=args["target_file"], index_path=args["index_file"]), dataset_type
 
-    if dataset_type == "cavity_dataset" and input_file is not None:
-        print(f"Using cavity next-step data from {input_file}")
-        return CavityDataset(input_path=input_file, predict_residual=True), dataset_type
+    if dataset_type in TIMESTEP_DATASETS and input_file is not None:
+        print(f"Using {dataset_type} next-step data from {input_file}")
+        return TIMESTEP_DATASETS[dataset_type](input_path=input_file, predict_residual=True), dataset_type
 
     if dataset_type == "synthetic_dataset" or input_file is None:
         print("No input and target data provided -> using synthetic dataset.")
@@ -45,5 +54,5 @@ def build_dataset(args: Dict) -> Tuple[Dataset, str]:
 
     raise ValueError(
         f"Unknown dataset {dataset_type!r}. Valid options are: "
-        "wing_dataset, cavity_dataset, synthetic_dataset."
+        "wing_dataset, cavity_dataset, dam_dataset, cylinder_dataset, tube_dataset, synthetic_dataset."
     )

@@ -1,9 +1,9 @@
 """
 ========================================================================
-Next-frame rebuild for the time-stepping (cavity) data.
+Next-frame rebuild for the time-stepping (cavity, dam, cylinder, tube) data.
 ========================================================================
 
-A cavity model predicts the normalised residual ``u_{t+1} - u_t``. Its error is
+A next-step model predicts the normalised residual ``u_{t+1} - u_t``. Its error is
 only comparable to the CFDBench / AMR-Transformer numbers once the next frame is
 rebuilt in physical units::
 
@@ -12,10 +12,10 @@ rebuilt in physical units::
 
 import numpy as np
 
-from src.data.cavity_dataset import CavityDataset
+from src.data.autoregressive_dataset import AutoregressiveDataset
 
 
-def current_timestep(dataset: CavityDataset, input_grid: np.ndarray) -> np.ndarray:
+def current_timestep(dataset: AutoregressiveDataset, input_grid: np.ndarray) -> np.ndarray:
     """Physical ``(u_t, v_t)`` of a sample.
 
     Args:
@@ -28,7 +28,7 @@ def current_timestep(dataset: CavityDataset, input_grid: np.ndarray) -> np.ndarr
     return input_grid[..., :2] * dataset.uv_std + dataset.uv_mean
 
 
-def rebuild_next_timestep(dataset: CavityDataset, input_grid: np.ndarray, output: np.ndarray) -> np.ndarray:
+def rebuild_next_timestep(dataset: AutoregressiveDataset, input_grid: np.ndarray, output: np.ndarray) -> np.ndarray:
     """Turn a field in normalised target units into the physical next frame.
 
     Args:
@@ -46,7 +46,7 @@ def rebuild_next_timestep(dataset: CavityDataset, input_grid: np.ndarray, output
     return current_timestep(dataset, input_grid) + step
 
 
-def predict_next_timestep(result: dict, dataset: CavityDataset) -> dict:
+def predict_next_timestep(result: dict, dataset: AutoregressiveDataset) -> dict:
     """Add the physical current, true next and predicted next frame to a prediction.
 
     Args:
