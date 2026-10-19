@@ -201,8 +201,9 @@ class RefinementCriteria:
 # ---------------------------------------------------------------------------
 
 # Name no metric, so nothing subdivides past min_depth. Set min_depth == max_depth
-# and the mesh is uniform (e.g. UNIFORM_1x1 with 8 / 8: 512 8x8 cells)
-UNIFORM     = RefinementCriteria()                       # 2:1 cells, e.g. 8x4
+# and the mesh is uniform (e.g. UNIFORM_1x1 with 8 / 8 = 512 8x8 cells)
+UNIFORM     = RefinementCriteria()                       # cells take the grid's ratio (2:1 on the wing grid)
+UNIFORM_2x1 = RefinementCriteria(patch_sides_ratio=2.0)  # 2:1 cells, e.g. 8x4
 UNIFORM_1x1 = RefinementCriteria(patch_sides_ratio=1.0)  # square cells, e.g. 8x8
 UNIFORM_1x2 = RefinementCriteria(patch_sides_ratio=0.5)  # 1:2 cells, e.g. 4x8
 
@@ -272,6 +273,7 @@ GEOMETRY_WALL_CRITERIA = RefinementCriteria(
 
 CRITERIA_REGISTRY: Dict[str, RefinementCriteria] = {
     "UNIFORM":                      UNIFORM,
+    "UNIFORM_2x1":                  UNIFORM_2x1,
     "UNIFORM_1x1":                  UNIFORM_1x1,
     "UNIFORM_1x2":                  UNIFORM_1x2,
     "AERODYNAMIC_CRITERIA_2":       AERODYNAMIC_CRITERIA_2,
