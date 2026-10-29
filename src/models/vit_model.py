@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.models.transformer import TransformerBlock
 
@@ -24,13 +25,13 @@ def posemb_sincos_2d(h, w, dim, temperature: int = 10000, dtype=torch.float32):
 class ViT(nn.Module):
     """Dense ViT baseline: fixed-size patches over the full [B, C, H, W] grid.
 
-    The counterpart of ``AMRTransformer`` (src/model/amr_model.py) and named to
+    The counterpart of ``AMRTransformer`` (src/models/amr_model.py) and named to
     match it: both wrap the same ``TransformerBlock`` stack, so the architecture
     keys (``input_channels``, ``output_channels``, ``d_model``, ``n_layers``,
     ``n_heads``, ``d_ff``, ``dropout``) mean the same thing in both and a config
     can be compared key-by-key across the two branches. What differs is the
     tokenization: a uniform patch grid here, adaptive quadtree leaves there —
-    hence the three extra arguments below that have no AMR counterpart.
+    hence the four extra arguments below that have no AMR counterpart.
 
     Args:
         image_size: Grid size (H, W); an int is broadcast to a square.
@@ -47,6 +48,9 @@ class ViT(nn.Module):
         dropout: Dropout probability.
         pos_embedding: ``'sincos'`` for fixed 2D sin/cos features (requires
             ``d_model`` divisible by 4) or ``'trainable'`` for a learned table.
+        input_pool: Block-mean size applied to the input before patchification.
+            1 (off) or the square patch size, giving one mean per patch per channel.
+            Keep the default at 1 since older checkpoints don't record it.
     """
 
     def __init__(self,
@@ -60,6 +64,7 @@ class ViT(nn.Module):
                  d_ff: int = 1024,
                  dropout: float = 0.0,
                  pos_embedding: str = 'sincos',
+                 input_pool: int = 1,
                  ):
 
         super().__init__()
@@ -67,6 +72,8 @@ class ViT(nn.Module):
         patch_height, patch_width = pair(patch_size)
 
         assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+        assert input_pool == 1 or input_pool == patch_height == patch_width, 'input_pool must be 1 or equal to the (square) patch size.'
+        self.input_pool = input_pool
 
         patch_dim = input_channels * patch_height * patch_width
 
@@ -74,7 +81,7 @@ class ViT(nn.Module):
         self.nh, self.nw = image_height // patch_height, image_width // patch_width
 
         # Constructor arguments, recorded for build_model_from_checkpoint (see
-        # src/utils/model_utils.py). Keep in sync with the signature above. The
+        # src/utils/checkpoint.py). Keep in sync with the signature above. The
         # sizes are stored already normalized by pair(), which round-trips
         # unchanged through pair() when the model is rebuilt.
         self.init_kwargs = dict(
@@ -88,6 +95,7 @@ class ViT(nn.Module):
             d_ff=d_ff,
             dropout=dropout,
             pos_embedding=pos_embedding,
+            input_pool=input_pool,
         )
 
         self.to_patch_embedding = nn.Sequential(
@@ -117,8 +125,18 @@ class ViT(nn.Module):
         self.last_layer = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, self.ph * self.pw * output_channels))
         self.output_channels = output_channels
 
+    # -----------------------------------------------------------------------
+    # Input-budget ablation (input_pool > 1)
+    # -----------------------------------------------------------------------
+    # AMR tokens carry only the per-channel mean over their leaf, while a ViT
+    # patch sees every pixel. Replacing the input by its input_pool block means
+    # reproduces that information loss on the ViT, with everything else fixed.
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         B, C, H, W = img.shape
+        if self.input_pool > 1:
+            p = self.input_pool
+            img = F.avg_pool2d(img, p).repeat_interleave(p, -2).repeat_interleave(p, -1)
+
         # Patchify -> [B, N, patch_dim]
         img = img.reshape(B, C, self.nh, self.ph, self.nw, self.pw).permute(0, 2, 4, 3, 5, 1).reshape(B, self.nh * self.nw, self.ph * self.pw * C)
 
@@ -126,7 +144,7 @@ class ViT(nn.Module):
         fx = fx + self.pos_embedding                                 # [B, N, D]
 
         # All sequences share the same length N, so plain batched attention
-        # (no mask) replaces the packed layout the AMR transformer needs for
+        # (no mask) replaces the padding mask the AMR transformer needs for
         # its variable-length sequences.
         for block in self.blocks:
             fx = block(fx)                                           # [B, N, D]

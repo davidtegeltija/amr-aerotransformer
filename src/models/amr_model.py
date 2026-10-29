@@ -7,7 +7,7 @@ grid -> AMR tokens build from quadtree -> transformer
 ========================================================================
 
 A transformer solver over packed, variable-length adaptive-mesh token sequences.
-The model turns a dense geometry grid into adaptive-mesh tokens and predicts a
+The pipeline turns a dense geometry grid into adaptive-mesh tokens and predicts a
 per-token flow field with a transformer. The mesh is built and tokenized upstream, 
 in the DataLoader collate functions, so this module only runs the solver.
 There are two ways to get the adaptive-mesh:
@@ -42,12 +42,12 @@ oracle (see src/amr/oracle_depth.py and train_scorer_supervised); it is not part
 of this model.
 
 Architecture:
-    token_embedding: MLP(physical_dim -> d_model) projecting per-token physical features into the latent space. `physical_dim = token_dim - 3`.
+    token_embedding: LayerNorm -> Linear(physical_dim -> d_model) -> LayerNorm projecting per-token physical features into the latent space. `physical_dim = token_dim - 3`.
     pos_embedding:   Fixed log-spaced Fourier features over the 3 positional meta channels (x_c, y_c, cell_level), followed by an MLP into d_model. One set of frequencies, scaled per channel by POS_FREQ_SCALE, since x/y and cell_level are not on the same scale.
     input_norm:      LayerNorm applied to the sum of token + positional embeddings.
-    encoder:         Stack of pre-norm TransformerBlock layers (src/model/transformer.py, shared with the ViT baseline).
+    encoder:         Stack of pre-norm TransformerBlock layers (src/models/transformer.py, shared with the ViT baseline).
     final_norm:      LayerNorm before the prediction head.
-    prediction_head: MLP(d_model -> output_channels) producing per-token predictions.
+    prediction_head: Linear(d_model -> output_channels) producing per-token predictions.
                      With affine_output > 0 it instead emits
                      output_channels*basis_size(affine_output) numbers per token,
                      reshaped to [N, C, K] = (value, gx, gy) at order 1 and
@@ -208,7 +208,7 @@ class AMRTransformer(nn.Module):
         # Every constructor argument, recorded so save_checkpoint can store it and
         # build_model_from_checkpoint can rebuild this exact architecture from the
         # checkpoint alone. Keep in sync with the signature above — the builder
-        # raises if an argument is missing here rather than silently defaulting it.
+        # silently fills an argument missing here with its default.
         self.init_kwargs = dict(
             input_channels=input_channels,
             output_channels=output_channels,
@@ -226,8 +226,7 @@ class AMRTransformer(nn.Module):
         self.token_embedding = nn.Sequential(
             nn.LayerNorm(input_channels),
             nn.Linear(input_channels, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
         )
 
         # --- Positional Embedding layer ---
@@ -268,25 +267,10 @@ class AMRTransformer(nn.Module):
 
         # --- Prediction head ---
         # One coefficient per basis function per channel: the value alone at order 0,
-        # (value, gx, gy) at order 1, plus (gxx, gxy, gyy) at order 2. All but the
-        # value start near 0 under trunc_normal init, so the model begins as
-        # ~constant-per-cell and learns the shape terms from the dense per-pixel loss.
+        # (value, gx, gy) at order 1, plus (gxx, gxy, gyy) at order 2. The shape
+        # terms are learned from the dense per-pixel loss.
         head_out = output_channels * self.basis_size
-        self.prediction_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, head_out),
-        )
-
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+        self.prediction_head = nn.Linear(d_model, head_out)
 
     def embedd_position(self, pos: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
         """Encode positional meta channels as concatenated sin/cos Fourier features.
