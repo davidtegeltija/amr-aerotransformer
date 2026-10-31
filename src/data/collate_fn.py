@@ -184,6 +184,35 @@ def _stack_affine_stats(per_sample: List[Dict[str, np.ndarray]]) -> Dict[str, to
             for key in per_sample[0]}
 
 
+# ---------------------------------------------------------------------------
+# Mesh perturbation (train-time noise on the scorer's depth map)
+# ---------------------------------------------------------------------------
+
+# Side of the square noise blocks, in pixels. Per-pixel noise would average out
+# inside a cell, so whole blocks are shifted to move regions a level up or down
+PERTURBATION_BLOCK = 32
+
+
+def perturb_depth_map(depth_map: np.ndarray, amplitude: float,
+                      rng: Optional[np.random.Generator] = None) -> np.ndarray:
+    """Add blockwise uniform noise in ``[-amplitude, amplitude]`` to a depth map.
+
+    Args:
+        depth_map: ``[H, W]`` scorer depth map.
+        amplitude: Half-width of the uniform noise, in depth levels.
+        rng: Noise generator. None draws a fresh one, so DataLoader workers
+            never share a noise stream.
+
+    Returns:
+        ``[H, W]`` float64 perturbed depth map.
+    """
+    rng = rng or np.random.default_rng()
+    H, W = depth_map.shape
+    coarse = rng.uniform(-amplitude, amplitude, size=(-(-H // PERTURBATION_BLOCK), -(-W // PERTURBATION_BLOCK)))
+    noise = coarse.repeat(PERTURBATION_BLOCK, axis=0).repeat(PERTURBATION_BLOCK, axis=1)[:H, :W]
+    return depth_map.astype(np.float64) + noise
+
+
 class DeterministicCollateFn:
     """
     Picklable collate callable for DataLoader with num_workers > 0.
@@ -393,11 +422,12 @@ class LearnedCollateFn:
     ``RefinementNet`` scores the grid, and ``build_depth_guided_mesh`` turns that
     predicted depth map into leaves.
 
-    The scorer is frozen, so the mesh (token array + per-token targets) is a
-    deterministic function of the sample: the per-index cache fills on the first
-    epoch and every later epoch is a lookup (persists only with num_workers=0;
-    workers get their own copy, discarded after each batch). The scorer runs on
-    CPU here — the whole point is to keep this work off the training step.
+    The scorer is frozen, so without ``mesh_perturbation`` the mesh (token array +
+    per-token targets) is a deterministic function of the sample: the per-index
+    cache fills on the first epoch and every later epoch is a lookup (persists only
+    with num_workers=0). With ``mesh_perturbation``, only the scorer's depth map is
+    cached and the mesh is rebuilt on every call. The scorer runs on CPU here — the
+    whole point is to keep this work off the training step.
 
     Batch dict keys (identical to ``DeterministicCollateFn``):
         packed_tokens     : [total_N, C+3]             concatenated tokenized inputs
@@ -418,10 +448,13 @@ class LearnedCollateFn:
         dense_loss: True to also build the per-leaf statistics the closed-form
             dense loss needs. False leaves them out, and the model is scored on
             ``packed_targets`` instead.
+        mesh_perturbation: Amplitude of the ``perturb_depth_map`` noise added before every
+            mesh build, so each epoch sees a new mesh. 0 keeps the mesh fixed.
     """
 
     def __init__(self, scorer, min_depth: int, max_depth: int, offset: float = 0.0,
-                 affine_input: int = 0, affine_output: int = 0, dense_loss: bool = False):
+                 affine_input: int = 0, affine_output: int = 0, dense_loss: bool = False,
+                 mesh_perturbation: float = 0.0):
         # Freeze the scorer: it only builds meshes here, it is never trained.
         self.scorer = scorer.eval().requires_grad_(False)
         self.min_depth = min_depth
@@ -430,40 +463,55 @@ class LearnedCollateFn:
         self.affine_input = affine_input
         self.affine_output = affine_output
         self.dense_loss = dense_loss
+        self.mesh_perturbation = mesh_perturbation
         # See DeterministicCollateFn._cache: same contract, and the QuadNode leaves
         # are likewise reduced to flat arrays rather than cached as objects.
         self._cache: Dict[int, tuple] = {}
+        # Under mesh_perturbation the mesh changes every call, so the depth maps are
+        # cached instead (float16, ~64 KB per row) to skip rescoring.
+        self._depth_cache: Dict[int, np.ndarray] = {}
+
+    def _tokenize(self, s: Dict[str, Any], depth_map: np.ndarray) -> tuple:
+        """Build the mesh from a depth map and reduce it to the cached tuple."""
+        input = np.asarray(s["input"], dtype=np.float32)   # [H, W, C]
+        H, W, C = input.shape
+        leaves = build_depth_guided_mesh(
+            data=input,
+            depth_map=depth_map,
+            max_depth=self.max_depth,
+            min_depth=self.min_depth,
+            offset=self.offset,
+            patch_sides_ratio=self.scorer.patch_sides_ratio,
+        )
+        target = np.asarray(s["target"], dtype=np.float32)
+        token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
+        token_target = _per_token_targets(target, leaves)
+        stats = (_affine_leaf_stats(target, leaves, H, W, self.affine_output)
+                 if self.dense_loss else None)
+        return token_array, len(leaves), token_target, stats
 
     @torch.no_grad()
     def __call__(self, samples: List[Dict[str, Any]]) -> Dict:
-        # Score every uncached sample in one batched CPU forward, then build the
+        # Score every unseen sample in one batched CPU forward, then build the
         # per-sample mesh from its predicted depth map.
-        todo = [s for s in samples if s["index"] not in self._cache]
+        todo = [s for s in samples if s["index"] not in self._cache and s["index"] not in self._depth_cache]
         if todo:
             grids = torch.stack(
                 [torch.from_numpy(np.asarray(s["input"], dtype=np.float32)) for s in todo])
             depth_maps = self.scorer(grids).squeeze(1).numpy()   # [len(todo), H, W]
             for s, depth_map in zip(todo, depth_maps):
-                input = np.asarray(s["input"], dtype=np.float32)   # [H, W, C]
-                H, W, C = input.shape
-                leaves = build_depth_guided_mesh(
-                    data=input,
-                    depth_map=depth_map,
-                    max_depth=self.max_depth,
-                    min_depth=self.min_depth,
-                    offset=self.offset,
-                    patch_sides_ratio=self.scorer.patch_sides_ratio,
-                )
-                target = np.asarray(s["target"], dtype=np.float32)
-                token_array = nodes_to_token_array(leaves, H, W, C, self.affine_input)
-                token_target = _per_token_targets(target, leaves)
-                stats = (_affine_leaf_stats(target, leaves, H, W, self.affine_output)
-                         if self.dense_loss else None)
-                self._cache[s["index"]] = (token_array, len(leaves), token_target, stats)
+                if self.mesh_perturbation:
+                    self._depth_cache[s["index"]] = depth_map.astype(np.float16)
+                else:
+                    self._cache[s["index"]] = self._tokenize(s, depth_map)
 
         all_tokens, all_targets, tokens_per_sample, all_stats = [], [], [], []
         for s in samples:
-            token_array, N, token_target, stats = self._cache[s["index"]]
+            if self.mesh_perturbation:
+                depth_map = perturb_depth_map(self._depth_cache[s["index"]], self.mesh_perturbation)
+                token_array, N, token_target, stats = self._tokenize(s, depth_map)
+            else:
+                token_array, N, token_target, stats = self._cache[s["index"]]
             all_tokens.append(torch.from_numpy(token_array))
             all_targets.append(torch.from_numpy(token_target))
             tokens_per_sample.append(N)

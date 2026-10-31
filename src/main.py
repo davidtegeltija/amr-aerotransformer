@@ -26,7 +26,7 @@ from src.utils.checkpoint import build_model_from_checkpoint
 from src.utils.plot import plot_loss_curves
 
 
-def build_collate_fn(args: Dict, train_dataset: Dataset):
+def build_collate_fn(args: Dict, train_dataset: Dataset, mesh_perturbation: float = 0.0):
     """Build the collate that supplies each training loop with its batch layout."""
     model_trained = args["model_trained"]
 
@@ -80,7 +80,8 @@ def build_collate_fn(args: Dict, train_dataset: Dataset):
         scorer = build_model_from_checkpoint(RefinementNet, checkpoint_file)
         return LearnedCollateFn(scorer, min_depth=min_depth, max_depth=max_depth,
                                 offset=args["offset"], affine_input=args["affine_input"],
-                                affine_output=args["affine_output"], dense_loss=dense_loss)
+                                affine_output=args["affine_output"], dense_loss=dense_loss,
+                                mesh_perturbation=mesh_perturbation)
 
     raise SystemExit(f"No collate defined for model_trained {model_trained!r}")
 
@@ -280,12 +281,14 @@ def main(args=None):
             )
             print(f"Model parameters: {model.count_parameters():,}")
 
-        collate_fn = build_collate_fn(args, train_dataset)
+        collate_fn = build_collate_fn(args, train_dataset, mesh_perturbation=args.get("mesh_perturbation", 0.0))
+        # Only the training meshes are perturbed; validation sees the clean mesh, as at test time
+        val_collate_fn = build_collate_fn(args, train_dataset) if args.get("mesh_perturbation") else collate_fn
 
         # Train
         print("\n======== Training ========")
         train_loader = make_loader(train_dataset, args["batch_size"], True, args["num_workers"], collate_fn, device)
-        val_loader = make_loader(val_dataset, args["batch_size"], False, args["num_workers"], collate_fn, device)
+        val_loader = make_loader(val_dataset, args["batch_size"], False, args["num_workers"], val_collate_fn, device)
 
         train_loss_history, val_loss_history = train_model(args, model, train_loader, val_loader, device, writer, save_path)
 
