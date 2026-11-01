@@ -29,7 +29,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.amr.refinement_criteria import RefinementCriteria
-from src.amr.quadtree import QuadNode, build_tree, collect_leaves, root_bboxes
+from src.amr.quadtree import QuadNode, build_tree, cell_affine_features, collect_leaves, root_bboxes
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,8 @@ def build_adaptive_mesh(
 ) -> List[QuadNode]:
     """
     Build an adaptive mesh over a single physical field.
+
+    Criteria with ``relative_thresholds=True`` are handed to ``build_levelwise_mesh``.
 
     Parameters
     ----------
@@ -86,6 +88,9 @@ def build_adaptive_mesh(
     data = data.astype(np.float64)
     H, W, C = data.shape
 
+    if refinement_criteria.relative_thresholds:
+        return build_levelwise_mesh(data, refinement_criteria, max_depth=max_depth, min_depth=min_depth)
+
     # Build one quadtree per root tile. partial binds the per-build config,
     # leaving the (node) predicate build_tree expects.
     should_subdivide = partial(
@@ -100,6 +105,65 @@ def build_adaptive_mesh(
         root = QuadNode(bbox=bbox, depth=0)
         build_tree(data, root, should_subdivide)
         leaves += collect_leaves(root)
+    return leaves
+
+
+# ---------------------------------------------------------------------------
+# Level-wise builder (AMR-Transformer tokenizer)
+# ---------------------------------------------------------------------------
+
+def build_levelwise_mesh(
+    data: np.ndarray,
+    refinement_criteria: RefinementCriteria,
+    *,
+    max_depth: int,
+    min_depth: int,
+) -> List[QuadNode]:
+    """Build the mesh one depth at a time, as the AMR-Transformer tokenizer does.
+
+    At each depth every enabled metric is computed on all cells still being refined,
+    and a cell splits if any metric exceeds ``t_k`` times that metric's mean over
+    those cells. Unlike the AMR-Transformer paper, only the leaves become tokens
+    meaning subdivided cells are not stored.
+
+    Args:
+        data: ``[H, W, C]`` field.
+        refinement_criteria: Criteria whose thresholds are the factors ``t_k``.
+        max_depth: Cells at this depth never subdivide.
+        min_depth: Cells shallower than this always subdivide.
+
+    Returns:
+        Flat list of leaf nodes tiling the grid.
+    """
+    H, W, _ = data.shape
+    # All roots are the same size, so every level holds a single depth
+    level = [QuadNode(bbox=bbox, depth=0) for bbox in root_bboxes(H, W, refinement_criteria.patch_sides_ratio)]
+    leaves = []
+    for depth in range(max_depth + 1):
+        if not level:
+            break
+
+        if min_depth <= depth < max_depth:
+            for node in level:
+                node.metrics = refinement_criteria.compute_enabled_metrics(data[node.r0:node.r1, node.c0:node.c1, :3])
+            split = np.zeros(len(level), dtype=bool)
+            for name, t in refinement_criteria.threshold_checks():
+                values = np.array([node.metrics[name] for node in level])
+                split |= values > t * values.mean()
+        else:
+            # Forced: every cell splits below min_depth, none at max_depth
+            split = [depth < min_depth] * len(level)
+
+        next_level = []
+        for node, s in zip(level, split):
+            node.features = cell_affine_features(data[node.r0:node.r1, node.c0:node.c1], H, W)
+            if s:
+                # Drop zero-area children (from splitting a 1-pixel side), as build_tree does
+                next_level += [child for child in node.subdivide(depth=depth + 1) if child.area() > 0]
+            else:
+                node.is_leaf = True
+                leaves.append(node)
+        level = next_level
     return leaves
 
 
@@ -123,8 +187,8 @@ def _should_subdivide(
       * forced stop when the cell is at ``max_depth``;
       * forced split below ``min_depth``;
       * otherwise OR-logic: subdivide iff any enabled metric exceeds its
-        threshold, matching Eq. 6 of the AMR-Transformer paper. A metric is
-        disabled by setting its threshold to None in the criteria.
+        threshold. A metric is disabled by setting its threshold
+        to None in the criteria.
 
     The two depth bounds are tested *first*, so the metrics are computed only for
     the cells that actually get a vote -- those at depth ``[min_depth, max_depth)``,

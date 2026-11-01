@@ -49,6 +49,7 @@ def build_collate_fn(args: Dict, train_dataset: Dataset, mesh_perturbation: floa
             affine_input=args["affine_input"],
             affine_output=args["affine_output"],
             dense_loss=dense_loss,
+            mesh_perturbation=bool(mesh_perturbation),
         )
 
     # Learned-scorer training: oracle depth targets from a calibrated tolerance.

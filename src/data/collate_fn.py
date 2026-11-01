@@ -243,16 +243,20 @@ class DeterministicCollateFn:
         dense_loss: True to also build the per-leaf statistics the closed-form
             dense loss needs. False leaves them out, and the model is scored on
             ``packed_targets`` instead.
+        mesh_perturbation: True to build every mesh from ``refinement_criteria.perturb()``,
+            so each epoch sees a new mesh; both caches are then skipped.
     """
 
     def __init__(self, refinement_criteria: RefinementCriteria, min_depth: int, max_depth: int,
-                 affine_input: int = 0, affine_output: int = 0, dense_loss: bool = False):
+                 affine_input: int = 0, affine_output: int = 0, dense_loss: bool = False,
+                 mesh_perturbation: bool = False):
         self.refinement_criteria = refinement_criteria
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.affine_input = affine_input
         self.affine_output = affine_output
         self.dense_loss = dense_loss
+        self.mesh_perturbation = mesh_perturbation
         # Two caches, because the two halves of the work do not vary together.
         # Both only persist with num_workers=0 (workers get their own copy that is
         # discarded after each batch), and neither keeps the QuadNode leaves:
@@ -287,14 +291,15 @@ class DeterministicCollateFn:
             if not shared:
                 mesh_key = s["index"]
 
-            mesh = self._mesh_cache.get(mesh_key)
+            mesh = None if self.mesh_perturbation else self._mesh_cache.get(mesh_key)
             if mesh is None:
                 H, W, C = input.shape
                 leaves = build_adaptive_mesh(
                     input,
                     max_depth=self.max_depth,
                     min_depth=self.min_depth,
-                    refinement_criteria=self.refinement_criteria,
+                    refinement_criteria=(self.refinement_criteria.perturb() if self.mesh_perturbation
+                                         else self.refinement_criteria),
                 )
                 # Only the bboxes outlive the build. The reductions below read
                 # nothing else off a leaf, and a [N, 4] int32 row costs 16 bytes
@@ -303,10 +308,11 @@ class DeterministicCollateFn:
                 # arrays this cache removes.
                 boxes = np.array([node.bbox for node in leaves], dtype=np.int32)
                 mesh = (nodes_to_token_array(leaves, H, W, C, self.affine_input), boxes)
-                self._mesh_cache[mesh_key] = mesh
+                if not self.mesh_perturbation:
+                    self._mesh_cache[mesh_key] = mesh
             token_array, boxes = mesh
 
-            cached = self._cache.get(s["index"])
+            cached = None if self.mesh_perturbation else self._cache.get(s["index"])
             if cached is None:
                 H, W = input.shape[:2]
                 # Every row but the first of a geometry reaches here without having
@@ -316,7 +322,8 @@ class DeterministicCollateFn:
                 cached = (_per_token_targets(target, nodes),
                           _affine_leaf_stats(target, nodes, H, W, self.affine_output)
                           if self.dense_loss else None)
-                self._cache[s["index"]] = cached
+                if not self.mesh_perturbation:
+                    self._cache[s["index"]] = cached
             token_target, stats = cached
 
             if shared:

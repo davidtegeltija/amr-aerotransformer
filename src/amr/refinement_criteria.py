@@ -1,7 +1,5 @@
-from dataclasses import dataclass
-from typing import Dict, Optional
-
-from typing import Dict
+from dataclasses import dataclass, replace
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -30,7 +28,8 @@ class RefinementCriteria:
     nothing subdivides nothing and collapses to the "min_depth" mesh.
 
     OR-logic applies: a cell is subdivided if *any* enabled metric exceeds
-    its threshold.
+    its threshold. With ``relative_thresholds=True`` that threshold is t_k
+    times the metric's mean over the depth's cells.
 
     Note the metrics are evaluated on the first three input channels, which on
     the wing dataset are the (x, y, z) surface coordinates in metres -- not a
@@ -95,30 +94,44 @@ class RefinementCriteria:
     # None keeps the whole grid as the one root
     patch_sides_ratio: Optional[float] = None
 
+    # If True, each threshold is a factor t_k on the metric's mean over the cells
+    # still being refined at that depth, and build_levelwise_mesh builds the mesh
+    relative_thresholds: bool = False
+
+    # Threshold field name -> (low, high). With mesh_perturbation on, perturb() draws
+    # each threshold uniformly from its range for every training mesh
+    threshold_perturbation_ranges: Optional[Dict[str, Tuple[float, float]]] = None
+
+    def perturb(self, rng: Optional[np.random.Generator] = None) -> "RefinementCriteria":
+        """Return a copy with every threshold in ``threshold_perturbation_ranges`` drawn uniformly from its range.
+
+        The deterministic counterpart of ``perturb_depth_map`` in the learned branch.
+
+        Args:
+            rng: Noise generator. None draws a fresh one, so DataLoader workers
+                never share a noise stream.
+
+        Returns:
+            The perturbed criteria.
+        """
+        if not self.threshold_perturbation_ranges:
+            raise ValueError("mesh_perturbation needs criteria with threshold_perturbation_ranges")
+        rng = rng or np.random.default_rng()
+        thresholds = {name: rng.uniform(low, high) for name, (low, high) in self.threshold_perturbation_ranges.items()}
+        return replace(self, **thresholds)
+
     def scale(self, factor: float) -> "RefinementCriteria":
         """
         Return a new config with all enabled thresholds multiplied by factor.
  
         factor < 1.0 -> lower thresholds -> finer mesh (more tokens)
         factor > 1.0 -> higher thresholds -> coarser mesh (fewer tokens)
+
+        Every other field is copied unchanged by replace.
         """
-        def _s(v):
-            return v * factor if v is not None else None
-        return RefinementCriteria(
-            curvature_threshold=      _s(self.curvature_threshold),
-            le_te_threshold=          _s(self.le_te_threshold),
-            thickness_grad_threshold= _s(self.thickness_grad_threshold),
-            wall_distance_threshold=  _s(self.wall_distance_threshold),
-
-            grad_threshold=           _s(self.grad_threshold),
-            vorticity_threshold=      _s(self.vorticity_threshold),
-            momentum_threshold=       _s(self.momentum_threshold),
-            kh_shear_threshold=       _s(self.kh_shear_threshold),
-            variance_threshold=       _s(self.variance_threshold),
-            entropy_threshold=        _s(self.entropy_threshold),
-
-            patch_sides_ratio=        self.patch_sides_ratio,
-        )
+        thresholds = {name: value * factor for name, value in vars(self).items()
+                      if name.endswith("_threshold") and value is not None}
+        return replace(self, **thresholds)
  
     def geometry_kwargs(self) -> Dict:
         """Keyword arguments for the geometry metrics only."""
@@ -271,6 +284,35 @@ GEOMETRY_WALL_CRITERIA = RefinementCriteria(
 )
 
 
+# The AMR-Transformer paper's four N-S criteria, level-relative. The fixed
+# validation/test mesh uses t_k = 1 (split above the depth's mean), which lands near
+# the median training mesh; the range midpoints would give a much coarser one
+AMR_PAPER_CRITERIA = RefinementCriteria(
+    grad_threshold      = 1.0,
+    vorticity_threshold = 1.0,
+    momentum_threshold  = 1.0,
+    kh_shear_threshold  = 1.0,
+    relative_thresholds = True,
+    threshold_perturbation_ranges = {
+        "grad_threshold":      (0.1, 2.0),
+        "vorticity_threshold": (0.2, 4.0),
+        "momentum_threshold":  (0.5, 10.0),
+        "kh_shear_threshold":  (0.2, 4.0),
+    },
+)
+
+
+# The AMR-Transformer code's criterion. Velocity gradient only, with the t_k range from the AMR-Transformer code.
+# Validation/test use the range midpoint t_k = 0.55, which lands at the median training mesh
+AMR_GRAD_CRITERIA = RefinementCriteria(
+    grad_threshold      = 0.55,
+    relative_thresholds = True,
+    threshold_perturbation_ranges = {
+        "grad_threshold": (0.1, 1.0),
+    },
+)
+
+
 CRITERIA_REGISTRY: Dict[str, RefinementCriteria] = {
     "UNIFORM":                      UNIFORM,
     "UNIFORM_2x1":                  UNIFORM_2x1,
@@ -285,4 +327,6 @@ CRITERIA_REGISTRY: Dict[str, RefinementCriteria] = {
     "GEOMETRY_MISALIGNED_CRITERIA": GEOMETRY_MISALIGNED_CRITERIA,
     "GEOMETRY_LETE_CRITERIA":       GEOMETRY_LETE_CRITERIA,
     "GEOMETRY_WALL_CRITERIA":       GEOMETRY_WALL_CRITERIA,
+    "AMR_PAPER_CRITERIA":           AMR_PAPER_CRITERIA,
+    "AMR_GRAD_CRITERIA":            AMR_GRAD_CRITERIA,
 }
