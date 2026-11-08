@@ -19,14 +19,16 @@ Every problem is laid out as per-case folders::
         case.json   # physical parameters of the case
 
 The learning task is next-step prediction: given the flow (u, v) at frame t,
-predict the flow at frame t+k. A case with T timesteps yields T-k pairs. Physical
+predict the flow at frame t+k. A case with T timesteps yields T-k pairs, or one
+every ``FRAME_STRIDE`` frames when a subclass sets a stride. Physical
 parameters are broadcast to constant channels and appended to the input.
 
-Compared with the AMR-Transformer code (``src/dataset/`` there), three of its
+Compared with the AMR-Transformer code (``src/dataset/`` there), two of its
 steps are left out for every problem: the inlet column and wall rows padded onto
-the stored grid, the convergence cutoff that stops a case once consecutive frames
-barely change, and the fixed parameter scaling, which is replaced by a z-score
-over the dataset's own cases.
+the stored grid, and the fixed parameter scaling, which is replaced by a z-score
+over the dataset's own cases. Its convergence cutoff, which stops a case once the
+flow barely changes over k frames, is kept only where a subclass sets
+``CONVERGENCE_TOL`` (cylinder).
 
 Samples follow the same contract as :class:`~src.data.wing_dataset.WingDataset`::
 
@@ -53,7 +55,8 @@ from torch.utils.data import Dataset
 class AutoregressiveDataset(Dataset):
     """Next-step (t -> t+k) dataset built from per-case folders.
 
-    Each case folder contributes ``T - k`` frame pairs. Every frame is held in RAM
+    Each case folder contributes one frame pair every ``FRAME_STRIDE`` frames
+    (``T - k`` pairs at the default stride of 1). Every frame is held in RAM
     once as float32; the pairs index into them. A subclass sets the defaults below
     and, if a parameter is derived from case.json rather than read from it,
     overrides :meth:`_read_meta`.
@@ -81,6 +84,8 @@ class AutoregressiveDataset(Dataset):
 
     DEFAULT_PARAM_KEYS: Tuple[str, ...] = ()
     DEFAULT_TIME_STEP: int = 1
+    FRAME_STRIDE: int = 1   # Frames between the starts of consecutive pairs
+    CONVERGENCE_TOL: Optional[float] = None   # Stop a case once the flow converges (None = keep every frame)
 
     def __init__(
         self,
@@ -141,15 +146,22 @@ class AutoregressiveDataset(Dataset):
                 raise ValueError(f"{cdir}: grid {h}x{w} differs from {H}x{W}; all cases must share a grid.")
             if T <= k:
                 continue  # need at least one (t, t+k) pair
+            end = self._converged_frame(frames, k)
+            starts = range(0, end, self.FRAME_STRIDE)
+            if not starts:
+                continue  # converged before its first pair
+            # Drop the converged tail
+            frames = frames[:end + k]
 
             ci = len(self._frames)
             self._frames.append(frames)
             self._params.append(self._read_params(cdir))
-            case_ids.extend([case_id] * (T - k))
-            self._pairs.extend((ci, t) for t in range(T - k))
+            case_ids.extend([case_id] * len(starts))
+            self._pairs.extend((ci, t) for t in starts)
 
         if not self._pairs:
-            raise ValueError(f"No consecutive-frame pairs could be built (every case had <= {k} timesteps).")
+            raise ValueError(f"No consecutive-frame pairs could be built (every case had <= {k} timesteps "
+                             f"or converged before its first pair).")
 
         self._case_ids: np.ndarray = np.asarray(case_ids, dtype=int)
 
@@ -164,8 +176,31 @@ class AutoregressiveDataset(Dataset):
             f"{type(self).__name__}: {len(self)} pairs from {len(self._frames)} cases  |  "
             f"grid {H}x{W}  |  input_channels={self.input_channels}  "
             f"output_channels={self.output_channels}  |  "
-            f"time_step={k}  residual={predict_residual}  normalize={normalize}"
+            f"time_step={k}  frame_stride={self.FRAME_STRIDE}  convergence_tol={self.CONVERGENCE_TOL}  "
+            f"residual={predict_residual}  normalize={normalize}"
         )
+
+    def _converged_frame(self, frames: np.ndarray, k: int) -> int:
+        """End of a case's pair starts: the first converged frame, else ``T - k``.
+
+        The AMR-Transformer cutoff: a case stops at the first t where the mean
+        ``| |u_t| - |u_{t+k}| |`` falls below ``CONVERGENCE_TOL``. From there on the
+        flow is steady and the residual target is numerical noise.
+
+        Args:
+            frames: ``[T, H, W, 2]`` raw (u, v) frames of one case.
+            k: Frames between input and target.
+
+        Returns:
+            Exclusive upper bound on the pair start t.
+        """
+        T = len(frames)
+        if self.CONVERGENCE_TOL is None:
+            return T - k
+        speed = np.linalg.norm(frames, axis=-1)                    # [T, H, W]
+        change = np.abs(speed[:-k] - speed[k:]).mean(axis=(1, 2))  # [T - k]
+        converged = np.flatnonzero(change < self.CONVERGENCE_TOL)
+        return int(converged[0]) if len(converged) else T - k
 
     def _read_meta(self, cdir: Path) -> Dict:
         """Read a case's case.json. Override to derive further parameters from it.
@@ -342,6 +377,12 @@ class CylinderDataset(AutoregressiveDataset):
     # size, which together fix the geometry of a case.
     DEFAULT_PARAM_KEYS = ("vel_in", "density", "viscosity", "radius", "center_x", "center_y", "height", "width")
     DEFAULT_TIME_STEP = 100
+    # Frames are 0.001 s apart, so neighbouring pairs are near-duplicates; every
+    # 10th start gives ~100 pairs per case, on the scale of cavity's ~79.
+    FRAME_STRIDE = 10
+    # Their stable_state_diff. Low-Re cases go steady and their residual decays to
+    # ~1e-10, which the per-batch NMSE normalisation blows up on validation.
+    CONVERGENCE_TOL = 0.001
 
     def _read_meta(self, cdir: Path) -> Dict:
         meta = super()._read_meta(cdir)
