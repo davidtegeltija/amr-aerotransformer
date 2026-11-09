@@ -4,6 +4,7 @@ Mesh and quadtree visualization utilities
 Functions
 ---------
 plot_mesh           : Overlay the adaptive quadtree mesh on a 2D grid channel
+plot_mesh_comparison : Several meshes of one sample side by side over the same 2D field
 plot_mesh_by_depth  : Show one subplot per depth level with patches at that depth highlighted
 plot_mesh_by_depth_cumulative : Show one subplot per depth level, each including all shallower depths
 plot_reconstruction_by_depth_cumulative : The same panels painted with what the mesh reconstructs the target as, one row per affine_output order
@@ -141,6 +142,49 @@ def plot_mesh(
 
     if save_path:
         save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_mesh_comparison(
+    field: np.ndarray,
+    meshes: Dict[str, List[QuadNode]],
+    *,
+    label: str = "$C_p$",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Draw several meshes of one sample side by side over the same 2D field.
+
+    Args:
+        field: [H, W] field drawn under every mesh, e.g. the ground-truth C_p.
+        meshes: Panel title -> leaf QuadNodes, one panel each.
+        label: Colorbar label.
+        show: Whether to show the figure.
+        save_path: Where to save the figure, if given.
+
+    Returns:
+        The figure.
+    """
+    fig, axes = plt.subplots(1, len(meshes), figsize=(3.2 * len(meshes), 6.2), squeeze=False)
+    for ax, (name, mesh) in zip(axes[0], meshes.items()):
+        # origin="lower": on the wing grid the lower TE is at the bottom, the LE in the middle
+        im = ax.imshow(field, cmap="RdBu_r", origin="lower", vmin=field.min(), vmax=field.max())
+        rects = [patches.Rectangle((n.c0 - 0.5, n.r0 - 0.5), n.width, n.height) for n in mesh]
+        ax.add_collection(PatchCollection(rects, facecolor="none", edgecolor="black", linewidth=0.3, alpha=0.6))
+        ax.set_title(name, fontsize=12)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.text(0.04, 0.02, f"{len(mesh)} tokens", transform=ax.transAxes, fontsize=9, va="bottom", ha="left",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8, linewidth=0))
+    cbar = fig.colorbar(im, ax=axes[0].tolist(), fraction=0.025, pad=0.02)
+    cbar.set_label(label, fontsize=12)
+
+    if save_path:
+        save_plot(save_path, fig, dpi=200, use_date_subfolder=True)
 
     if show:
         plt.show()

@@ -2,6 +2,7 @@ import os
 import sys
 
 import numpy as np
+import torch
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
@@ -9,10 +10,14 @@ sys.path.insert(0, PROJECT_ROOT)
 from src.amr.refinement_criteria import RefinementCriteria, CRITERIA_REGISTRY
 from src.data.synthetic_dataset import make_synthetic_field
 from src.amr.adaptive_mesh import build_adaptive_mesh, mesh_statistics
+from src.amr.learned_adaptive_mesh import build_depth_guided_mesh
+from src.models.refinement_net import RefinementNet
+from src.utils.checkpoint import build_model_from_checkpoint
 from src.utils.plot import (
     plot_mesh,
     plot_mesh_by_depth,
     plot_mesh_by_depth_cumulative,
+    plot_mesh_comparison,
     plot_metric_heatmap,
     plot_patch_features,
 )
@@ -53,19 +58,31 @@ def create_mesh(data, sample_index, max_depth, min_depth, refinement_criteria: R
     return sample, mesh
 
 
-if __name__ == "__main__":
-    data = np.load("data/crmmdata.npy")
-    sample_index = 0
-    max_depth = 6
-    min_depth = 2
-    criteria_name = "AERODYNAMIC_CRITERIA_2"
+def build_threshold_meshes(row, absolute, relative, scorer, min_depth, max_depth):
+    """Ground truth and the absolute, relative and learned mesh of one SuperWing row, read through mmap."""
+    # Wing dataset
+    index = np.load("/mnt/data/tegeltija/index.npy")
+    geometry = np.load("/mnt/data/tegeltija/geom0.npy", mmap_mode="r")[int(index[row, 0])].transpose(2, 1, 0)
+    conditions = np.broadcast_to(index[row, [2, 3]], (*geometry.shape[:2], 2))
+    target = np.load("/mnt/data/tegeltija/data.npy", mmap_mode="r")[row].transpose(2, 1, 0)
+    x = np.concatenate([geometry, conditions], axis=-1)
+    with torch.no_grad():
+        depth_map = scorer(torch.from_numpy(x.astype(np.float32))[None]).squeeze(1)[0].numpy()
 
+    meshes = {
+        "Absolute thresholds": build_adaptive_mesh(x, absolute, min_depth=min_depth, max_depth=max_depth),
+        "Relative thresholds": build_adaptive_mesh(x, relative, min_depth=min_depth, max_depth=max_depth),
+        "Learned (RefinementNet)": build_depth_guided_mesh(x, depth_map, min_depth=min_depth, max_depth=max_depth,
+                                                           patch_sides_ratio=scorer.patch_sides_ratio),
+    }
+    return np.asarray(target), meshes
+
+
+def criteria_demo(data, sample_index, criteria_name, min_depth, max_depth, show_plots, save_path):
+    """Mesh plots of one sample under a registry preset. save_path is a directory, or None to not save."""
     sample, mesh = create_mesh(data=data, sample_index=sample_index, max_depth=max_depth, min_depth=min_depth, refinement_criteria=CRITERIA_REGISTRY[criteria_name])
 
     # --- Plotting ---
-    show_plots = True
-    # save_path = "outputs/plots"
-    save_path = None
     prefix = f"{save_path}/{criteria_name}" if save_path else None
 
     # Main mesh overlay
@@ -104,41 +121,23 @@ if __name__ == "__main__":
     plot_patch_features(sample, mesh, channel=0, title=title_features, show=show_plots, save_path=save_path_reconstruction)
 
 
-    # 5. Demonstrate configurable thresholds
-    # print("\n[5] Comparing coarse vs. fine threshold ...")
+if __name__ == "__main__":
+    min_depth, max_depth = 2, 6
+    show_plots = True
 
-    # mesh_coarse = build_adaptive_mesh(sample, max_depth=4, threshold=0.30)
-    # mesh_fine   = build_adaptive_mesh(sample, max_depth=6, threshold=0.08)
+    # Registry preset on one wing sample
+    data = np.load("data/crmmdata.npy")
+    sample_index = 0
+    criteria_name = "AERODYNAMIC_CRITERIA_2"
+    save_path = None
+    # criteria_demo(data, sample_index, criteria_name, min_depth, max_depth, show_plots, save_path)
 
-    # print(f"    Coarse (threshold=0.30, max_depth=4): {mesh_statistics(mesh_coarse)['total_patches']} patches")
-    # print(f"    Fine   (threshold=0.08, max_depth=6): {mesh_statistics(mesh_fine)['total_patches']} patches")
+    # Compare the meshes of different refinement rules on one wing sample
+    row = 4287
+    absolute = RefinementCriteria(le_te_threshold=2.4e-4)
+    relative = RefinementCriteria(wall_distance_threshold=1.1, le_te_threshold=1.1, relative_thresholds=True)
+    scorer = build_model_from_checkpoint(RefinementNet, "outputs/checkpoints/2026-10-11_scorer_n=512_quad.pt").eval()
+    compare_save_path = None   # a file, e.g. "outputs/plots/threshold_meshes.png"
 
-    # fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    # bg = sample[0]   # velocity_x channel for background
-
-    # for ax, m, label in zip(axes, [mesh_coarse, mesh_fine], ["Coarse (thresh=0.30, depth≤4)", "Fine   (thresh=0.08, depth≤6)"]):
-    #     ax.imshow(bg, cmap="viridis", origin="upper")
-    #     for patch in m:
-    #         r0, c0, r1, c1 = patch["bbox"]
-    #         rect = plt.Rectangle(
-    #             (c0, r0), c1 - c0, r1 - r0,
-    #             linewidth=0.5, edgecolor="white", facecolor="none", alpha=0.8,
-    #         )
-    #         ax.add_patch(rect)
-    #     ax.set_title(f"{label}\n{len(m)} patches")
-    #     ax.set_aspect("equal")
-
-    # fig.suptitle("Threshold Sensitivity", fontsize=12)
-    # plt.tight_layout()
-    # if save_path:            
-    #     fig.savefig(f"{save_path}/06_threshold_comparison-{timestamp}.png", dpi=150, bbox_inches="tight")
-    #     print(f"    Saved -> {save_path}/06_threshold_comparison.png")
-
-    # 6. Multi-channel demo
-    # print("\n[6] Demonstrating 5-channel support ...")
-    # data_5ch = make_synthetic_field(n_samples=1, channels=5, height=64, width=128)
-    # # Channels: 0=density, 1=pressure, 2=temp, 3=vel_x, 4=vel_y  (hypothetical)
-    # mesh_5ch = build_adaptive_mesh(data_5ch[0], max_depth=5, refinement_criteria=refinement_criteria)
-    # st5 = mesh_statistics(mesh_5ch)
-    # print(f"    5-channel field (1, 5, 64, 128): "
-    #       f"{st5['total_patches']} patches, depth {st5['depth_range']}")
+    target, meshes = build_threshold_meshes(row, absolute, relative, scorer, min_depth, max_depth)
+    plot_mesh_comparison(target[..., 0], meshes, label="$C_p$", show=show_plots, save_path=compare_save_path)
