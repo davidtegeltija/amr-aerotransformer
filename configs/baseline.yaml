@@ -3,7 +3,7 @@
 # =============================================================================
 # Runnable as-is as a deterministic_transformer. Other branches are commented below.
 # A run is two files (config and data):
-#   python main.py --config configs/baseline.yaml --data configs/data/wing.yaml
+#   python -m src.main --config configs/baseline.yaml --data configs/data/wing.yaml
 
 
 # ---- Model ----
@@ -18,6 +18,8 @@ max_patch_size: 16                            # Largest allowed leaf patch (pixe
 affine_input: 1                               # Per-token geometry features: 0 the channel means alone | 1 also their gx + gy
 affine_output: 2                              # Per-cell polynomial order, dense per-pixel loss: 0 constant | 1 value+gx+gy | 2 also gxx+gxy+gyy
 refinement_criteria: GEOMETRY_BALANCED_CRITERIA  # Key in CRITERIA_REGISTRY (src/amr/refinement_criteria.py)
+mesh_perturbation: 0                          # Train-only mesh noise (0 = off). Deterministic: on/off, thresholds drawn from the criteria's ranges | Learned: noise on d_pred, in depth levels
+dense_loss: 0                                 # Per-pixel loss for affine_output 0 (orders 1 and 2 always use it)
 
 
 # ---- Training ----
@@ -36,6 +38,7 @@ num_workers: 0                                # DataLoader workers. Only 0 keeps
 
 
 # ---- scorer (no transformer architecture keys) ----
+# patch_sides_ratio: null   # Patch height / width, a power of two: 1 square | 0.5 long along the span | null the whole grid is the root (2:1)
 # n_target: 800             # Target mean leaf count (one global tolerance is calibrated to it)
 # calib_samples: 256        # Train samples used for that calibration
 # split_rule: variance      # When a cell splits: variance (squared deviation from the cell mean) | linear_abs / quadratic_abs (absolute residual after the affine_output 1 / 2 fit)

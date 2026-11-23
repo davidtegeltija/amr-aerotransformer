@@ -1,89 +1,86 @@
-# Transformer Based Adaptive Mesh Refinement for Aerodynamic Prediction 
-This is an adaptive mesh refinement approach to a Transformer-based aerodynamic profile prediction. It is a project I did for my Master Thesis as a part of my Computational Science and Engineering degree at Technical University of Munich (TUM).
+# Learned Adaptive Mesh Refinement for Token-Efficient High-Resolution Aerodynamic Prediction
+This is an adaptive mesh refinement approach to a transformer-based aerodynamic profile prediction. It is a project I did for my Master Thesis as a part of my Computational Science and Engineering degree at Technical University of Munich (TUM).
 
-## How to Run
-I suggest using a virtual environment. You can easily create one using a python preinstalled packaged venv by running
+## Overview
+A flow field on a regular grid is split into a quadtree mesh, each leaf cell becomes one token, and a transformer (Adaptive Mesh Transformer - AMT) predicts the flow per cell as a polynomial that is painted back onto the grid. The mesh comes from one of two sources:
 
-```console
-python -m venv <venv_name>
+- **Deterministic**: hand-written refinement criteria (`src/amr/refinement_criteria.py`), including uniform meshes.
+- **Learned**: a CNN scorer (`src/models/refinement_net.py`) predicts a per-pixel target depth, trained against an oracle mesh calibrated to a token budget `n_target`.
+
+A dense ViT serves as the baseline. Supported datasets are SuperWing (`wing`, steady surface flow plus aerodynamic coefficients) and the CFDBench next-step problems (`cavity`, `cylinder`, `dam`, `tube`).
+
+```
+configs/         model configs (per model type) and data configs (configs/data/)
+scripts/         evaluation, comparison and visualization scripts
+src/
+  main.py        training entry point
+  amr/           quadtree, deterministic and learned mesh builders, oracle depth
+  data/          datasets, train/val/test split, collate functions (mesh + tokens)
+  models/        AMRTransformer, RefinementNet, ViT, per-cell reconstruction
+  training/      training loops, losses, LR schedulers
+  inference/     single-sample prediction
+  evaluation/    prediction errors and aerodynamic coefficients
+  utils/         config loading, checkpoints, plotting
 ```
 
-This creates a folder called venv in your project directory. Don't worry, the folder is already added to .gitignore. After creating the environment you have to active it by running
+## Setup
+The project runs on Python with PyTorch. I suggest installing the dependencies into a virtual environment, created with Python's built-in `venv` module:
 
 ```console
-Windows
-<venv_name>\Scripts\activate
+python -m venv venv
 
-Linux
-source <venv_name>/bin/activate
-```
+venv\Scripts\activate          # Windows
+source venv/bin/activate       # Linux
 
-After activating the virtual environment you can install the necessary dependencies with
-
-```console
 pip install -r requirements.txt
 ```
-This installs the minimal dependencies. If you want to speed up training you can also install FlashAttention (optional but recommended) with `pip install flash-attn --no-build-isolation`. Unfortunately this only works for Linux OS.
 
-Training and evaluation are driven by a YAML config file. Invoke `main.py` and point it at a config:
-
-```console
-python main.py --config configs/baseline.yaml
-```
-
-If `--config` is omitted, `configs/baseline.yaml` is used by default. Individual values can be overridden at runtime without editing the file:
+## How to Train
+A run is a **model** config (`configs/<model type>/*.yaml`) paired with a **data** config (`configs/data/*.yaml`), merged at load time. Run from the project root:
 
 ```console
-python main.py --config configs/baseline.yaml --override epochs=5 batch_size=4
+python -m src.main --config configs/learned_transformer/tokens=512/learned_n=512_affine=1-2.yaml --data configs/data/wing.yaml
 ```
 
-To smoke-test the pipeline against synthetic data, leave `input_file` and `target_file` unset (or `null`) in the config — `main.py` will fall back to `SyntheticDataset`.
+The optional flag `--name <run>` names the log directory and checkpoint file, which default to the two config names joined and prefixed with the date. You can change the values without editing the config files by using `--override epochs=5 batch_size=4`. To smoke-test the pipeline without real data, use `--data configs/data/synthetic.yaml`.
 
-### Config fields
+To train a model on a learned mesh you need two sequential runs:
+1. train a scorer (`configs/scorer/`)
+2. train the AMT (`configs/learned_transformer/`) whose `checkpoint_file` points at that scorer checkpoint and whose `min_patch_size` / `max_patch_size` match the scorer's.
 
-The config is a flat YAML mapping. See `configs/baseline.yaml` for the canonical defaults.
+The config is a flat YAML mapping. `configs/baseline.yaml` lists every available key with its explanation. The main ones are:
 
 | Key | Description |
 |---|---|
-| `input_file` | `.npz`/`.npy` of shape `[N, H, W, C]` (geometry). `null` -> synthetic dataset |
-| `target_file` | `.npz`/`.npy` of shape `[N, H, W, C]` (steady flow state) |
-| `val_split` | Fraction of samples held out for validation |
-| `d_model`, `n_layers`, `n_heads`, `d_ff` | Transformer hyperparameters |
-| `min_depth`, `max_depth` | Quadtree minimum/maximum subdivision depth |
-| `refinement_mode` | `deterministic` or `learned` |
-| `refinement_criteria` | Preset name from `CRITERIA_REGISTRY` (used only when `refinement_mode: deterministic`) |
-| `epochs`, `batch_size`, `warmup_steps`, `num_workers` | Standard training knobs |
-| `training_phase` | `1` (scorer only, transformer frozen), `2` (scorer + transformer joint), or `null` for standard deterministic training |
-| `checkpoint_file` | Path to checkpoint to load before training. For phase 1 use a pretrained-transformer checkpoint; for phase 2 use a phase-1 scorer checkpoint |
-| `lambda_budget`, `lambda_smooth` | Regularizer weights for the RefinementNet loss |
-| `tau_start_phase1`, `tau_end_phase1`, `tau_start_phase2`, `tau_end_phase2` | Gumbel-softmax temperature schedules per phase |
-| `scorer_lr`, `transformer_lr` | Per-module learning rates |
-| `n_max` | Max token count used to normalize the budget loss (default `8192` for a 256x128 grid) |
+| `model_trained` | `deterministic_transformer`, `learned_transformer`, `scorer` or `vit` |
+| `min_patch_size`, `max_patch_size` | Finest and coarsest allowed cell size in pixels |
+| `affine_input`, `affine_output` | Polynomial order of the input token features (0-1) and of the output prediction (0-2) |
+| `refinement_criteria` | Preset from `CRITERIA_REGISTRY` (deterministic mesh) |
+| `checkpoint_file`, `offset` | Scorer checkpoint and mesh budget offset (learned mesh) |
+| `mesh_perturbation` | Train-time mesh noise (deterministic and learned mesh) |
+| `n_target`, `split_rule`, `patch_sides_ratio` | Token budget, oracle split rule and cell shape (scorer) |
+| `d_model`, `n_layers`, `n_heads`, `d_ff`, `dropout` | Transformer size (AMT and ViT) |
+| `epochs`, `batch_size`, `lr`, `weight_decay`, `warmup_steps`, `schedule` | Training |
+| `dataset`, `input_file`, `target_file`, `index_file`, `val_split`, `seed` | Data config |
 
-Checkpoints are written under `outputs/checkpoints/` (`phase1_scorer.pt`, `phase2_joint.pt`).
+Checkpoints are saved to `outputs/checkpoints/`, logs and TensorBoard runs to `outputs/logs/`, loss curves to `outputs/loss/`.
+
+## How to Evaluate
+The evaluation scripts are configured by the variables at the top of their `__main__` block and run from the project root. To evaluate a single model set `model_config`, `data_config` and `checkpoint_file` in `scripts/evaluate_model.py`, then run
+
+```console
+python scripts/evaluate_model.py
+```
+
+It saves the plots you select to `outputs/plots/` and writes the test metrics to `outputs/evaluation/<checkpoint>.txt`. A checkpoint that already has an evaluation file is not re-evaluated. Set `test_perturbation` to evaluate an AMT on a perturbed learned mesh.
+
+To compare several models on the same test samples, list them in `MODELS` in `scripts/compare_models.py`. The remaining scripts in `scripts/` produce the thesis figures.
 
 ## Monitoring with TensorBoard
-
-Every run writes scalar metrics (per-epoch train/val loss, learning rate, mean token count `mean_N`) plus the resolved config under `outputs/logs/<timestamp>_<config-name>/`. The deterministic loop also logs per-step loss/LR, recovering the step-level signal that `tqdm` drops under `nohup`.
-
-`tensorboard` is included in `requirements.txt`. Note the `setuptools<81` pin there:
-TensorBoard 2.20 imports `pkg_resources`, which newer setuptools removes — without the
-pin TensorBoard fails to launch.
-
-### Viewing the dashboard
-
-From the project root, with the virtual environment active:
+Every run logs its losses, learning rate, mean token count and resolved config under `outputs/logs/`:
 
 ```console
 tensorboard --logdir outputs/logs
 ```
 
-then open <http://localhost:6006> in a browser.
-
-To view it embedded in VSCode instead, install Microsoft's **TensorBoard** extension and
-run **Python: Launch TensorBoard** from the Command Palette (`Ctrl+Shift+P`), pointing it
-at the workspace folder. Alternatively, run the `tensorboard` command above and open
-**Command Palette -> Simple Browser: Show -> `http://localhost:6006`** to view it in a
-VSCode tab.
-
-## References
+then open <http://localhost:6006>. The `setuptools<81` pin in `requirements.txt` is needed for TensorBoard to launch.
