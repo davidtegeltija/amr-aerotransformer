@@ -10,7 +10,7 @@ max_patch_size: 64                      # Largest allowed leaf patch (pixels). C
 affine_input: 1                         # Per-token geometry features: 0 the channel means alone | 1 also their gx + gy
 affine_output: 2                        # Per-cell polynomial order, dense per-pixel loss: 0 constant | 1 value+gx+gy | 2 also gxx+gxy+gyy
 offset: 0.0                             # Mesh budget: split iff mean(d_pred) > d + offset. Positive coarser, negative finer
-checkpoint_file: "outputs/checkpoints/2026-09-26_scorer_n=2048.pt"   # Required: the scorer trained from configs/scorer/scorer_n=2048.yaml
+checkpoint_file: "outputs/checkpoints/2026-09-27_scorer_n=2048.pt"   # Required: the scorer trained from configs/scorer/scorer_n=2048.yaml
 
 # ---- Training ----
 epochs: 200

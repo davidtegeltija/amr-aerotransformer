@@ -11,7 +11,7 @@ affine_input: 1                         # Per-token geometry features: 0 the cha
 affine_output: 2                        # Per-cell polynomial order, dense per-pixel loss: 0 constant | 1 value+gx+gy | 2 also gxx+gxy+gyy
 offset: 0.0                             # Mesh budget: split iff mean(d_pred) > d + offset. Positive coarser, negative finer
 mesh_perturbation: 0.55                 # Train-only noise on d_pred, in depth levels. Pick it with scripts/check_mesh_perturbation.py (0 = turn off)
-checkpoint_file: "outputs/checkpoints/2026-09-26_scorer_n=2048.pt"   # Required: the scorer trained from configs/scorer/scorer_n=2048.yaml
+checkpoint_file: "outputs/checkpoints/2026-09-27_scorer_n=2048.pt"   # Required: the scorer trained from configs/scorer/scorer_n=2048.yaml
 
 # ---- Training ----
 epochs: 200
