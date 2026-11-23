@@ -58,36 +58,54 @@ def create_mesh(data, sample_index, max_depth, min_depth, refinement_criteria: R
     return sample, mesh
 
 
-def build_threshold_meshes(row, absolute, relative, scorer, min_depth, max_depth):
-    """Ground truth and the absolute, relative and learned mesh of one SuperWing row, read through mmap."""
-    # Wing dataset
+def load_wing_row(row):
+    """Scorer input (geometry + broadcast operating conditions) and target of one SuperWing row, read through mmap."""
     index = np.load("/mnt/data/tegeltija/index.npy")
     geometry = np.load("/mnt/data/tegeltija/geom0.npy", mmap_mode="r")[int(index[row, 0])].transpose(2, 1, 0)
     conditions = np.broadcast_to(index[row, [2, 3]], (*geometry.shape[:2], 2))
     target = np.load("/mnt/data/tegeltija/data.npy", mmap_mode="r")[row].transpose(2, 1, 0)
-    x = np.concatenate([geometry, conditions], axis=-1)
+    return np.concatenate([geometry, conditions], axis=-1), np.asarray(target)
+
+
+def build_learned_mesh(x, scorer, min_depth, max_depth):
+    """Mesh built from the scorer's predicted depth map of input x."""
     with torch.no_grad():
         depth_map = scorer(torch.from_numpy(x.astype(np.float32))[None]).squeeze(1)[0].numpy()
+    return build_depth_guided_mesh(x, depth_map, min_depth=min_depth, max_depth=max_depth,
+                                   patch_sides_ratio=scorer.patch_sides_ratio)
 
+
+def build_threshold_meshes(row, absolute, relative, scorer, min_depth, max_depth):
+    """Ground truth and the absolute, relative and learned mesh of one SuperWing row, read through mmap."""
+    x, target = load_wing_row(row)
     meshes = {
         "Absolute thresholds": build_adaptive_mesh(x, absolute, min_depth=min_depth, max_depth=max_depth),
         "Relative thresholds": build_adaptive_mesh(x, relative, min_depth=min_depth, max_depth=max_depth),
-        "Learned (RefinementNet)": build_depth_guided_mesh(x, depth_map, min_depth=min_depth, max_depth=max_depth,
-                                                           patch_sides_ratio=scorer.patch_sides_ratio),
+        "Learned (RefinementNet)": build_learned_mesh(x, scorer, min_depth, max_depth),
     }
-    return np.asarray(target), meshes
+    return target, meshes
 
 
-def criteria_demo(data, sample_index, criteria_name, min_depth, max_depth, show_plots, save_path):
-    """Mesh plots of one sample under a registry preset. save_path is a directory, or None to not save."""
-    sample, mesh = create_mesh(data=data, sample_index=sample_index, max_depth=max_depth, min_depth=min_depth, refinement_criteria=CRITERIA_REGISTRY[criteria_name])
+def criteria_demo(data, sample_index, criteria_name, min_depth, max_depth, show_plots, save_path, scorer=None):
+    """Mesh plots of one sample under a registry preset. save_path is a directory, or None to not save.
+
+    With a scorer the mesh is the learned one instead: sample_index is then a SuperWing
+    row (see load_wing_row), and data and criteria_name are unused.
+    """
+    if scorer is None:
+        sample, mesh = create_mesh(data=data, sample_index=sample_index, max_depth=max_depth, min_depth=min_depth, refinement_criteria=CRITERIA_REGISTRY[criteria_name])
+    else:
+        x, sample = load_wing_row(sample_index)
+        mesh = build_learned_mesh(x, scorer, min_depth, max_depth)
+        print(f"Learned mesh for row {sample_index}: {len(mesh)} patches")
 
     # --- Plotting ---
-    prefix = f"{save_path}/{criteria_name}" if save_path else None
+    name = criteria_name if scorer is None else "learned"
+    prefix = f"{save_path}/{name}" if save_path else None
 
     # Main mesh overlay
     save_path_mesh = f"{prefix}_adaptive_mesh.png" if save_path else None
-    title_mesh = f"Adaptive Mesh ({len(mesh)} patches)"
+    title_mesh = f"Adaptive Mesh ({len(mesh)} cells)"
     plot_mesh(sample, mesh, channel=0, title=title_mesh, show=show_plots, save_path=save_path_mesh)
 
     # Token-matched uniform mesh: the uniform preset and depth whose patch count
@@ -97,7 +115,7 @@ def criteria_demo(data, sample_index, criteria_name, min_depth, max_depth, show_
     mesh_uniform = min(uniform_meshes, key=lambda m: abs(len(m) - len(mesh)))
 
     save_path_uniform = f"{prefix}_uniform_mesh.png" if save_path else None
-    title_uniform = f"Uniform Mesh ({len(mesh_uniform)} patches)"
+    title_uniform = f"Uniform Mesh ({len(mesh_uniform)} cells)"
     plot_mesh(sample, mesh_uniform, channel=0, title=title_uniform, show=show_plots, save_path=save_path_uniform)
 
     # Per-depth subplot
@@ -110,10 +128,11 @@ def criteria_demo(data, sample_index, criteria_name, min_depth, max_depth, show_
     title_depth_cumulative = "Adaptive Mesh by Cumulative Depth"
     plot_mesh_by_depth_cumulative(sample, mesh, title=title_depth_cumulative, show=show_plots, save_path=save_path_depth_cumulative)
 
-    # Metric heatmap
-    save_path_heatmap = f"{prefix}_velocity_gradient.png" if save_path else None
-    title_heatmap = "Velocity Gradient Magnitude per Patch"
-    plot_metric_heatmap(sample, mesh, metric_name="velocity_gradient", title=title_heatmap, show=show_plots, save_path=save_path_heatmap)
+    # Metric heatmap (learned leaves carry no metrics)
+    if scorer is None:
+        save_path_heatmap = f"{prefix}_velocity_gradient.png" if save_path else None
+        title_heatmap = "Velocity Gradient Magnitude per Patch"
+        plot_metric_heatmap(sample, mesh, metric_name="velocity_gradient", title=title_heatmap, show=show_plots, save_path=save_path_heatmap)
 
     # Patch feature reconstruction
     save_path_reconstruction = f"{prefix}_reconstruction.png" if save_path else None
@@ -129,15 +148,19 @@ if __name__ == "__main__":
     data = np.load("data/crmmdata.npy")
     sample_index = 0
     criteria_name = "AERODYNAMIC_CRITERIA_2"
-    save_path = None
+    save_path = "outputs/plots/"
     # criteria_demo(data, sample_index, criteria_name, min_depth, max_depth, show_plots, save_path)
+
+    # Learned mesh on one SuperWing row (17612: depth-5 cells trace the upper-surface shock)
+    scorer = build_model_from_checkpoint(RefinementNet, "outputs/checkpoints/2026-11-09_scorer_n=512_rectangular.pt").eval()
+    # criteria_demo(None, 20337, None, min_depth, max_depth, show_plots, save_path, scorer=scorer)
 
     # Compare the meshes of different refinement rules on one wing sample
     row = 4287
     absolute = RefinementCriteria(le_te_threshold=2.4e-4)
     relative = RefinementCriteria(wall_distance_threshold=1.1, le_te_threshold=1.1, relative_thresholds=True)
     scorer = build_model_from_checkpoint(RefinementNet, "outputs/checkpoints/2026-10-11_scorer_n=512_quad.pt").eval()
-    compare_save_path = None   # a file, e.g. "outputs/plots/threshold_meshes.png"
+    compare_save_path = "outputs/plots/threshold_meshes.png"   # a file, e.g. "outputs/plots/threshold_meshes.png"
 
     target, meshes = build_threshold_meshes(row, absolute, relative, scorer, min_depth, max_depth)
     plot_mesh_comparison(target[..., 0], meshes, label="$C_p$", show=show_plots, save_path=compare_save_path)

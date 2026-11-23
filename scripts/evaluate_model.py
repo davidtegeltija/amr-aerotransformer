@@ -9,6 +9,7 @@ import numpy as np
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
+from src.data.collate_fn import perturb_depth_map
 from src.data.dataset_factory import TIMESTEP_DATASETS, build_dataset
 from src.data.split import test_row_indices
 from src.models.amr_model import AMRTransformer
@@ -18,7 +19,25 @@ from src.evaluation.evaluate_autoregressive import evaluate_next_timestep
 from src.inference.predict import resolve_mesh_source, predict_single_amr, predict_single_vit
 from src.utils.config import load_config, resolve_depth_bounds
 from src.utils.checkpoint import build_model_from_checkpoint
-from src.utils.plot import plot_mesh, plot_flow_comparison
+from src.utils.plot import plot_mesh, plot_flow_comparison, plot_error_by_depth, plot_next_timestep
+
+
+class PerturbedScorer:
+    """Scorer whose depth map gets the train-time ``perturb_depth_map`` noise, to test a model on perturbed meshes.
+
+    The noise is seeded by the input grid, so every evaluation pass and every model sees the same mesh of a sample.
+    """
+
+    def __init__(self, scorer, amplitude: float):
+        self.scorer = scorer
+        self.amplitude = amplitude
+        self.patch_sides_ratio = scorer.patch_sides_ratio
+
+    def __call__(self, grid):
+        depth_map = self.scorer(grid)                                               # [1, 1, H, W]
+        rng = np.random.default_rng(grid.numpy().view(np.uint32).ravel())
+        noise = perturb_depth_map(np.zeros(depth_map.shape[-2:]), self.amplitude, rng)
+        return depth_map + depth_map.new_tensor(noise)
 
 
 def check_if_not_evaluated(result_path: Path) -> None:
@@ -38,10 +57,13 @@ def save_evaluation(buffer: io.StringIO, result_path: Path, model_config: str, c
 
 if __name__ == "__main__":
     data_config = "configs/data/wing.yaml"
-    model_config = "configs/learned_transformer/tokens=512/learned_n=512_affine=0-0.yaml"
-    checkpoint_file = "outputs/checkpoints/2026-09-28_learned_n=512_affine=0-0.pt"
+    model_config = "configs/deterministic_transformer/deterministic_UNIFORM_16x16.yaml"
+    checkpoint_file = "outputs/checkpoints/2026-11-16_uniform_n=128.pt"
+    
+    test_perturbation = 0.0   # Amplitude of the depth map noise on the learned test mesh, 0 for the clean mesh
 
-    result_path = Path("outputs/evaluation") / f"{Path(checkpoint_file).stem}.txt"
+    suffix = f"_test_perturb={test_perturbation}" if test_perturbation else ""
+    result_path = Path("outputs/evaluation") / f"{Path(checkpoint_file).stem}{suffix}.txt"
 
     print(f"\nEvaluating checkpoint: {checkpoint_file}\n")
 
@@ -69,6 +91,9 @@ if __name__ == "__main__":
 
         mesh_source = resolve_mesh_source(args)
         refinement_criteria, scorer = mesh_source
+        if test_perturbation:
+            scorer = PerturbedScorer(scorer, test_perturbation)
+            mesh_source = (refinement_criteria, scorer)
 
         result = predict_single_amr(
             model,
@@ -83,18 +108,36 @@ if __name__ == "__main__":
     # ------------------------
     # Plotting
     # ------------------------
-    model_name = Path(checkpoint_file).stem
+    model_name = result_path.stem
 
     # --- Mesh --- (AMR only; the ViT predicts the dense grid, so there is none)
     if "mesh" in result:
         plot_mesh(result["input_grid"], result["mesh"], show=False, save_path=f"outputs/plots/{model_name}_sample={sample_index}.png")
 
+        # Error by patch depth
+        meshes, predictions, targets = [], [], []
+        for index in test_idx[:50]:
+            sample_i = dataset[index]
+            result_i = predict_single_amr(model, sample_i, max_depth=args["max_depth"], min_depth=args["min_depth"],
+                                          refinement_criteria=refinement_criteria, scorer=scorer,
+                                          offset=args.get("offset", 0.0))
+            meshes.append(result_i["mesh"])
+            predictions.append(result_i["prediction"])
+            targets.append(result_i["ground_truth"])
+
+        plot_error_by_depth(meshes, predictions, targets, channel=0, show=False,
+                            save_path=f"outputs/plots/{model_name}_error_by_depth.png")
+        
     # ---Flow ---
     n_patches = len(result["mesh"]) if "mesh" in result else model.nh * model.nw
     plot_flow_comparison(result["ground_truth"], result["prediction"],
                          title=f"Ground Truth vs Prediction on a Learned Mesh ({n_patches} patches)",
                          save_path=f"outputs/plots/{model_name}_prediction_sample={sample_index}.png")
-    # plot_3d_prediction(sample["input"], prediction)
+
+    # --- Next timestep --- (the dataset's showcase case at t, t+n, t+m; see TIMESTEP_EXAMPLES)
+    if dataset_type in TIMESTEP_DATASETS:
+        plot_next_timestep(model, args, dataset, mesh_source, show_mesh=True,
+                           show=False, save_path=f"outputs/plots/{model_name}_next_timestep.png")
 
 
     # ------------------------

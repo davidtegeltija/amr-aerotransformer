@@ -19,10 +19,26 @@ Flow field and token-level visualization utilities.
 Functions
 ---------
 plot_flow_comparison  : Side-by-side comparison of ground truth vs predicted flow fields
+plot_mesh_prediction_comparison : Ground truth once, then the absolute error of every model with its mesh
+plot_next_timestep    : 2x3 next-step flow of one test case at frames t, t+n, t+m, ground truth over prediction, optional mesh overlay
 plot_channel_sections : Chordwise curves of one solution channel at selected spanwise stations
 plot_coefficient_correlation : Predicted vs target integrated coefficient over a set of samples
 plot_token_statistics : Histogram of token counts per sample and (optionally) cell size distribution.
+plot_error_by_depth   : Box plot of per-token MAE grouped by quadtree depth (patch size)
 plot_3d_prediction    : 3D surface rendering of predicted fields over wing geometry
+
+
+Ablation visualization utilities.
+
+Functions
+---------
+plot_perturbation_error : Overall error against the mesh perturbation amplitude, with the unperturbed run as a line
+plot_perturbation_robustness : Overall error against the test-time mesh perturbation amplitude, one line per training amplitude
+plot_cell_shape_floors : Reconstruction floor of the uniform mesh against its token count, one line per cell shape
+plot_error_vs_cost : Test error against the token count or another cost, one line per model
+plot_polynomial_order_error : Overall error against the token count, one line per input and output order
+plot_polynomial_floor : Error of every input and output order against the reconstruction floor of its output order
+plot_model_floor : Error of every surface field of every model against its reconstruction floor
 """
 
 from datetime import datetime
@@ -32,6 +48,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from matplotlib.collections import PatchCollection
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.transforms import Bbox
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -41,8 +59,14 @@ import torch
 
 from src.amr.quadtree import QuadNode
 from src.evaluation.metrics import SOLUTION_CHANNEL_SCALES
+from src.inference.predict import predict_single_amr, predict_single_vit, resolve_mesh_source
+from src.inference.predict_autoregressive import predict_next_timestep
+from src.models.amr_model import AMRTransformer
 from src.models.reconstruction import basis_size, cell_basis
 from src.training.loss import nmse_loss
+
+# Colorbar inset beside an image panel, in its axes coordinates: as tall as the image, 9 % of its width
+COLORBAR_BOX = [1.06, 0, 0.09, 1]
 
 # Axis labels for the coefficients ``calculate_coefficients`` returns, in its order.
 COEFFICIENT_LABELS = ("$C_L$", "$C_D$", "$C_{Mz}$")
@@ -103,10 +127,10 @@ def plot_mesh(
     channel_data = channel_image(sample, channel)
     ax.imshow(channel_data, cmap="RdBu_r", origin="upper")
 
-    depths = [p.depth for p in mesh]
-    min_d = min(depths) if depths else 0
-    max_d = max(depths) if depths else 1
-    cmap, norm, _ = color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
+    # depths = [p.depth for p in mesh]
+    # min_d = min(depths) if depths else 0
+    # max_d = max(depths) if depths else 1
+    # cmap, norm, _ = color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
 
     # Rectangle overlays
     rects = []
@@ -118,16 +142,17 @@ def plot_mesh(
         # imshow places pixel (0,0) centered at coordinate 0.5
         rects.append(patches.Rectangle((c0 - 0.5, r0 - 0.5), width, height))
 
-    pc = PatchCollection(rects, cmap=cmap, norm=norm, linewidth=0.75, alpha=1)
-    pc.set_array(np.array(depths))
+    # pc = PatchCollection(rects, cmap=cmap, norm=norm, linewidth=0.75, alpha=1)
+    # pc.set_array(np.array(depths))
+    pc = PatchCollection(rects, edgecolor="black", linewidth=0.75, alpha=1)
     pc.set_facecolor("none")
     ax.add_collection(pc)
 
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="10%", pad=0.15)
-    cbar = fig.colorbar(pc, cax=cax)
-    cbar.set_label("Quadtree depth")
-    cbar.set_ticks(range(min_d, max_d + 1))
+    # divider = make_axes_locatable(ax)
+    # cax = divider.append_axes("right", size="10%", pad=0.15)
+    # cbar = fig.colorbar(pc, cax=cax)
+    # cbar.set_label("Quadtree depth")
+    # cbar.set_ticks(range(min_d, max_d + 1))
 
     n_tokens = len(mesh)
     uniform_tokens = H * W  # if we tokenised every pixel
@@ -157,30 +182,16 @@ def plot_mesh_comparison(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> Figure:
-    """Draw several meshes of one sample side by side over the same 2D field.
-
-    Args:
-        field: [H, W] field drawn under every mesh, e.g. the ground-truth C_p.
-        meshes: Panel title -> leaf QuadNodes, one panel each.
-        label: Colorbar label.
-        show: Whether to show the figure.
-        save_path: Where to save the figure, if given.
-
-    Returns:
-        The figure.
-    """
+    """Draw several meshes of one sample side by side over the same 2D field."""
     fig, axes = plt.subplots(1, len(meshes), figsize=(3.2 * len(meshes), 6.2), squeeze=False)
     for ax, (name, mesh) in zip(axes[0], meshes.items()):
         # origin="lower": on the wing grid the lower TE is at the bottom, the LE in the middle
         im = ax.imshow(field, cmap="RdBu_r", origin="lower", vmin=field.min(), vmax=field.max())
-        rects = [patches.Rectangle((n.c0 - 0.5, n.r0 - 0.5), n.width, n.height) for n in mesh]
-        ax.add_collection(PatchCollection(rects, facecolor="none", edgecolor="black", linewidth=0.3, alpha=0.6))
+        draw_mesh(ax, mesh)
         ax.set_title(name, fontsize=12)
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.text(0.04, 0.02, f"{len(mesh)} tokens", transform=ax.transAxes, fontsize=9, va="bottom", ha="left",
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8, linewidth=0))
-    cbar = fig.colorbar(im, ax=axes[0].tolist(), fraction=0.025, pad=0.02)
+    cbar = fig.colorbar(im, cax=axes[0][-1].inset_axes(COLORBAR_BOX))
     cbar.set_label(label, fontsize=12)
 
     if save_path:
@@ -317,15 +328,7 @@ def plot_mesh_by_depth_cumulative(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> None:
-    """Show one subplot per depth level, each holding the whole quadtree as it
-    stood after that many refinement steps -- new splits stacked on the
-    previous panel's mesh, so the row reads as the tree building itself.
-
-    Each panel's cells come from `cumulative_frontier`, which reconstructs the
-    coarser ancestors the final leaf list no longer carries. Cells are colored
-    by depth, using the same colormap and normalization across all subplots so
-    colors stay comparable, as in `plot_mesh`.
-    """
+    """Show one subplot per depth level, each holding the quadtree as it stood after that many refinement steps."""
     depths = sorted(set(p.depth for p in mesh))
     n_depths = len(depths)
     min_d, max_d = depths[0], depths[-1]
@@ -338,10 +341,11 @@ def plot_mesh_by_depth_cumulative(
     # padding; a taller panel_height keeps neighboring panels clearly separated.
     panel_height = 6
     panel_width = panel_height * (W / H)
-    fig, axes = plt.subplots(1, n_depths, figsize=(n_depths * panel_width, panel_height), squeeze=False)
+    # Constrained layout: tight_layout cannot place a colorbar shared across axes
+    fig, axes = plt.subplots(1, n_depths, figsize=(n_depths * panel_width, panel_height), squeeze=False, layout="constrained")
     axes = axes[0]
 
-    cmap, norm, _ = color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
+    # cmap, norm, _ = color_map(np.array(depths), "plasma", dmin=min_d, dmax=max(max_d, min_d + 1), n_levels=max_d - min_d + 1)
 
     pc = None
     for ax_idx, depth in enumerate(depths):
@@ -351,17 +355,18 @@ def plot_mesh_by_depth_cumulative(
         frontier = cumulative_frontier(mesh, depth, H, W)
 
         rects = []
-        cell_depths = []
+        # cell_depths = []
         for bbox, cell_depth in frontier.items():
             r0, c0, r1, c1 = bbox
             height = r1 - r0
             width  = c1 - c0
             # imshow places pixel (0,0) centered at coordinate 0.5
             rects.append(patches.Rectangle((c0 - 0.5, r0 - 0.5), width, height))
-            cell_depths.append(cell_depth)
+            # cell_depths.append(cell_depth)
 
-        pc = PatchCollection(rects, cmap=cmap, norm=norm, linewidth=0.75, alpha=1)
-        pc.set_array(np.array(cell_depths))
+        # pc = PatchCollection(rects, cmap=cmap, norm=norm, linewidth=0.75, alpha=1)
+        # pc.set_array(np.array(cell_depths))
+        pc = PatchCollection(rects, edgecolor="black", linewidth=0.75, alpha=1)
         pc.set_facecolor("none")
         ax.add_collection(pc)
 
@@ -369,14 +374,12 @@ def plot_mesh_by_depth_cumulative(
         ax.set_xticks([])
         ax.set_yticks([])
 
-    if pc is not None:
-        cbar = fig.colorbar(pc, ax=axes.tolist(), fraction=0.02, pad=0.02)
-        cbar.set_label("Quadtree depth")
-        cbar.set_ticks(range(min_d, max_d + 1))
+    # if pc is not None:
+    #     cbar = fig.colorbar(pc, ax=axes.tolist(), fraction=0.02, pad=0.02)
+    #     cbar.set_label("Quadtree depth")
+    #     cbar.set_ticks(range(min_d, max_d + 1))
 
     fig.suptitle(title, fontsize=12)
-
-    plt.tight_layout()
 
     if save_path:
         save_plot(save_path, fig, use_date_subfolder=True)
@@ -447,34 +450,7 @@ def plot_reconstruction_by_depth_cumulative(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> Figure:
-    """Show what the mesh reconstructs the target as, per depth and per output order.
-
-    The value-side twin of `plot_mesh_by_depth_cumulative`: same cumulative
-    frontiers, but each panel is painted with the field of `project_cells` rather
-    than the underlying data with the cells outlined over it. Read across a row the
-    tree builds itself and the field it can carry sharpens; read down a column the
-    mesh is fixed and only the per-cell basis grows, which is the ``affine_output``
-    comparison. The leftmost column is the dense ground truth, the same in every
-    row, so both readings start from it.
-
-    Every panel shares the ground truth's color scale, and each is annotated with
-    its NMSE against the dense target -- ``nmse_loss``, the quantity the
-    transformer is trained on -- so the figure also reads as the reconstruction
-    floor of each (mesh, order) pair.
-
-    Args:
-        target: ``[H, W, C]`` dense ground truth (the solution field, not the
-            geometry input).
-        mesh: Leaf ``QuadNode`` s tiling the grid, from either mesh builder.
-        orders: The ``affine_output`` orders to give a row each.
-        channel: Which solution channel to display; the NMSE stays over all of them.
-        title: Figure suptitle.
-        show: Whether to ``plt.show()`` the figure.
-        save_path: Where to write it, under a date subfolder.
-
-    Returns:
-        The figure, so a caller can adjust it before saving.
-    """
+    """Show what the mesh reconstructs the target as, per depth and per output order."""
     # A copy, not a view: the target often arrives as a read-only slice of a
     # memory-mapped array, which torch.from_numpy below will not take.
     target = np.array(target, dtype=np.float64)
@@ -502,7 +478,7 @@ def plot_reconstruction_by_depth_cumulative(
     for row, order in enumerate(orders):
         ax = axes[row][0]
         im = ax.imshow(truth, cmap="RdBu_r", origin="upper", vmin=vmin, vmax=vmax)
-        ax.set_ylabel(f"affine_output = {order}\n({basis_size(order)} coeff/channel)", fontsize=11)
+        ax.set_ylabel(f"Order = {order}", fontsize=11)
         ax.set_xticks([])
         ax.set_yticks([])
         if row == 0:
@@ -528,9 +504,9 @@ def plot_reconstruction_by_depth_cumulative(
             if row == 0:
                 ax.set_title(f"Depth = {depth}\n({len(frontier)} cells)", fontsize=11)
 
-    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
-    cbar.set_label(SOLUTION_CHANNEL_LABELS[channel] if channel < len(SOLUTION_CHANNEL_LABELS)
-                   else f"Channel {channel}")
+    # cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
+    # cbar.set_label(SOLUTION_CHANNEL_LABELS[channel] if channel < len(SOLUTION_CHANNEL_LABELS)
+    #                else f"Channel {channel}")
 
     fig.suptitle(title, fontsize=13)
 
@@ -552,11 +528,7 @@ def plot_metric_heatmap(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> None:
-    """Show a heatmap of a chosen physics metric on the original grid.
-
-    'metric_name' must match one of the metrics produced by the RefinementCriteria
-    used for mesh construction (see `compute_enabled_metrics()` for valid names).
-    """
+    """Show a heatmap of a chosen physics metric on the original grid (see ''compute_enabled_metrics()'' for valid metric_name)."""
     # Determine domain shape
     if sample.ndim == 3:
         if sample.shape[0] < sample.shape[1]:
@@ -779,17 +751,17 @@ def plot_flow_comparison(
         raise ValueError(f"Shape mismatch: ground_truth={ground_truth.shape} prediction={prediction.shape}")
     
     output_channels = ground_truth.shape[-1]
-    names = channel_names or [f"channel {i}" for i in range(output_channels)]
+    names = channel_names or SOLUTION_CHANNEL_LABELS[:output_channels]
 
     # 3 cols per output channel: GT | Pred | |Error|
     n_cols = 3
     n_rows = output_channels
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * figsize_per_col, n_rows * figsize_per_col))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * figsize_per_col, n_rows * figsize_per_col), layout="constrained")
 
     if n_rows == 1:
         axes = axes[np.newaxis, :]
 
-    fig.suptitle(title, fontsize=13, y=1.01)
+    suptitle = fig.suptitle(title, fontsize=13)
 
     for r in range(output_channels):
         gt = ground_truth[..., r]
@@ -812,13 +784,160 @@ def plot_flow_comparison(
             ax.axis("off")
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    plt.tight_layout()
+    # Colorbar tick labels make the content lopsided, so centre the title over
+    # the drawn panels rather than the canvas; the tight crop then keeps it centred.
+    fig.draw_without_rendering()
+    content = Bbox.union([a.get_tightbbox() for a in fig.axes])
+    suptitle.set_x((content.x0 + content.x1) / 2 / fig.bbox.width)
 
     if save_path:
         save_plot(save_path, fig, use_date_subfolder=True)
 
     if show:
         plt.show()
+
+
+def plot_mesh_prediction_comparison(
+    ground_truth: np.ndarray,
+    predictions: Dict[str, np.ndarray],
+    meshes: Dict[str, Optional[List[QuadNode]]],
+    *,
+    label: str = "$C_p$",
+    title: Optional[str] = None,
+    figsize_per_col: float = 4.0,
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """The ground truth once, then the absolute error of every model with its mesh drawn on it (one shared color scale)."""
+    errors = {name: np.abs(prediction - ground_truth) for name, prediction in predictions.items()}
+    error_max = max(float(error.max()) for error in errors.values())
+
+    n_cols = len(predictions) + 1
+    # An empty column after the ground truth leaves room for its colorbar, which the layout does not reserve
+    fig, axes = plt.subplots(1, n_cols + 1, figsize=(n_cols * figsize_per_col, 2.2 * figsize_per_col), layout="constrained",
+                             width_ratios=[1, 0.01] + [1] * len(predictions))
+    # Gaps between the panels, so the error maps read as separate plots
+    fig.get_layout_engine().set(wspace=0.1)
+    axes[1].remove()
+    axes = [axes[0], *axes[2:]]
+    if title:
+        fig.suptitle(title, fontsize=13)
+
+    # origin="lower": on the wing grid the lower TE is at the bottom, the LE in the middle
+    im = axes[0].imshow(ground_truth, origin="lower", cmap="RdBu_r", interpolation="bilinear")
+    axes[0].set_title(f"Ground truth {label}", fontsize=13)
+    # Both colorbars sit in an inset beside their image, so they share its height and one width
+    cbar1 = fig.colorbar(im, cax=axes[0].inset_axes(COLORBAR_BOX))
+    cbar1.set_label(label=label, fontsize=13)
+
+    for ax, (name, error) in zip(axes[1:], errors.items()):
+        im = ax.imshow(error, origin="lower", cmap="Reds", vmin=0, vmax=error_max, interpolation="bilinear")
+        ax.set_title(f"{name} (MAE {error.mean():.2e})", fontsize=13)
+        if meshes.get(name):
+            draw_mesh(ax, meshes[name])
+    cbar2 = fig.colorbar(im, cax=axes[-1].inset_axes(COLORBAR_BOX))
+    cbar2.set_label(label=r"$|C_{p,\mathrm{pred}} - C_{p,\mathrm{true}}|$", fontsize=13)
+
+    for ax in axes:
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    if save_path:
+        save_plot(save_path, fig, dpi=200, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_next_timestep(
+    model,
+    args: Dict,
+    dataset,
+    mesh_source: Optional[tuple] = None,
+    *,
+    show_mesh: bool = True,
+    channel: int = 0,
+    title: Optional[str] = None,
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """2x3 grid of one test case at frames t, t + n and t + m: ground truth on top, prediction below."""
+
+    # The showcased case and frames are picked where u changes most visibly. All are test cases
+    # except cavity, whose test cases are all near-static; case 62 is from the validation split.
+    dataset_name = args["dataset"]
+    if dataset_name == "cavity_dataset":
+        case_id, t, n, m = 62, 1, 65, 135       # geo/case0013: the main vortex forms and deepens
+    elif dataset_name == "cylinder_dataset":
+        case_id, t, n, m = 146, 100, 200, 700   # prop/case0126: symmetric wake -> elongated wake -> shedding
+    elif dataset_name == "dam_dataset":
+        case_id, t, n, m = 216, 1, 8, 98        # prop/case0166: jet over the barrier and wake form, upstream flow slows
+    elif dataset_name == "tube_dataset":
+        case_id, t, n, m = 115, 1, 7, 49        # prop/case0090: inflow front -> crossing -> developed profile
+    else:
+        raise ValueError(f"No showcase example for dataset {dataset_name!r}")
+    frames = (t, t + n, t + m)
+    is_amr = isinstance(model, AMRTransformer)
+    if is_amr and mesh_source is None:
+        mesh_source = resolve_mesh_source(args)
+
+    # A case's rows are contiguous and ordered by pair start, one start every FRAME_STRIDE frames
+    case_rows = np.flatnonzero(dataset.case_ids() == case_id)
+    truths, predictions, meshes = [], [], []
+    for frame in frames:
+        start = frame - dataset.time_step
+        if start < 0 or start % dataset.FRAME_STRIDE or start // dataset.FRAME_STRIDE >= len(case_rows):
+            raise ValueError(f"Frame {frame} is not a target frame of case {case_id}")
+        sample = dataset[int(case_rows[start // dataset.FRAME_STRIDE])]
+
+        if is_amr:
+            refinement_criteria, scorer = mesh_source
+            result = predict_single_amr(model, sample, max_depth=args["max_depth"], min_depth=args["min_depth"],
+                                        refinement_criteria=refinement_criteria, scorer=scorer,
+                                        offset=args.get("offset", 0.0))
+        else:
+            result = predict_single_vit(model, sample)
+        result = predict_next_timestep(result, dataset)
+        truths.append(result["next_timestep_true"][..., channel])
+        predictions.append(result["next_timestep_pred"][..., channel])
+        meshes.append(result.get("mesh") if show_mesh else None)
+
+    H, W = truths[0].shape
+    vmin, vmax = min(float(f.min()) for f in truths), max(float(f.max()) for f in truths)
+
+    panel_height = 4
+    fig, axes = plt.subplots(2, 3, figsize=(3 * panel_height * W / H, 2 * panel_height)) # squeeze=False, layout="constrained"
+
+    for col in range(3):
+        for row, (label, field) in enumerate((("Ground Truth", truths[col]), ("Prediction", predictions[col]))):
+            ax = axes[row][col]
+            # The grids are stored y-up (the cavity lid is the last row), so row 0 goes at the bottom
+            ax.imshow(field, cmap="RdBu_r", origin="lower", vmin=vmin, vmax=vmax)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if col == 0:
+                ax.set_ylabel(label, fontsize=13)
+
+        mesh = meshes[col]
+        if mesh:
+            ax = axes[1][col]
+            rects = [patches.Rectangle((leaf.c0 - 0.5, leaf.r0 - 0.5), leaf.width, leaf.height) for leaf in mesh]
+            ax.add_collection(PatchCollection(rects, facecolor="none", edgecolor="black", linewidth=0.3, alpha=0.4))
+            ax.text(0.03, 0.03, f"{len(mesh)} tokens", transform=ax.transAxes, fontsize=9, va="bottom", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.75, linewidth=0))
+
+    # name = type(dataset).__name__.removesuffix("Dataset").lower()
+    # fig.suptitle(title or f"The evolution of the {name} flow in comparison to the ground truth", fontsize=13)
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
 
 
 def plot_channel_sections(
@@ -832,29 +951,7 @@ def plot_channel_sections(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> Figure:
-    """Plot one solution channel against the chordwise coordinate at selected
-    spanwise stations.
-
-    Column ``j`` of the grid is a spanwise station and row ``i`` walks once
-    around that section, so a single station traces a closed loop: the upper
-    and lower surface branches meet at the leading and trailing edge.
-
-    Args:
-        geometry:     Node coordinates ``[H, W, C]`` with ``(x, y, z)`` first;
-                      extra channels (e.g. the appended operating conditions)
-                      are ignored.
-        predictions:  Predicted fields ``[H, W, C]``, or a ``{model name: fields}``
-                      dict to overlay several models.
-        ground_truth: Optional target fields of the same shape, drawn as a
-                      dashed reference curve.
-        spanwise_position: Spanwise column indices to plot. Defaults to three
-                      stations at 25%, 50% and 75% of the span.
-        channel:      Channel index to plot, in the stored ``(cp, cf_tau, cf_z)``
-                      order. Labelled from `SOLUTION_CHANNEL_LABELS`.
-        title:        Figure title.
-        show:         Display the figure.
-        save_path:    Write the figure to this path (date subfolder).
-    """
+    """Plot one solution channel against the chordwise coordinate at selected spanwise stations (default 25/50/75 % span)."""
     named_predictions = {"Prediction": predictions} if isinstance(predictions, np.ndarray) else predictions
 
     # Datasets other than SuperWing carry their own channels, so fall back to
@@ -924,30 +1021,7 @@ def plot_coefficient_correlation(
     show: bool = True,
     save_path: Optional[str] = None,
 ) -> Figure:
-    """Scatter one integrated coefficient of every sample against its target.
-
-    A prediction can score well pointwise and still integrate to the wrong
-    force, so this plots the number the surrogate is actually used for: each
-    sample is one point, the target coefficient on the x axis and the predicted
-    one on the y axis. Points on the dashed diagonal integrate to the target
-    exactly; a model that lands consistently above or below it has a bias, one
-    that scatters around it has noise, and the two failure modes read apart at
-    a glance where a single mean error would not separate them.
-
-    Args:
-        reference:    Target coefficients ``[n_samples, 3]`` holding
-                      ``(CL, CD, CMz)`` per sample, as returned by
-                      ``evaluate_aero_coefficients`` (its ``coefficients_true``
-                      for the integrated ground truth, or ``coefficients_solver``
-                      for the solver's own values).
-        predictions:  Predicted coefficients ``[n_samples, 3]`` in the same row
-                      order, or a ``{model name: coefficients}`` dict to overlay
-                      several models.
-        coefficient:  Column to plot: 0 = CL, 1 = CD (default), 2 = CMz.
-        title:        Figure title.
-        show:         Display the figure.
-        save_path:    Write the figure to this path (date subfolder).
-    """
+    """Scatter one integrated coefficient (0 = CL, 1 = CD, 2 = CMz) of every sample against its target."""
     named_predictions = {"Prediction": predictions} if isinstance(predictions, np.ndarray) else predictions
 
     if not 0 <= coefficient < len(COEFFICIENT_LABELS):
@@ -1027,6 +1101,49 @@ def plot_token_statistics(
         plt.show()
 
 
+def plot_error_by_depth(
+    meshes: List[List[QuadNode]],
+    predictions: List[np.ndarray],
+    targets: List[np.ndarray],
+    *,
+    channel: int = 0,
+    title: str = "Token error by patch depth",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Box plot of each token's mean absolute error, grouped by its quadtree depth."""
+    # The channels are stored pre-scaled; divide the factor out to report the physical error
+    channel_scale = SOLUTION_CHANNEL_SCALES[channel] if channel < len(SOLUTION_CHANNEL_SCALES) else 1.0
+    channel_label = SOLUTION_CHANNEL_LABELS[channel] if channel < len(SOLUTION_CHANNEL_LABELS) else f"channel {channel}"
+
+    errors_by_depth: Dict[int, List[float]] = {}
+    for mesh, prediction, target in zip(meshes, predictions, targets):
+        error = np.abs(prediction[..., channel] - target[..., channel]) / channel_scale
+        for leaf in mesh:
+            token_error = error[leaf.r0:leaf.r1, leaf.c0:leaf.c1].mean()
+            errors_by_depth.setdefault(leaf.depth, []).append(token_error)
+
+    depths = sorted(errors_by_depth)
+    tick_labels = [f"depth {d}\n{len(errors_by_depth[d])} tokens" for d in depths]
+
+    fig, ax = plt.subplots(figsize=(1.5 * len(depths) + 3, 4.5))
+    ax.boxplot([errors_by_depth[d] for d in depths], showfliers=False)
+    ax.set_xticks(range(1, len(depths) + 1), tick_labels)
+    ax.set_xlabel("Quadtree depth (deeper = smaller patch)")
+    ax.set_ylabel(f"Token MAE of {channel_label}")
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.set_title(f"{title}  ({len(meshes)} samples)", fontsize=12)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
 def plot_3d_prediction(
     geom: np.ndarray,
     prediction: np.ndarray,
@@ -1066,6 +1183,278 @@ def plot_3d_prediction(
 
 
 # ---------------------------------------------------------------------------
+# Ablation Visualization
+# ---------------------------------------------------------------------------
+def plot_perturbation_error(
+    amplitudes: Sequence[float],
+    errors: Sequence[float],
+    reference_error: float,
+    *,
+    reference_label: str = "Unperturbed",
+    ylabel: str = "Relative $L_2$ error of surface fields (%)",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Plot the test error of each perturbed run against its amplitude, with the unperturbed run as a reference line."""
+    order = np.argsort(amplitudes)
+    a = np.asarray(amplitudes, dtype=float)[order]
+    error = 100 * np.asarray(errors, dtype=float)[order]
+    reference = 100 * reference_error
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.axhline(reference, color="black", linestyle="--", linewidth=1.2)
+    ax.annotate(f"{reference_label} ({reference:.2f} %)", (a[-1], reference), xytext=(0, -4),
+                textcoords="offset points", fontsize=13, color="black", va="top", ha="right")
+    ax.plot(a, error, color="tab:blue", linewidth=2, marker="o", markersize=7)
+
+    ax.set_xlabel("Perturbation amplitude", fontsize=13)
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_perturbation_robustness(
+    errors: Dict[float, Dict[float, float]],
+    *,
+    ylabel: str = "Relative $L_2$ error (%)",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Plot the test error against the amplitude of the test-time mesh perturbation, one line per training amplitude."""
+    colors = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+
+    for i, (train_amplitude, by_test) in enumerate(sorted(errors.items())):
+        test = sorted(by_test)
+        ax.plot(test, [100 * by_test[a] for a in test], color=colors(i), linewidth=2, marker="o", markersize=7,
+                label=f"$a = {train_amplitude:g}$")
+
+    ax.set_xlabel("Test perturbation amplitude", fontsize=13)
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=13)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_error_vs_cost(
+    curves: Dict[str, Tuple[Sequence[float], Sequence[float], Sequence[float]]],
+    *,
+    xlabel: str = "Number of tokens",
+    ylabel: str = "Relative error (%)",
+    xticks: Optional[Sequence[float]] = None,
+    reference: Optional[Tuple[float, float, str]] = None,
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Plot the test error of every model against its cost, one line per model."""
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    handles = []
+    for i, (model, (cost, error, cost_std)) in enumerate(curves.items()):
+        bars = ax.errorbar(cost, 100 * np.asarray(error), xerr=cost_std, fmt="o-", linewidth=2, markersize=7,
+                           capsize=3, label=model)
+        # The legend shows only the line and its dots, not the error bars
+        handles.append(bars.lines[0])
+
+    # if reference is not None:
+    #     ref_cost, ref_error, ref_label = reference
+    #     ref_error = 100 * ref_error
+    #     ax.axhline(ref_error, color="black", linestyle="--", linewidth=1.2)
+    #     ax.plot(ref_cost, ref_error, "o", color="black", markersize=7, zorder=3)
+    #     x_max = max(max(cost) for cost, _, _ in curves.values())
+    #     ax.annotate(f"{ref_label} ({ref_error:.2f} %)", (x_max, ref_error), xytext=(0, -4),
+    #                 textcoords="offset points", fontsize=9, color="black", va="top", ha="right")
+
+    ax.set_xscale("log")
+    if xticks is not None:
+        ax.set_xticks(xticks, [str(t) for t in xticks])
+        ax.minorticks_off()
+    ax.set_xlabel(xlabel, fontsize=13)
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.grid(True, alpha=0.3)
+    ax.legend(handles, list(curves), fontsize=13)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_cell_shape_floors(
+    floors: Dict[str, Tuple[Sequence[int], Sequence[float]]],
+    *,
+    ylabel: str = "Reconstruction floor (NMSE)",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Plot the reconstruction floor of the uniform mesh against its token count, one line per cell shape."""
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for i, (shape, (tokens, floor)) in enumerate(floors.items()):
+        ax.plot(tokens, floor, color=f"C{i}", linewidth=2, marker="o", markersize=7, label=shape)
+
+    all_tokens = sorted({n for tokens, _ in floors.values() for n in tokens})
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(all_tokens, [str(n) for n in all_tokens])
+    ax.set_yscale("log")
+    ax.set_xlabel("Number of tokens", fontsize=13)
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(fontsize=12, title="Cell shape", title_fontsize=12)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_polynomial_order_error(
+    errors: Dict[Tuple[int, int], Dict[int, float]],
+    *,
+    ylabel: str = "Relative $L_2$ error of surface fields (%)",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Plot the test error against the token count for every input and output order."""
+    colors = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+
+    for (input_order, output_order), by_tokens in sorted(errors.items()):
+        tokens = sorted(by_tokens)
+        color = colors(output_order)
+        ax.plot(tokens, [100 * by_tokens[n] for n in tokens], color=color, linestyle="-" if input_order else "--",
+                linewidth=2, marker="o", markersize=6, markerfacecolor=color if input_order else "white",
+                label=f"{input_order}-{output_order}")
+
+    all_tokens = sorted({n for by_tokens in errors.values() for n in by_tokens})
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(all_tokens, [str(n) for n in all_tokens])
+    ax.minorticks_off()
+    ax.set_xlabel("Number of tokens", fontsize=13)
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.grid(True, alpha=0.3)
+    # Sorted entries fill the columns in turn, so each column holds one input order
+    ax.legend(fontsize=11, ncol=2, title="Token order", title_fontsize=11)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_polynomial_floor(
+    floors: Dict[int, float],
+    errors: Dict[Tuple[int, int], float],
+    *,
+    ylabel: str = "Relative $L_2$ error of surface fields (%)",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Bar the test error of every input order against the reconstruction floor, per output order."""
+    colors = plt.get_cmap("tab10")
+    output_orders = sorted(floors)
+    input_orders = sorted({input_order for input_order, _ in errors})
+    width = 0.8 / len(input_orders)
+    basis_names = {0: "constant", 1: "affine", 2: "quadratic"}
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for x, output_order in enumerate(output_orders):
+        for j, input_order in enumerate(input_orders):
+            error = 100 * errors[(input_order, output_order)]
+            position = x + (j - (len(input_orders) - 1) / 2) * width
+            ax.bar(position, error, width, color=colors(input_order))
+            ax.text(position, error, f"{error:.1f}", ha="center", va="bottom", fontsize=8)
+
+        floor = 100 * floors[output_order]
+        ax.hlines(floor, x - 0.45, x + 0.45, color="black", linewidth=2)
+        ax.text(x + 0.45, floor, f"{floor:.1f}", ha="left", va="center", fontsize=8)
+
+    handles = [patches.Patch(color=colors(input_order), label=f"Input order {input_order}") for input_order in input_orders]
+    handles.append(Line2D([], [], color="black", linewidth=2, label="Reconstruction floor"))
+    ax.set_xticks(range(len(output_orders)), [f"{o} ({basis_names.get(o, o)})" for o in output_orders])
+    ax.set_xlabel("Output order", fontsize=13)
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.legend(handles=handles, fontsize=12)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_model_floor(
+    errors: Dict[str, Sequence[float]],
+    floors: Dict[str, Sequence[float]],
+    *,
+    channel_labels: Sequence[str] = SOLUTION_CHANNEL_LABELS,
+    ylabel: str = "Relative $L_2$ error (%)",
+    show: bool = True,
+    save_path: Optional[str] = None,
+) -> Figure:
+    """Bar the test error of every surface field of every model against its reconstruction floor."""
+    width = 0.8 / len(channel_labels)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for x, model in enumerate(errors):
+        for c in range(len(channel_labels)):
+            error, floor = 100 * errors[model][c], 100 * floors[model][c]
+            position = x + (c - (len(channel_labels) - 1) / 2) * width
+            ax.bar(position, error, width, color=f"C{c}")
+            ax.text(position, error, f"{error:.1f}", ha="center", va="bottom", fontsize=8)
+            ax.hlines(floor, position - width / 2, position + width / 2, color="black", linewidth=2)
+            ax.text(position, floor, f"{floor:.1f}", ha="center", va="bottom", fontsize=8, color="white")
+
+    handles = [patches.Patch(color=f"C{c}", label=label) for c, label in enumerate(channel_labels)]
+    handles.append(Line2D([], [], color="black", linewidth=2, label="Reconstruction floor"))
+    ax.set_xticks(range(len(errors)), list(errors))
+    ax.set_ylabel(ylabel, fontsize=13)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.legend(handles=handles, fontsize=11)
+    plt.tight_layout()
+
+    if save_path:
+        save_plot(save_path, fig, use_date_subfolder=True)
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def save_plot(save_path: str | Path, figure: Figure, dpi: int = 150, use_date_subfolder: bool = False) -> None:
@@ -1100,6 +1489,14 @@ def channel_image(data: np.ndarray, channel_idx: int = 0) -> np.ndarray:
             return data[:, :, channel_idx].astype(float)
 
     raise ValueError(f"Unsupported data shape {data.shape}")
+
+
+def draw_mesh(ax, mesh: List[QuadNode]) -> None:
+    """Outline the mesh cells on an imshow axis and label the panel with its token count."""
+    rects = [patches.Rectangle((n.c0 - 0.5, n.r0 - 0.5), n.width, n.height) for n in mesh]
+    ax.add_collection(PatchCollection(rects, facecolor="none", edgecolor="black", linewidth=0.3, alpha=0.6))
+    ax.text(0.04, 0.02, f"{len(mesh)} tokens", transform=ax.transAxes, fontsize=9, va="bottom", ha="left",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8, linewidth=0))
 
 
 def sum_image(data: np.ndarray) -> np.ndarray:
